@@ -370,6 +370,18 @@ class _FakeIndices:
         body = {index: {"aliases": dict(self.store[index].get("aliases") or {})}}
         return ObjectApiResponse(body=body, meta=None)
 
+    def get_mapping(self, index: str, **_: Any) -> Any:
+        from elastic_transport import ObjectApiResponse
+
+        mappings = dict(self.store[index].get("mappings") or {})
+        return ObjectApiResponse(body={index: {"mappings": mappings}}, meta=None)
+
+    def put_mapping(self, index: str, meta: dict[str, Any] | None = None, **_: Any) -> dict:
+        # index.blocks.write blocks data writes, not mapping metadata.
+        if meta is not None:
+            self.store[index].setdefault("mappings", {})["_meta"] = dict(meta)
+        return {"acknowledged": True}
+
     def update_aliases(self, actions: list[dict[str, Any]], **_: Any) -> dict:
         for action in actions:
             add = dict(action["add"])

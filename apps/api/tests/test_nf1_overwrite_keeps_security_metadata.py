@@ -198,7 +198,14 @@ class _ScriptedCursor:
     """A Snowflake cursor that answers the governance reads from a script."""
 
     def __init__(self, governance: dict[str, dict[str, list[dict[str, Any]]]], *, refuse: set[str] = frozenset(),
-                 kind: str = "TABLE"):
+                 kind: str = "TABLE", counts: dict[str, int] | None = None, owns: bool = True,
+                 qstatus: Any = "FAILED_WITH_ERROR", lost_reply: bool = False):
+        self.counts = counts or {}
+        self.qstatus = qstatus  # what get_query_status answers (an exception: unreadable)
+        self.lost_reply = lost_reply  # a refused statement leaves no query id of its own
+        self.sfqid: str | None = None
+        self.status_asked: list[str] = []
+        self.owns = owns
         self.governance = governance
         self.refuse = refuse
         self.kind = kind
@@ -215,7 +222,10 @@ class _ScriptedCursor:
         self.executed.append(sql)
         for word in self.refuse:
             if word in sql:
+                if not self.lost_reply:
+                    self.sfqid = f"q{len(self.executed)}"
                 raise RuntimeError(f"SQL access control error: {word}")
+        self.sfqid = f"q{len(self.executed)}"
         target = "BAK" if "__DF_BAK" in (sql + str(params)) else "LIVE"
         gov = self.governance[target]
         if sql.startswith("SHOW GRANTS"):
@@ -226,8 +236,12 @@ class _ScriptedCursor:
             self._answer(gov.get("column_tags", []))
         elif "TAG_REFERENCES(" in sql:
             self._answer(gov.get("table_tags", []))
+        elif sql.startswith("SELECT COUNT(*)"):
+            self.description, self._rows = [("N",)], [(self.counts.get(target, 0),)]
         elif sql.startswith("SHOW TABLES LIKE"):
-            self._answer([{"name": "T", "kind": self.kind}])
+            self._answer([{"name": "T", "kind": self.kind, "owner": "OWNER_ROLE"}])
+        elif sql.startswith("SELECT IS_ROLE_IN_SESSION"):
+            self.description, self._rows = [("R",)], [(self.owns,)]
         else:
             self.description, self._rows = None, []
 
@@ -295,6 +309,12 @@ def _scripted(cur: _ScriptedCursor, monkeypatch, *, live_exists: bool = True, ba
     class _Conn:
         def cursor(self) -> Any:
             return cur
+
+        def get_query_status(self, qid: str) -> Any:
+            cur.status_asked.append(qid)
+            if isinstance(cur.qstatus, BaseException):
+                raise cur.qstatus
+            return SimpleNamespace(name=cur.qstatus)
 
         def close(self) -> None:
             pass
@@ -859,3 +879,367 @@ def test_governance_error_names_the_loss_and_the_remedy():
     exc = GovernanceNotPreserved("p.d.t", ["unreadable row access policies"])
     assert "unreadable row access policies" in str(exc)
     assert "Approve the disclosed loss at Validate" in str(exc)
+
+
+# ------------------------------------------------- review 2: schema folding (N3)
+
+
+@pytest.mark.parametrize(
+    ("schema", "table", "expected_schema", "stored"),
+    [
+        ("public", "T", '"PUBLIC"', "T"),
+        ("PUBLIC", "T", '"PUBLIC"', "T"),
+        ("MySchema", "Orders", '"MySchema"', "Orders"),
+        ("public", "other.T", '"OTHER"', "T"),
+    ],
+)
+def test_snowflake_kind_reads_the_folded_schema(schema, table, expected_schema, stored):
+    """A lower-case config schema used to be quoted raw (IN SCHEMA "public"), so a
+    transient table in "PUBLIC" read as permanent and its CLONE failed."""
+
+    class _Cur:
+        def __init__(self) -> None:
+            self.sql = ""
+            self.description = [("name",), ("kind",)]
+
+        def execute(self, sql: str, *_: Any) -> None:
+            self.sql = sql
+
+        def fetchall(self) -> list[tuple]:
+            return [(stored, "TRANSIENT")]
+
+    cur = _Cur()
+    assert _Snowflake._kind(cur, schema, table) == "transient"
+    assert cur.sql.endswith(f"IN SCHEMA {expected_schema}")
+    assert f"LIKE '{stored}'" in cur.sql
+
+
+
+# ------------------------------------------ review 2: failed TRUNCATE (N5)
+
+
+def test_snowflake_failed_truncate_that_emptied_the_table_keeps_the_clone(monkeypatch):
+    """A TRUNCATE that errors may still have run: the clone is the only copy then."""
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, refuse={"TRUNCATE"}, counts={"LIVE": 0, "BAK": 3},
+                          qstatus="SUCCESS")
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError) as info:
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    assert not any(s.startswith("DROP") for s in cur.executed)
+    assert 'ALTER TABLE "PUBLIC"."T" SWAP WITH "PUBLIC"."T__DF_BAK"' in str(info.value)
+
+
+@pytest.mark.parametrize("status", ["FAILED_WITH_ERROR", "FAILED_WITH_INCIDENT", "ABORTED"])
+def test_snowflake_truncate_confirmed_failed_drops_the_clone(monkeypatch, status):
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, refuse={"TRUNCATE"}, counts={"LIVE": 3, "BAK": 3},
+                          qstatus=status)
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError, match="TRUNCATE"):
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    truncate_qid = f"q{next(i for i, s in enumerate(cur.executed, 1) if s.startswith('TRUNCATE'))}"
+    assert cur.status_asked == [truncate_qid], "the TRUNCATE's own query id is asked"
+    assert _changes(cur)[-1] == 'DROP TABLE IF EXISTS "PUBLIC"."T__DF_BAK"'
+
+
+@pytest.mark.parametrize(("status", "lost_reply"), [
+    ("RUNNING", False),          # still running: commits after the counts are read
+    ("QUEUED", False),
+    ("RESUMING_WAREHOUSE", False),
+    ("SUCCESS", False),
+    ("NO_DATA", False),
+    (RuntimeError("status endpoint unreachable"), False),
+    ("FAILED_WITH_ERROR", True),  # lost reply: the cursor's id is the previous statement's
+])
+def test_snowflake_failed_truncate_not_confirmed_failed_keeps_both(monkeypatch, status, lost_reply):
+    """Review 3: equal row counts dropped the clone while the TRUNCATE could
+    still commit — live empty, clone gone. Only a FAILED status drops it."""
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, refuse={"TRUNCATE"}, counts={"LIVE": 3, "BAK": 3},
+                          qstatus=status, lost_reply=lost_reply)
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError) as info:
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    assert not any(s.startswith("DROP") for s in cur.executed)
+    assert 'ALTER TABLE "PUBLIC"."T" SWAP WITH "PUBLIC"."T__DF_BAK"' in str(info.value)
+    if lost_reply:
+        assert cur.status_asked == [], "a stale query id is never asked about"
+
+
+
+# ------------------------------------- review 2: SWAP needs ownership (N2)
+
+
+def test_snowflake_governed_table_not_owned_is_refused_before_any_change(monkeypatch):
+    """A failed run of a governed table is restored by SWAP (OWNERSHIP needed);
+    without it the run could never be undone, approval or not."""
+    cur = _ScriptedCursor({"LIVE": {"policies": [_MASK]}, "BAK": {}}, owns=False)
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError, match="owned by OWNER_ROLE"):
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC", governance_loss_approved=True)
+
+    assert _changes(cur) == []
+
+
+def test_snowflake_unreadable_policies_not_owned_is_refused_even_with_approval(monkeypatch):
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, refuse={"POLICY_REFERENCES"}, owns=False)
+    _scripted(cur, monkeypatch)
+
+    with pytest.raises(TableDropError, match="needs OWNERSHIP"):
+        retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC", governance_loss_approved=True)
+
+    assert _changes(cur) == []
+
+
+def test_snowflake_ungoverned_table_not_owned_still_overwrites(monkeypatch):
+    """No masking / row access policy: the restore is INSERT OVERWRITE, no SWAP."""
+    cur = _ScriptedCursor({"LIVE": {}, "BAK": {}}, owns=False)
+    _scripted(cur, monkeypatch)
+
+    retire_set_aside("snowflake", _SF_CFG, "T", "PUBLIC")
+
+    assert _changes(cur)[-1] == 'TRUNCATE TABLE "PUBLIC"."T"'
+
+
+def test_gate_blocks_an_unrestorable_snowflake_overwrite_even_when_approved():
+    probe = lambda c, t: {"ran": True, "governed": True, "unreadable": [],  # noqa: E731
+                          "unrestorable": "a failed run could not be restored (... OWNERSHIP ...)"}
+    for acknowledged in (False, True):
+        gate = _gate("snowflake", probe=probe, acknowledged=acknowledged)
+        assert gate["status"] == "block" and "OWNERSHIP" in gate["message"]
+
+
+
+# ------------------------------- review 2: alias definitions survive (N4)
+
+
+def test_elasticsearch_alias_definitions_are_kept_in_the_backup_meta(es):
+    client, store = es
+    backup = retire_set_aside("elasticsearch", {}, "orders")
+
+    recorded = store[backup]["mappings"]["_meta"]["dataflow_overwrite"]["aliases"]
+    assert {a["add"]["alias"] for a in recorded} == {"orders_eu", "orders_read"}
+    assert "_meta" not in store["orders"].get("mappings", {})
+
+
+def test_elasticsearch_failed_restore_after_delete_is_finished_by_the_next_run(es, monkeypatch):
+    """The restore deleted the live index and then failed: the aliases used to be
+    lost (memory only) and the next run discarded the backup on success."""
+    client, store = es
+    backup = retire_set_aside("elasticsearch", {}, "orders")
+    store["orders"]["docs"] = [9]
+    real_clone = client.indices.clone
+
+    def _down(**_: Any) -> dict:
+        raise RuntimeError("cluster unavailable")
+
+    monkeypatch.setattr(client.indices, "clone", _down)
+    with pytest.raises(TableDropError) as info:
+        restore_set_aside("elasticsearch", {}, "orders", backup)
+    assert "orders" not in store and backup in store
+    text = str(info.value)
+    assert "orders_eu" in text and "orders_read" in text and "_meta.dataflow_overwrite" in text
+    assert "term" not in text and "EU" not in text, "alias filters (data values) stay out of the job error"
+    assert text.index("delete orders if it exists") < text.index(f"clone {backup} to orders")
+
+    monkeypatch.setattr(client.indices, "clone", real_clone)
+    again = retire_set_aside("elasticsearch", {}, "orders")  # the next run
+
+    assert store["orders"]["docs"] == []  # emptied for this run, in place
+    assert store[again]["docs"] == [1, 2, 3]  # the pre-run documents are its backup
+    assert store["orders"]["aliases"]["orders_eu"] == {"filter": {"term": {"region": "EU"}}}
+    assert set(store["orders"]["aliases"]) == {"orders_eu", "orders_read"}
+    assert "dataflow_overwrite" not in (store["orders"].get("mappings") or {}).get("_meta", {})
+
+
+
+# --------------------------- review 2: the recovery reaches the job (N1)
+
+
+def test_failed_snowflake_restore_puts_the_exact_recovery_on_the_job(snowflake, tmp_path, monkeypatch):
+    """The SWAP / DROP text used to stay in the API log; the job said only 'failed'."""
+    import connectors.overwrite_set_aside as osa
+    import services.sync_cursor as sc
+    import src.transfer.engine as engine_mod
+    from tests.test_currency_to_sqlite import _FakeMongo
+    from tests.test_overwrite_all_quarantined_keeps_set_aside_destination import _run, _sf_destination
+
+    cfg, table = snowflake
+    _seed(table)
+    mongo = _FakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: mongo)
+    monkeypatch.setattr(sc, "STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr(sc, "_mongo_cursors", lambda: None)
+
+    def _swap_refused(self, cfg, table_name, backup, schema):
+        live_ref, bak_ref = f'"PUBLIC"."{table_name}"', f'"PUBLIC"."{backup}"'
+        raise TableDropError(table_name, f"Insufficient privileges. {osa._sf_recovery(live_ref, bak_ref)}")
+
+    monkeypatch.setattr(osa._Snowflake, "restore", _swap_refused)
+    result = _run(mongo, tmp_path, _sf_destination(table), valid=False)
+
+    assert result.success is False
+    assert "SWAP WITH" in str(result.error) and "could not be put back automatically" in str(result.error)
+    job = mongo.get_job(result.job_id)
+    assert "SWAP WITH" in str(job.get("error"))
+    outcome = (job.get("error_details") or {}).get("overwrite_restore") or {}
+    assert outcome.get("status") == "restore_failed" and outcome.get("engine") == "snowflake"
+
+
+def test_next_run_refusal_says_which_object_is_which_and_what_to_run(snowflake):
+    cfg, table = snowflake
+    _seed(table)
+    _sf(f'CREATE TABLE "{table}__DF_BAK" ("ID" INTEGER)')
+
+    with pytest.raises(TableDropError) as info:
+        retire_set_aside("snowflake", cfg, table, "PUBLIC")
+
+    text = str(info.value)
+    assert f'is a clone of "PUBLIC"."{table}" taken before an earlier overwrite' in text
+    assert f'ALTER TABLE "PUBLIC"."{table}" SWAP WITH "PUBLIC"."{table}__DF_BAK"' in text
+
+
+# ------------------------------------- review 3: the real probe's unrestorable result
+
+
+@pytest.mark.parametrize("acknowledged", [False, True])
+def test_real_snowflake_probe_unrestorable_blocks_the_gate(monkeypatch, acknowledged):
+    """The gate tests stubbed the probe: here probe_snowflake_governance itself
+    reads a governed table the connector's role does not own, and the gate it
+    feeds blocks — approval or not — before any change."""
+    from services.overwrite_governance_gate import build_overwrite_governance_gate
+
+    cur = _ScriptedCursor({"LIVE": {"grants": [_GRANT], "policies": [_MASK]}, "BAK": {}}, owns=False)
+    _scripted(cur, monkeypatch)
+
+    gate = build_overwrite_governance_gate(
+        sync_mode="full_refresh_overwrite", db_type="snowflake", table_exists=True,
+        destination_config=dict(_SF_CFG), destination_table="T", acknowledged=acknowledged,
+    )
+
+    assert gate["details"]["measurement"]["ran"] is True
+    assert "OWNERSHIP" in gate["details"]["measurement"]["unrestorable"]
+    assert gate["status"] == "block", gate
+    assert gate["details"]["requires_approval"] is False  # approval cannot clear it
+    assert any("IS_ROLE_IN_SESSION" in s for s in cur.executed), "the probe really asked"
+    assert not any(s.startswith(("CREATE", "TRUNCATE", "ALTER", "DROP")) for s in cur.executed)
+
+
+# ------------------------------- review 3: every table's restore outcome reaches the job
+
+
+def test_multi_table_failed_restore_of_an_earlier_table_reaches_the_job(tmp_path, monkeypatch):
+    """A parked table's restore ran on a dataclasses.replace copy of the endpoint:
+    its recovery text was recorded there and lost. Here PEOPLE (landed, parked)
+    cannot be put back when ORDERS fails; the job must say how to recover it."""
+    pytest.importorskip("fakesnow")
+    import connectors.overwrite_set_aside as osa
+    import src.transfer.engine as engine_mod
+    import services.sync_cursor as sc
+    from tests.test_currency_to_sqlite import _FakeMongo
+    from tests.test_overwrite_all_quarantined_keeps_set_aside_destination import _multi_stream_run
+
+    monkeypatch.setenv("FAKESNOW_DB_PATH", str(tmp_path / "fakesnow"))
+    mongo = _FakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: mongo)
+    monkeypatch.setattr(sc, "STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr(sc, "_mongo_cursors", lambda: None)
+    assert _multi_stream_run(mongo, tmp_path, orders_valid=True).success is True
+
+    real_restore = osa._Snowflake.restore
+
+    def _people_refused(self, cfg, table_name, backup, schema):
+        if table_name.upper() == "PEOPLE":
+            live_ref, bak_ref = f'"PUBLIC"."{table_name}"', f'"PUBLIC"."{backup}"'
+            raise TableDropError(table_name, f"Insufficient privileges. {osa._sf_recovery(live_ref, bak_ref)}")
+        return real_restore(self, cfg, table_name, backup, schema)
+
+    monkeypatch.setattr(osa._Snowflake, "restore", _people_refused)
+    result = _multi_stream_run(mongo, tmp_path, orders_valid=False)
+
+    assert result.success is False
+    job = mongo.get_job(result.job_id)
+    assert 'SWAP WITH "PUBLIC"."PEOPLE__DF_BAK"' in str(job.get("error")), job.get("error")
+    # Review 4: the restore's recovery is added to the multi-table undo's note,
+    # never in its place.
+    assert "Every table this failed run reached was undone" in str(job.get("error")), job.get("error")
+    outcome = (job.get("error_details") or {}).get("overwrite_restore") or {}
+    assert outcome.get("status") == "restore_failed"
+    assert "PEOPLE" in str(outcome.get("table")).upper()
+
+
+def test_successful_run_whose_backup_cannot_be_dropped_warns_on_the_job(snowflake, tmp_path, monkeypatch):
+    """The success-path discard failure was only logged: the next overwrite is
+    then refused for a backup nobody was told about."""
+    import connectors.overwrite_set_aside as osa
+    import services.sync_cursor as sc
+    import src.transfer.engine as engine_mod
+    from tests.test_currency_to_sqlite import _FakeMongo
+    from tests.test_overwrite_all_quarantined_keeps_set_aside_destination import _run, _sf_destination
+
+    cfg, table = snowflake
+    _seed(table)
+    mongo = _FakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: mongo)
+    monkeypatch.setattr(sc, "STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr(sc, "_mongo_cursors", lambda: None)
+
+    def _drop_refused(self, cfg, table_name, backup, schema):
+        raise RuntimeError("Insufficient privileges to operate on table")
+
+    monkeypatch.setattr(osa._Snowflake, "discard", _drop_refused)
+    result = _run(mongo, tmp_path, _sf_destination(table), valid=True)
+
+    assert result.success is True, result.error
+    job = mongo.get_job(result.job_id)
+    warnings = job.get("post_commit_warnings") or []
+    assert any(w.get("step") == "overwrite_backup_discard" and f"{table}__DF_BAK" in w.get("error", "")
+               for w in warnings), job
+
+
+# ------------------------- review 3: Elasticsearch recovery text says only what is known
+
+
+def test_elasticsearch_next_run_refusal_hedges_and_says_what_is_known(es):
+    """Two cases where 'orders holds that run's load; to keep it delete the backup'
+    deletes the only copy: a restore that cloned and then failed, and an index an
+    application write auto-created. The text now states the counts and the _meta
+    record, and says to compare before deleting anything."""
+    client, store = es
+    backup = retire_set_aside("elasticsearch", {}, "orders")
+    store["orders"]["docs"] = [7]  # e.g. auto-created by an application write
+
+    with pytest.raises(TableDropError) as info:
+        retire_set_aside("elasticsearch", {}, "orders")
+
+    text = str(info.value)
+    assert "holds that run's load" not in text
+    assert "not certain" in text and "Compare document counts first" in text
+    assert f"do not delete {backup} before you have" in text
+    assert f"{backup} holds 3 document(s) now" in text and "orders holds 1 document(s) now" in text
+    assert "records the aliases orders_eu, orders_read" in text
+    assert text.index("delete orders if it exists") < text.index(f"clone {backup} to orders")
+    assert store[backup]["docs"] == [1, 2, 3] and store["orders"]["docs"] == [7]
+
+
+def test_elasticsearch_restore_error_names_at_most_twenty_aliases(es, monkeypatch):
+    client, store = es
+    store["orders"]["aliases"] = {f"a{i:02d}": {"filter": {"term": {"ssn": f"secret-{i}"}}} for i in range(50)}
+    backup = retire_set_aside("elasticsearch", {}, "orders")
+
+    def _down(**_: Any) -> dict:
+        raise RuntimeError("cluster unavailable " + "x" * 5000)
+
+    monkeypatch.setattr(client.indices, "clone", _down)
+    with pytest.raises(TableDropError) as info:
+        restore_set_aside("elasticsearch", {}, "orders", backup)
+
+    text = str(info.value)
+    assert "a00" in text and "a19" in text and "a20" not in text and "and 30 more" in text
+    assert "secret-" not in text
+    assert len(text) < 2000

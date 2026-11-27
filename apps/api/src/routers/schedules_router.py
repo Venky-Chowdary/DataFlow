@@ -1487,16 +1487,44 @@ async def plan_schedule_mappings(
         raise HTTPException(
             status_code=422, detail={"message": str(exc), "blockers": exc.blockers[:8]},
         ) from exc
+    # The same checks and record as a PATCH of these fields (QA review Q5); the
+    # plan does not change whether the schedule is enabled.
+    merged = {**sched.to_dict(), **planned}
+    await asyncio.to_thread(_assert_upsert_key, merged)
+    from services.reversibility_schedule import schedule_reversibility_block
+
+    reversible = schedule_reversibility_block(merged)
+    if reversible:
+        raise HTTPException(status_code=422, detail=reversible)
     try:
-        updated = update_schedule(
-            schedule_id, {**planned, "enabled": True}, refuse_unrunnable_mappings=True,
-        )
+        updated = update_schedule(schedule_id, planned, refuse_unrunnable_mappings=True)
     except ApiError:
         raise
+    except PermissionError as exc:  # as PATCH: a refused write is 403, not 500
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="Schedule not found")
+    record_security_event(
+        "schedule.definition.update",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{updated.id}",
+        status=200,
+        details={
+            "id": updated.id,
+            "source_connector_id": updated.source_connector_id,
+            "source_table": updated.source_table,
+            "dest_connector_id": updated.dest_connector_id,
+            "dest_table": updated.dest_table,
+            "sync_mode": updated.sync_mode,
+            "enabled": bool(updated.enabled),
+            "dest_schema": updated.dest_schema,
+            "dest_database": updated.dest_database,
+            "via": "plan-mappings",
+        },
+    )
     return ScheduleResponse.from_schedule(updated)
 
 

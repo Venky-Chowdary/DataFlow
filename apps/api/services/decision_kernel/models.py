@@ -258,6 +258,10 @@ _MAPPING_SCORE_KEYS = frozenset({
     "alternatives",
 })
 _KEY_FLAG_ALIASES = ("is_primary_key", "primary_key", "identity", "is_identity")
+#: How the code grades a conversion, not what the operator planned: a new
+#: release that reclassifies an unchanged pair must not refuse the stamp
+#: (review Q1). ``risk_contract_id`` stays — the operator minted it.
+_CLASSIFICATION_KEYS = frozenset({"reason", "risk_level", "recommended_action"})
 
 
 def _digest(body: Any) -> str:
@@ -286,8 +290,7 @@ def _historical_body(payload: Mapping[str, Any]) -> dict[str, Any]:
     return body
 
 
-def compute_content_hash(payload: Mapping[str, Any]) -> str:
-    """The structural decision hash (envelope and per-mapping scores excluded)."""
+def _structural_body(payload: Mapping[str, Any], *, classification: bool) -> dict[str, Any]:
     body = {k: v for k, v in payload.items() if k not in _ENVELOPE_KEYS}
     rows = body.get("mappings")
     if isinstance(rows, (list, tuple)):
@@ -300,11 +303,33 @@ def compute_content_hash(payload: Mapping[str, Any]) -> str:
                 str(k): v for k, v in row.items()
                 if str(k) not in _MAPPING_SCORE_KEYS and str(k) not in _KEY_FLAG_ALIASES
             }
+            conversion = kept.get("conversion")
+            if not classification and isinstance(conversion, Mapping):
+                kept["conversion"] = {
+                    k: v for k, v in conversion.items() if k not in _CLASSIFICATION_KEYS
+                }
             if _row_is_key(row):
                 kept["is_primary_key"] = True
             stripped.append(kept)
         body["mappings"] = stripped
-    return _digest(body)
+    return body
+
+
+def compute_content_hash(payload: Mapping[str, Any]) -> str:
+    """The structural decision hash.
+
+    Excluded: the envelope, per-mapping scores, and how the code classifies a
+    conversion (reason, risk level, recommended action).
+    """
+    return _digest(_structural_body(payload, classification=False))
+
+
+def scored_structural_hash(payload: Mapping[str, Any]) -> str:
+    """The structural digest before review Q1: classification still inside.
+
+    Read-only compatibility for stamps minted by fix/qa-batch1 / PR #435.
+    """
+    return _digest(_structural_body(payload, classification=True))
 
 
 def structural_decision_hash(artifact: DecisionArtifact | Mapping[str, Any]) -> str:
@@ -339,13 +364,24 @@ def interim_content_hash(payload: Mapping[str, Any]) -> str:
 
 
 def accepted_stamps(artifact: DecisionArtifact | Mapping[str, Any]) -> set[str]:
-    """Every digest a stored stamp of this decision may carry."""
+    """Every digest a stored stamp of this decision may carry.
+
+    The interim digest dropped key flags with the scores, so for a decision
+    with a key it would equal the current hash of the same rows without the
+    key (review Q2): it is accepted only for a decision with no key-flagged
+    row, where it cannot hide a key change. The feature/Cleanup digest never
+    covered key flags either; it is kept as it always verified.
+    """
     payload = _payload(artifact)
-    return {
+    stamps = {
         compute_content_hash(payload),
+        scored_structural_hash(payload),
         base_content_hash(payload),
-        interim_content_hash(payload),
     }
+    rows = payload.get("mappings") or []
+    if not any(isinstance(row, Mapping) and _row_is_key(row) for row in rows):
+        stamps.add(interim_content_hash(payload))
+    return stamps
 
 
 def same_structural_decision(left: DecisionArtifact, right: DecisionArtifact) -> bool:
@@ -353,20 +389,156 @@ def same_structural_decision(left: DecisionArtifact, right: DecisionArtifact) ->
     return compute_content_hash(_payload(left)) == compute_content_hash(_payload(right))
 
 
-def decision_stamps_match(approved: str, art: DecisionArtifact) -> bool:
+def previous_release_stamps(artifact: DecisionArtifact | Mapping[str, Any]) -> set[str]:
+    """The digests only a stamp minted before this release can carry.
+
+    The current content hash is not among them: a stamp in the current format
+    was minted under the current type rules, so it is never matched under the
+    previous release's rules (review 2, item 5).
+    """
+    return accepted_stamps(artifact) - {compute_content_hash(_payload(artifact))}
+
+
+def stamp_is_previous_release_format(art: DecisionArtifact) -> bool:
+    """``art`` (a stored artifact) carries a digest only the previous release minted."""
+    stamp = (art.content_hash or "").strip().lower()
+    return bool(stamp) and stamp != compute_content_hash(_payload(art))
+
+
+#: Plain reasons for a key-blind stamp the key rule refuses (review 3 item 1).
+NO_KEY_RECORD_REASON = (
+    "re-Validate this route — the approval predates key tracking: it does not "
+    "record which columns were the key, so a keyed Map cannot be run on it."
+)
+KEY_CHANGED_REASON = (
+    "re-Validate this route — the key columns changed since this approval."
+)
+
+#: Digest formats that cover the key flag on each row.
+_KEY_AWARE_FORMATS = frozenset({"current", "scored"})
+
+
+def decision_key_columns(artifact: DecisionArtifact | Mapping[str, Any]) -> frozenset[str]:
+    """The destination columns the decision marks as key (lower case)."""
+    rows = _payload(artifact).get("mappings") or []
+    return frozenset(
+        str(row.get("target") or row.get("source") or "").strip().lower()
+        for row in rows
+        if isinstance(row, Mapping) and _row_is_key(row)
+    )
+
+
+def stamp_format(stamp: str, artifact: DecisionArtifact | Mapping[str, Any]) -> str:
+    """Which digest of ``artifact`` ``stamp`` is: current, scored, base, interim, or ''.
+
+    For an unkeyed decision a key-aware digest can equal a key-blind one (PR
+    #435's interim digest of a Map keyed on ``id`` equals the scored digest of
+    the same Map without the key). The stamp is then treated as key-blind, so
+    the key rule (:func:`stamp_key_refusal`) decides with the stamp's record.
+    """
+    value = (stamp or "").strip().lower()
+    if not value:
+        return ""
+    payload = _payload(artifact)
+    matches = [
+        name for name, digest in (
+            ("current", compute_content_hash),
+            ("scored", scored_structural_hash),
+            ("base", base_content_hash),
+            ("interim", interim_content_hash),
+        )
+        if value == digest(payload)
+    ]
+    blind = [name for name in matches if name not in _KEY_AWARE_FORMATS]
+    return (blind or matches or [""])[0]
+
+
+#: The key set recorded with a stamp: a set, ``None`` (no record), or a
+#: callable giving either, consulted only for a key-blind stamp.
+KeyRecord = Any
+
+
+def _resolve_record(recorded_keys: KeyRecord) -> frozenset[str] | None:
+    value = recorded_keys() if callable(recorded_keys) else recorded_keys
+    return frozenset(value) if value is not None else None
+
+
+def stamp_key_refusal(
+    fmt: str,
+    stamped: DecisionArtifact | Mapping[str, Any],
+    current_keys: frozenset[str],
+    recorded_keys: KeyRecord,
+    *,
+    require_record: bool = False,
+) -> str:
+    """Why a stamp of format ``fmt`` may not approve a run keyed on ``current_keys``.
+
+    The current and PR #435 scored digests cover each row's key flag, so the
+    stamped key set is the stamped decision's own. The feature/Cleanup (base)
+    and PR #435 interim digests drop key flags: the key set they were taken
+    over is known only from ``recorded_keys`` (the schedule's record, or the
+    Decision Artifact the server stored for that stamp), ``None`` when there
+    is none.
+
+    * interim: only when neither the stamped nor the current decision is keyed;
+    * base: only when the recorded key set is the current one.
+    * No record: refused with :data:`NO_KEY_RECORD_REASON` for a keyed
+      decision, and for any decision when ``require_record`` (Execute; review
+      3 round 2 item 2). Without ``require_record`` an unkeyed decision is a
+      plain digest match (the kernel's own unit checks).
+    """
+    if fmt in _KEY_AWARE_FORMATS:
+        return "" if decision_key_columns(stamped) == current_keys else KEY_CHANGED_REASON
+    if fmt not in ("base", "interim"):
+        return ""
+    recorded = _resolve_record(recorded_keys)
+    if recorded is None:
+        return NO_KEY_RECORD_REASON if (current_keys or require_record) else ""
+    if fmt == "interim" and (recorded or current_keys):
+        return KEY_CHANGED_REASON
+    return "" if recorded == current_keys else KEY_CHANGED_REASON
+
+
+def stamp_refusal(
+    approved: str,
+    art: DecisionArtifact,
+    *,
+    recorded_keys: KeyRecord = None,
+    previous_formats_only: bool = False,
+    require_record: bool = False,
+) -> str:
+    """'' when ``approved`` names ``art``, else 'mismatch' or the key rule's reason."""
+    fmt = stamp_format(approved, art)
+    if not fmt or (
+        previous_formats_only
+        and (approved or "").strip().lower() == compute_content_hash(_payload(art))
+    ):
+        return "mismatch"
+    return stamp_key_refusal(fmt, art, decision_key_columns(art), recorded_keys,
+                             require_record=require_record)
+
+
+def decision_stamps_match(
+    approved: str,
+    art: DecisionArtifact,
+    *,
+    previous_formats_only: bool = False,
+    recorded_keys: KeyRecord = None,
+    require_record: bool = False,
+) -> bool:
     """True when a stored stamp names this artifact.
 
-    The current content hash, the feature/Cleanup digest, or PR #435's interim
-    digest of this artifact. None of these accepts a different type, key,
-    fingerprint, sync mode, or error policy. A base stamp still moves with the
-    score it was taken at (that digest held it); a current stamp does not.
+    The current content hash, PR #435's scored digest, the feature/Cleanup
+    digest, or PR #435's interim digest of this artifact, subject to the key
+    rule (:func:`stamp_key_refusal`): a key-blind stamp never approves a key
+    change. None of these accepts a different type, fingerprint, sync mode or
+    error policy. ``previous_formats_only``: only a digest the previous release
+    minted (matching under its type rules).
     """
-    stamp = (approved or "").strip().lower()
-    if not stamp:
-        return False
-    if stamp == (art.content_hash or "").strip().lower():
-        return True
-    return stamp in accepted_stamps(art)
+    return not stamp_refusal(
+        approved, art, recorded_keys=recorded_keys,
+        previous_formats_only=previous_formats_only, require_record=require_record,
+    )
 
 
 def build_decision_artifact(

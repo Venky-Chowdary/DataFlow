@@ -19,6 +19,7 @@ weaken conservation.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 import weakref
 import os
 import re
@@ -211,6 +212,7 @@ def mariadb_empty_table_bulk_insert_possible(version: Any) -> bool:
     return parsed[:2] >= MARIADB_EMPTY_TABLE_BULK_INSERT_SINCE
 
 
+IDENTITY_SQL = "SELECT @@version AS v, @@version_comment AS c"
 _IDENTITY_ATTR = "_dataflow_server_identity"
 _IDENTITY_CACHE: "weakref.WeakKeyDictionary[Any, str]" = weakref.WeakKeyDictionary()
 _PROXY_MARKERS = ("proxysql", "maxscale")
@@ -257,8 +259,11 @@ def mysql_server_version_text(cursor: Any, conn: Any | None = None, *, query: bo
         return cached
     text = ""
     try:
-        cursor.execute("SELECT @@version, @@version_comment")
+        cursor.execute(IDENTITY_SQL)
         row = cursor.fetchone()
+        if isinstance(row, Mapping):
+            # A DictCursor row: iterating it yields the column names (review N8).
+            row = (row.get("v"), row.get("c"))
         text = " ".join(str(v).strip() for v in (row or ()) if v is not None and str(v).strip())
     except Exception as exc:  # noqa: BLE001 - unknown version fails safe (checks on)
         logger.debug("could not read the MySQL-family server version: %s", exc)

@@ -226,8 +226,9 @@ def _platform_secret() -> bytes:
     """The login token secret: the LEGACY evidence key, for verification only.
 
     Packs issued before evidence signing keys existed were HMAC-signed with the
-    login secret under ``key_id`` ``platform_auth_secret``. They still verify
-    here, reported as the legacy key. Nothing new is signed with it
+    login secret under ``key_id`` ``platform_auth_secret``. They verify here,
+    reported as the legacy key, when the legacy evidence register holds their
+    digest (:func:`_legacy_pack_status`). Nothing new is signed with it
     (:mod:`services.evidence_signing_keys`).
     """
     from services.platform_config import is_production
@@ -396,18 +397,28 @@ def verify_body_detail(
     claimed = str(sig.get("value") or "")
     info = signature_key_info(payload)
     if info["legacy_key"]:
+        # T2: the login secret is not a signing key any more. It verifies only
+        # a pack the evidence chain recorded before evidence keys existed.
+        legacy_status, legacy_error = _legacy_pack_status(payload, may_use_workspace)
+        info["legacy_status"] = legacy_status
+        if legacy_error:
+            errors.append(legacy_error)
+            return actual_hash, errors, info
         key: bytes | None = _platform_secret()
-    elif info["key_scope"] == "workspace" and (
-        not info["workspace_id"]
-        or (may_use_workspace is not None and not may_use_workspace(info["workspace_id"]))
-    ):
-        errors.append(
-            "signed with another workspace's evidence key: it can be verified only "
-            "by someone with access to that workspace"
-        )
-        return actual_hash, errors, info
     else:
-        key = key_for(info["workspace_id"] or None, info["key_id"])
+        # T1: the envelope's key_scope is not authenticated. A named workspace
+        # is always the workspace keyring and always the caller's read check;
+        # an empty one is the deployment keyring. The scope reported is where
+        # the key was actually found.
+        workspace = info["workspace_id"]
+        if workspace and may_use_workspace is not None and not may_use_workspace(workspace):
+            errors.append(
+                "signed with another workspace's evidence key: it can be verified only "
+                "by someone with access to that workspace"
+            )
+            return actual_hash, errors, info
+        key = key_for(workspace or None, info["key_id"])
+        info["key_scope"] = "workspace" if workspace else "deployment"
     if key is None:
         errors.append(
             f"signing key {info['key_id']} is not in this deployment's evidence keyring"
@@ -417,6 +428,46 @@ def verify_body_detail(
     if not claimed or not hmac.compare_digest(claimed, expected):
         errors.append("HMAC signature invalid")
     return actual_hash, errors, info
+
+
+#: ``signing_key.legacy_status`` values for a login-secret (legacy) signature.
+LEGACY_ON_RECORD = "legacy_on_record_before_cutover"
+LEGACY_NOT_ON_RECORD = "legacy_not_on_record"
+LEGACY_NOT_ON_RECORD_REASON = (
+    "signed with the retired key and not on record before the cutover; it cannot "
+    "be told apart from a forgery"
+)
+
+
+def _legacy_pack_status(payload: dict[str, Any], may_use_workspace: Any = None) -> tuple[str, str]:
+    """``(status, error)`` for a body signed with the legacy login secret.
+
+    Accepted only when the legacy evidence register recorded its content digest
+    before the cutover (:mod:`services.legacy_evidence_register`): anyone holding
+    the login secret can sign a new body, but cannot add a pre-cutover record.
+    """
+    from services.legacy_evidence_register import digest_of, ensure_snapshot, lookup
+
+    try:
+        ensure_snapshot()
+        record = lookup(digest_of(payload)) or lookup(pack_body_digest_excluding_anchor(payload))
+    except Exception:  # noqa: BLE001 - cannot establish it: not accepted
+        record = None
+    if not record:
+        return LEGACY_NOT_ON_RECORD, LEGACY_NOT_ON_RECORD_REASON
+    workspace = str(record.get("workspace_id") or "")
+    if not workspace and record.get("evidence_type") != "exit_evidence_pack":
+        # Recorded from an export filed without a workspace (review 3 item 5):
+        # the job's workspace decides who may verify it.
+        from services.legacy_evidence_register import job_workspace
+
+        workspace = job_workspace(str(record.get("ref_id") or ""))
+    if workspace and may_use_workspace is not None and not may_use_workspace(workspace):
+        return LEGACY_NOT_ON_RECORD, (
+            "signed with another workspace's evidence key: it can be verified only "
+            "by someone with access to that workspace"
+        )
+    return LEGACY_ON_RECORD, ""
 
 
 def verify_body(
@@ -1166,10 +1217,13 @@ def verify_signed_proof_pack(pack: dict[str, Any], *, may_use_workspace: Any = N
                 "was altered after it was sealed, or the anchor belongs to another pack"
             )
     kind = str(pack.get("kind")) if pack.get("kind") in {PARITY_PACK_KIND, EXIT_PACK_KIND} else "proof_pack"
-    return {
+    out = {
         "ok": not errors, "errors": errors, "content_sha256": actual_hash, "kind": kind,
         "signing_key": key_info,
     }
+    if key_info.get("legacy_status"):
+        out["legacy_status"] = key_info["legacy_status"]
+    return out
 
 
 def _timing_for_pack(dest: dict[str, Any] | None) -> dict[str, Any]:

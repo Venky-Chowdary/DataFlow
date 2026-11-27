@@ -29,7 +29,7 @@ from connectors.mysql_load_data import (  # noqa: E402
     parse_mysql_family_version,
 )
 
-IDENTITY_SQL = "SELECT @@version, @@version_comment"
+IDENTITY_SQL = "SELECT @@version AS v, @@version_comment AS c"
 MARIADB_10_11 = "5.5.5-10.11.14-MariaDB-0ubuntu0.24.04.1"
 MARIADB_10_6_0 = "5.5.5-10.6.0-MariaDB"
 MARIADB_10_5 = "5.5.5-10.5.27-MariaDB-log"
@@ -293,3 +293,20 @@ def test_only_the_bulk_load_helper_turns_unique_checks_off():
             if re.search(r"unique_checks\s*=\s*(0|off|false)", text, re.I):
                 offenders.append(str(path.relative_to(_API_ROOT)))
     assert offenders == []
+
+
+
+def test_identity_read_from_a_dict_cursor_reads_values_not_column_names():
+    """Review N8: a DictCursor row iterated as keys read the column names -> MySQL."""
+
+    class _DictCursor(_Cursor):
+        def fetchone(self) -> Any:
+            row = super().fetchone()
+            if self.sql and self.sql[-1] == IDENTITY_SQL and row is not None:
+                return {"v": row[0], "c": row[1]}
+            return row
+
+    cur = _DictCursor(MYSQL_8, session=(0, 0), version_row=(MARIADB_10_11, "mariadb.org binary distribution"))
+    assert guard_mariadb_bulk_insert_session(cur) is True
+    dict_mysql = _DictCursor(MYSQL_8, version_row=("8.0.40", "MySQL Community Server - GPL"))
+    assert apply_mysql_bulk_load_session(dict_mysql) == {"unique_checks": 0, "foreign_key_checks": 0}

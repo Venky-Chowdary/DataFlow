@@ -3460,8 +3460,12 @@ def fits_decimal(
         return True
     if _schemaless_decimal_capacity_holds(value, dest_db=dest_db):
         return True
-    if str(value).strip().lower() == "nan" and str(dest_db or "").lower() in {"postgresql", "postgres"}:
-        return True  # DATA-8: PostgreSQL NUMERIC(p,s) stores NaN (not Infinity)
+    from connectors.sql_bind import _PG_NAN_ENGINES, _is_nan_cell
+
+    if _is_nan_cell(value) and str(dest_db or "").strip().lower() in _PG_NAN_ENGINES:
+        # DATA-8: PostgreSQL NUMERIC(p,s) stores NaN (not Infinity). The same
+        # engine set as the bind (pg / timescaledb / alloydb / supabase too).
+        return True
     try:
         if isinstance(value, Decimal):
             # A typed Decimal is already exact. Round-tripping it through

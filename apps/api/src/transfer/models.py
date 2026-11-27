@@ -176,6 +176,9 @@ class TransferRequest:
     reversibility_row_rule_exemption: str = ""
     # Operator identity for Jobs audit (email / subject).
     triggered_by: str = ""
+    # Set only by the scheduler (never a client field): the schedule whose
+    # stamp key record Execute reads for a key-blind stamp (review 3).
+    decision_stamp_schedule_id: str = ""
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian),
     # 'MDY' (US), or '' to infer from env DATAFLOW_DATE_ORDER / fail closed.
     date_locale: str = ""
@@ -402,6 +405,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "require_reversibility": bool(getattr(request, "require_reversibility", False)),
         "reversibility_row_rule_exemption": str(getattr(request, "reversibility_row_rule_exemption", "") or ""),
         "triggered_by": request.triggered_by,
+        "decision_stamp_schedule_id": str(getattr(request, "decision_stamp_schedule_id", "") or ""),
         "date_locale": request.date_locale,
         "number_locale": request.number_locale,
         "number_locale_assumed": bool(request.number_locale_assumed),
@@ -540,11 +544,28 @@ def _shown_wire_cell(value: object) -> object:
 
 def _shown_wire_sample(rows: list) -> list:
     """A stored key-aligned sample (``reconcile_sample``) as a person should
-    see it: every cell through :func:`_shown_wire_cell`, non-dict rows as is."""
+    see it: every cell through :func:`_shown_wire_cell`, then masked like any
+    sample the product shows (``pii_guard.redact_sample``: a sensitive column
+    name or a detected identifier), non-dict rows as is."""
+    from services.pii_guard import redact_sample
+
     return [
-        {str(k): _shown_wire_cell(v) for k, v in row.items()} if isinstance(row, dict) else row
+        redact_sample({str(k): _shown_wire_cell(v) for k, v in row.items()})
+        if isinstance(row, dict) else row
         for row in rows
     ]
+
+
+#: The uniform draw's seed decides every later sampled position: never shown
+#: while the job can still draw (review 2, item 8) - queued, running, paused,
+#: or failed or cancelled and resumable (review 3, item 6). Only a completed
+#: run's report keeps it, so an auditor can replay the draw. The sealed rows
+#: are never shown.
+_DRAW_SECRET_KEYS = ("seed", "sealed_rows")
+
+
+def _without_draw_seed(draw: dict) -> dict:
+    return {k: v for k, v in draw.items() if k not in _DRAW_SECRET_KEYS}
 
 
 def _project_operator_quarantine(job: dict) -> None:
@@ -566,6 +587,11 @@ def _project_operator_quarantine(job: dict) -> None:
                 summary[key] = project_operator_quarantine_details(summary[key])
         if isinstance(summary.get("reconcile_sample"), list):
             summary["reconcile_sample"] = _shown_wire_sample(summary["reconcile_sample"])
+        draw = summary.get("reconcile_sample_draw")
+        from services.job_status import COMPLETED_STATUSES
+
+        if isinstance(draw, dict) and str(job.get("status") or "") not in COMPLETED_STATUSES:
+            summary["reconcile_sample_draw"] = _without_draw_seed(draw)
     checkpoint = job.get("checkpoint")
     if isinstance(checkpoint, dict):
         if isinstance(checkpoint.get("rejected_details"), list):
@@ -574,6 +600,12 @@ def _project_operator_quarantine(job: dict) -> None:
             )
         if isinstance(checkpoint.get("reconcile_sample"), list):
             checkpoint["reconcile_sample"] = _shown_wire_sample(checkpoint["reconcile_sample"])
+        draw_state = checkpoint.get("reconcile_sample_draw_state")
+        if isinstance(draw_state, dict):
+            shown = _without_draw_seed(draw_state)
+            if isinstance(draw_state.get("rows"), list):
+                shown["rows"] = _shown_wire_sample(draw_state["rows"])
+            checkpoint["reconcile_sample_draw_state"] = shown
 
 
 def _confined_source_path(raw: object) -> str:
@@ -652,6 +684,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         require_reversibility=bool(data.get("require_reversibility", False)),
         reversibility_row_rule_exemption=str(data.get("reversibility_row_rule_exemption") or "").strip(),
         triggered_by=(data.get("triggered_by") or "").strip(),
+        decision_stamp_schedule_id=str(data.get("decision_stamp_schedule_id") or "").strip(),
         date_locale=(data.get("date_locale") or "").strip().upper(),
         number_locale=(
             loc

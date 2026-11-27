@@ -28,6 +28,7 @@ BACKEND_CHECKS = (
     "cdc-sqlserver (pymssql)",
     "cdc-sqlserver (pyodbc)",
     "no-config-transfer",
+    "mysql-forced-pk",
     "mapping-evidence",
     "ai-offline-correctness",
     "pilot-answer-quality",

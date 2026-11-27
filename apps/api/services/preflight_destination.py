@@ -141,9 +141,10 @@ def inspect_destination_for_preflight(
         # The probe reads the table the operator chose. A saved connector's
         # default schema (public) disclosed DDL and probed keys on the wrong
         # table when the Studio picked another schema.
-        out["_probe_cfg"] = RedactedConfig(
-            {**cfg, "schema": dest_schema} if str(dest_schema or "").strip() else cfg
-        )
+        probe_cfg = {**cfg, "schema": dest_schema} if str(dest_schema or "").strip() else dict(cfg)
+        if str(dest_database or "").strip():
+            probe_cfg["database"] = str(dest_database).strip()  # the plan's own namespace
+        out["_probe_cfg"] = RedactedConfig(probe_cfg)
         if not ok:
             out["connected"] = False
             out["message"] = msg or "Destination unreachable"

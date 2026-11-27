@@ -8,10 +8,14 @@ an inline artifact (same pattern as DDL identity inline stamp).
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from services.decision_kernel.ddl import approved_mapping_ddl_fingerprint
+from contextlib import nullcontext
+
+from services.decision_kernel.legacy_rules import legacy_plan_rules
 from services.decision_kernel.models import (
     AssignmentStrategy,
     CanonicalType,
@@ -23,8 +27,13 @@ from services.decision_kernel.models import (
     ProofPlan,
     build_decision_artifact,
     decision_artifact_from_dict,
+    decision_key_columns,
     decision_stamps_match,
     same_structural_decision,
+    stamp_format,
+    stamp_is_previous_release_format,
+    stamp_key_refusal,
+    stamp_refusal,
 )
 from services.decision_kernel.conversion import ConversionClass, classify_mapping
 from services.decision_kernel.risk import risk_level_for_conversion
@@ -35,6 +44,8 @@ from services.shape_contract import (
     SHAPE_UNKNOWN,
     classify_dest_exists_shape,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _norm_col(name: str) -> str:
@@ -198,14 +209,13 @@ def _ddl_compare_token(type_sql: str) -> str:
     unsigned = bool(re.search(r"\bUNSIGNED\b", text))
     text = re.sub(r"\bUNSIGNED\b", "", text)
     text = re.sub(r"\s+", " ", text).strip()
-    # MySQL reports BOOLEAN as tinyint(1) and sometimes BIT(1). JSON is json.
-    # tinyint(1) unsigned is not that boolean spelling.
+    # MySQL's BOOLEAN is tinyint(1) (the same column). BIT(1) is a different
+    # column, and PostgreSQL's json is not jsonb: neither is folded (review 2
+    # item 9). tinyint(1) unsigned is not that boolean spelling.
     if not unsigned and (
-        re.fullmatch(r"(?:TINYINT|BIT)\s*\(\s*1\s*\)", text) or text in {"BOOLEAN", "BOOL"}
+        re.fullmatch(r"TINYINT\s*\(\s*1\s*\)", text) or text in {"BOOLEAN", "BOOL"}
     ):
         return "BOOLEAN"
-    if text in {"JSON", "JSONB"}:
-        return "JSON"
     shown = _INT_DISPLAY_WIDTH.match(text)
     if shown:
         base = shown.group(1).upper()
@@ -230,30 +240,138 @@ def _ddl_compare_token(type_sql: str) -> str:
     return f"{token} UNSIGNED" if unsigned else token
 
 
+def _legacy_plan_holds(
+    legacy: DecisionArtifact,
+    current: DecisionArtifact,
+    live_column_types: Mapping[str, str] | None,
+    destination_table_exists: bool | None,
+) -> bool:
+    """A previous-release stamp still runs unless the live table really drifted.
+
+    Where the two releases plan a different DDL for the same mapping, an
+    existing destination keeps the type it has (no ALTER, no refusal) when
+    that type is either release's plan. A column holding neither is drift.
+    Without a live table (create-new) the new release's DDL is created.
+    """
+    if destination_table_exists is not True or not live_column_types:
+        return True
+    live = {str(k).strip().lower(): _ddl_compare_token(v) for k, v in live_column_types.items()}
+    now = dict(current.ddl.column_ddl or {})
+    for name, old_type in dict(legacy.ddl.column_ddl or {}).items():
+        new_type = now.get(name, old_type)
+        if str(old_type).strip().upper() == str(new_type).strip().upper():
+            continue
+        have = live.get(str(name).strip().lower())
+        if have is not None and have not in {_ddl_compare_token(old_type), _ddl_compare_token(new_type)}:
+            return False
+    return True
+
+
+def _datawrap_owned_columns(sync_mode: str = "", *, surrogate_approved: bool = False) -> frozenset[str]:
+    """Columns Datawrap itself adds to a table this plan writes (never a Map target).
+
+    Only the ones the plan's own mode adds (review 2 item 9): the SCD2 history
+    columns for scd2, the soft-delete columns for mirror, the ``_dw_row_id``
+    surrogate only when this run's DDL approval let the writer add it.
+    """
+    from services.dest_require_primary_key import SURROGATE_KEY_COLUMN
+    from services.mirror_engine import SOFT_DELETE_AT_COLUMN, SOFT_DELETE_COLUMN
+    from services.scd2_engine import SCD2_COLUMNS
+    from services.sync_cursor import normalize_sync_mode
+
+    mode = normalize_sync_mode(str(sync_mode or ""), default="")
+    owned: list[str] = []
+    if mode == "scd2":
+        owned.extend(SCD2_COLUMNS)
+    if mode == "mirror":
+        owned.extend((SOFT_DELETE_COLUMN, SOFT_DELETE_AT_COLUMN))
+    if surrogate_approved:
+        owned.append(SURROGATE_KEY_COLUMN)
+    return frozenset(c.lower() for c in owned)
+
+
+def _catalog_token(type_sql: str, dest_db: str) -> str:
+    """Planned or catalog spelling, folded the way introspection reports it.
+
+    ``catalog_read_back`` is the dialect's own canonicaliser (``timestamp with
+    time zone`` is ``TIMESTAMPTZ``, ``decimal(10, 2)`` is ``DECIMAL(10,2)``,
+    ``tinyint(1)`` is ``BOOLEAN``); widths and scales stay.
+    """
+    text = str(type_sql or "")
+    if dest_db:
+        from services.schema_introspect import catalog_read_back
+
+        text = catalog_read_back(dest_db, text) or text
+    return _ddl_compare_token(text)
+
+
 def planned_ddl_matches_live(
     planned: Mapping[str, str] | None,
     live: Mapping[str, str] | None,
+    *,
+    dest_db: str = "",
+    owned_columns: frozenset[str] = frozenset(),
 ) -> bool:
     """True when the live table is exactly the DDL this plan would create.
 
     Same column set, same carrier. An added column or a widened VARCHAR is
-    drift. Empty on either side is not a match.
+    drift. A column Datawrap adds itself for this plan (``owned_columns``,
+    from :func:`_datawrap_owned_columns`) is not, unless the plan maps it.
+    Empty on either side is not a match.
     """
     if not planned or not live:
         return False
     want = {
-        str(name).strip().lower(): _ddl_compare_token(typ)
+        str(name).strip().lower(): _catalog_token(typ, dest_db)
         for name, typ in planned.items()
         if str(name).strip()
     }
+    owned = owned_columns
     have = {
-        str(name).strip().lower(): _ddl_compare_token(typ)
+        str(name).strip().lower(): _catalog_token(typ, dest_db)
         for name, typ in live.items()
-        if str(name).strip()
+        if str(name).strip() and (str(name).strip().lower() not in owned
+                                  or str(name).strip().lower() in want)
     }
     if not want or set(want) != set(have):
         return False
     return all(want[name] == have[name] for name in want)
+
+
+def live_widened_columns(
+    planned: Mapping[str, str] | None,
+    live: Mapping[str, str] | None,
+    *,
+    dest_db: str = "",
+    owned_columns: frozenset[str] = frozenset(),
+) -> set[str] | None:
+    """The planned columns the live table holds wider, or None if it differs otherwise.
+
+    Same column set as :func:`planned_ddl_matches_live`; each column is the
+    planned type or a lossless widening of it in the same type family
+    (``VARCHAR(40)`` live ``VARCHAR(80)``). A narrowing, another type or an
+    extra column is None.
+    """
+    if not planned or not live:
+        return None
+    want = {str(n).strip().lower(): str(t) for n, t in planned.items() if str(n).strip()}
+    have = {
+        str(n).strip().lower(): str(t) for n, t in live.items()
+        if str(n).strip() and (str(n).strip().lower() not in owned_columns
+                               or str(n).strip().lower() in want)
+    }
+    if not want or set(want) != set(have):
+        return None
+    from services.create_width_adopt import _is_widening
+
+    widened: set[str] = set()
+    for name, typ in want.items():
+        if _catalog_token(typ, dest_db) == _catalog_token(have[name], dest_db):
+            continue
+        if not _is_widening(typ, have[name], dest_db):
+            return None
+        widened.add(name)
+    return widened
 
 
 def _planned_create_still_holds(
@@ -269,6 +387,8 @@ def _planned_create_still_holds(
     identity_columns: list[str] | None,
     generated_columns: list[str] | None,
     schema_policy: str,
+    dest_db: str = "",
+    owned_columns: frozenset[str] = frozenset(),
 ) -> tuple[bool, str]:
     """(holds, shape_error). Shape error is a real contract break.
 
@@ -277,7 +397,8 @@ def _planned_create_still_holds(
     """
     if destination_table_exists is not True:
         return False, ""
-    if not planned_ddl_matches_live(planned, live_column_types):
+    if not planned_ddl_matches_live(planned, live_column_types, dest_db=dest_db,
+                                    owned_columns=owned_columns):
         return False, ""
     shape_err = dest_exists_shape_error(
         mappings=mappings,
@@ -389,6 +510,8 @@ def create_new_validate_holds_after_dest_exists(
     route_id: str = "",
     schema_policy: str = "",
     reference: DecisionArtifact | None = None,
+    recorded_keys: Any = None,
+    require_record: bool = False,
 ) -> tuple[bool, str]:
     """True when a create-new Validate stamp remains the Map contract after dest exists.
 
@@ -431,29 +554,39 @@ def create_new_validate_holds_after_dest_exists(
         if fp not in source_fps:
             source_fps.append(fp)
     matched = False
-    for rid in routes:
-        for src in source_dbs:
-            for sfp in source_fps:
-                create_new = build_artifact_from_mappings(
-                    maps,
-                    dest_db=dest_engine,
-                    source_db=src,
-                    tenant_id=tenant_id or "anonymous",
-                    route_id=rid,
-                    source_fingerprint=sfp,
-                    dest_fingerprint="",
-                    sync_mode=sync_mode,
-                    error_policy=error_policy,
-                    artifact_id="da_inline",
-                    created_at="1970-01-01T00:00:00+00:00",
-                )
-                if decision_stamps_match(approved, create_new) or (
-                    reference is not None and same_structural_decision(reference, create_new)
-                ):
-                    matched = True
+    # Review Q1: a stamp the previous release minted for this unchanged Map is
+    # matched under that release's type rules too.
+    for legacy in (False, True):
+        with legacy_plan_rules() if legacy else nullcontext():
+            for rid in routes:
+                for src in source_dbs:
+                    for sfp in source_fps:
+                        create_new = build_artifact_from_mappings(
+                            maps,
+                            dest_db=dest_engine,
+                            source_db=src,
+                            tenant_id=tenant_id or "anonymous",
+                            route_id=rid,
+                            source_fingerprint=sfp,
+                            dest_fingerprint="",
+                            sync_mode=sync_mode,
+                            error_policy=error_policy,
+                            artifact_id="da_inline",
+                            created_at="1970-01-01T00:00:00+00:00",
+                        )
+                        if decision_stamps_match(
+                            approved, create_new, previous_formats_only=legacy,
+                            recorded_keys=recorded_keys, require_record=require_record,
+                        ) or (
+                            not legacy and reference is not None
+                            and same_structural_decision(reference, create_new)
+                        ):
+                            matched = True
+                            break
+                    if matched:
+                        break
+                if matched:
                     break
-            if matched:
-                break
         if matched:
             break
     if not matched:
@@ -499,6 +632,8 @@ def enforce_decision_artifact(
     schema_policy: str = "",
     live_column_types: dict[str, str] | None = None,
     plan_created_destination: bool = False,
+    surrogate_approved: bool = False,
+    stamp_key_record: Callable[[str], frozenset[str] | None] | None = None,
 ) -> tuple[str | None, DecisionArtifact | None]:
     """Fail closed when Execute artifact authority is missing or drifts.
 
@@ -511,6 +646,49 @@ def enforce_decision_artifact(
     """
     has_maps = bool(mappings)
     approved = (approved_content_hash or "").strip().lower()
+    owned = _datawrap_owned_columns(sync_mode, surrogate_approved=surrogate_approved)
+
+    # Execute always says where the key a key-blind stamp was taken over is
+    # recorded; with no record such a stamp approves nothing (review 3, r2 item 2).
+    require = stamp_key_record is not None
+    looked_up: dict[str, frozenset[str] | None] = {}
+
+    def _recorded(stamp: str) -> Callable[[], frozenset[str] | None]:
+        """The key set recorded with ``stamp`` (review 3 item 1), read only when needed."""
+        def read() -> frozenset[str] | None:
+            if stamp_key_record is None or not stamp:
+                return None
+            if stamp not in looked_up:
+                looked_up[stamp] = stamp_key_record(stamp)
+            return looked_up[stamp]
+        return read
+
+    def _live_drifted(planned: Mapping[str, str] | None, *, allow_widening: bool = False) -> bool:
+        """The live table is not the DDL this create-new plan would make (review 3 item 2).
+
+        Datawrap's own bookkeeping columns for this plan and the catalog's
+        spelling of a planned type are not drift; a narrowed or changed type
+        and any other extra column are. ``allow_widening`` (the stamp-only
+        path, as before review 3): a live column wider in the same type family
+        passes and is logged.
+        """
+        if not (destination_table_exists is True and live_column_types and planned):
+            return False
+        if planned_ddl_matches_live(planned, live_column_types, dest_db=dest_db,
+                                    owned_columns=owned):
+            return False
+        if not allow_widening:
+            return True
+        widened = live_widened_columns(planned, live_column_types, dest_db=dest_db,
+                                       owned_columns=owned)
+        if widened is None:
+            return True
+        logger.info("Decision Artifact: live columns wider than planned, in the same "
+                    "type family (not drift): %s", ", ".join(sorted(widened)))
+        return False
+
+    drift_msg = ("Decision Artifact dest schema drifted since Validate — "
+                 "re-run Validate before Execute.")
 
     def _dest_exists_hold(
         stamp: str,
@@ -537,6 +715,8 @@ def enforce_decision_artifact(
             tenant_id=tenant_id,
             route_id=route_id,
             schema_policy=schema_policy,
+            recorded_keys=_recorded(stamp),
+            require_record=require,
         )
 
     if artifact_payload:
@@ -564,21 +744,44 @@ def enforce_decision_artifact(
         if supplied.content_hash:
             # Recompute expected from supplied body (tamper check already in from_dict)
             # and require ddl identity + mapping conversion alignment with live maps.
+            if (
+                supplied.ddl.ddl_identity_hash != current.ddl.ddl_identity_hash
+                and stamp_is_previous_release_format(supplied)
+            ):
+                # Review 2 item 7: a payload the previous release stamped is
+                # rebuilt under its type rules (a stored Studio request
+                # retried after the upgrade), like a schedule's stamp.
+                with legacy_plan_rules():
+                    legacy_current = build_artifact_from_mappings(
+                        mappings, dest_db=dest_db, tenant_id=tenant_id or supplied.tenant_id,
+                        route_id=route_id or supplied.route_id, source_fingerprint=src_fp,
+                        dest_fingerprint=dest_fp, sync_mode=sync_mode or supplied.sync_mode,
+                        error_policy=error_policy or supplied.error_policy,
+                        artifact_id="da_compare", created_at="1970-01-01T00:00:00+00:00",
+                    )
+                if supplied.ddl.ddl_identity_hash == legacy_current.ddl.ddl_identity_hash and (
+                    _legacy_plan_holds(legacy_current, current, live_column_types,
+                                       destination_table_exists)
+                ):
+                    current = legacy_current
             if supplied.ddl.ddl_identity_hash != current.ddl.ddl_identity_hash:
                 return (
                     "Decision Artifact DDL identity diverged from current Map — "
                     "re-run Validate before Execute.",
                     None,
                 )
+            # Review 3 item 1: the run's key is the current Map's; a stamp
+            # that does not cover key flags approves no key change.
+            key_reason = stamp_key_refusal(
+                stamp_format(supplied.content_hash, supplied), supplied,
+                decision_key_columns(current), _recorded(supplied.content_hash),
+                require_record=require,
+            )
+            if key_reason:
+                return (f"Decision Artifact refused: {key_reason}", None)
             if dest_fp and supplied.dest_fingerprint != dest_fp:
-                if live_column_types and not planned_ddl_matches_live(
-                    dict(supplied.ddl.column_ddl or {}), live_column_types
-                ):
-                    return (
-                        "Decision Artifact dest schema drifted since Validate — "
-                        "re-run Validate before Execute.",
-                        None,
-                    )
+                if _live_drifted(dict(supplied.ddl.column_ddl or {})):
+                    return (drift_msg, None)
                 if not supplied.dest_fingerprint:
                     holds, hold_err = _dest_exists_hold(supplied.content_hash, supplied)
                     if holds:
@@ -618,7 +821,9 @@ def enforce_decision_artifact(
                         "re-run Validate before Execute.",
                         None,
                     )
-                if approved and not decision_stamps_match(approved, supplied):
+                if approved and not decision_stamps_match(
+                    approved, supplied, recorded_keys=_recorded(approved), require_record=require,
+                ):
                     return (
                         "Decision Artifact content_hash does not match approved hash — "
                         "refuse write.",
@@ -629,7 +834,9 @@ def enforce_decision_artifact(
                 policy_same = (not error_policy) or error_policy == (
                     supplied.error_policy or error_policy
                 )
-                hash_same = (not approved) or decision_stamps_match(approved, supplied)
+                hash_same = (not approved) or decision_stamps_match(
+                    approved, supplied, recorded_keys=_recorded(approved), require_record=require,
+                )
                 # DW-D407: only a create-new plan (empty dest fingerprint) whose
                 # table this job created, and only after the checks above.
                 if (
@@ -652,6 +859,8 @@ def enforce_decision_artifact(
                         identity_columns=identity_columns,
                         generated_columns=generated_columns,
                         schema_policy=schema_policy,
+                        dest_db=dest_db,
+                        owned_columns=owned,
                     )
                     if shape_err:
                         return (shape_err, None)
@@ -668,7 +877,9 @@ def enforce_decision_artifact(
                     "re-run Validate before Execute.",
                     None,
                 )
-            if approved and not decision_stamps_match(approved, supplied):
+            if approved and not decision_stamps_match(
+                approved, supplied, recorded_keys=_recorded(approved), require_record=require,
+            ):
                 return (
                     "Decision Artifact content_hash does not match approved hash — "
                     "refuse write.",
@@ -714,10 +925,35 @@ def enforce_decision_artifact(
     current = _rebuild(route_candidates[0], dest_fp_now)
 
     if approved:
+        recorded = _recorded(approved)
+        key_reason = ""
         for rid in route_candidates:
             candidate = _rebuild(rid, dest_fp_now)
-            if decision_stamps_match(approved, candidate):
+            why = stamp_refusal(approved, candidate, recorded_keys=recorded,
+                                require_record=require)
+            if not why:
                 return (None, candidate)
+            if why != "mismatch":
+                key_reason = key_reason or why
+        for rid in route_candidates:
+            # Review Q1: the same Map stamped by the previous release, whose
+            # type rules graded or spelled a few pairs differently.
+            with legacy_plan_rules():
+                legacy = _rebuild(rid, dest_fp_now)
+            why = stamp_refusal(approved, legacy, recorded_keys=recorded,
+                                previous_formats_only=True, require_record=require)
+            if not why and _legacy_plan_holds(
+                legacy, current, live_column_types, destination_table_exists
+            ):
+                return (None, current)
+            if why not in ("", "mismatch"):
+                key_reason = key_reason or why
+        if key_reason:
+            return (f"Decision Artifact refused: {key_reason}", None)
+        if _live_drifted(dict(current.ddl.column_ddl or {}), allow_widening=True):
+            # Review 3 item 2: the create-new hold below judges the mapped
+            # shape only; a live table that is not the planned DDL is drift.
+            return (drift_msg, None)
         holds, hold_err = _dest_exists_hold(approved)
         if holds:
             return (None, current)

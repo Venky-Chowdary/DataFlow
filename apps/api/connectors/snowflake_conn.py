@@ -141,6 +141,20 @@ SNOWFLAKE_PLACEHOLDER_HOST_MSG = (
     "account.snowflakecomputing.com."
 )
 
+#: D436: an expired PAT / OAuth token (394401, 390318) is a credential to
+#: replace, not "couldn't identify the cause". Never a value, only the remedy.
+SNOWFLAKE_TOKEN_EXPIRED_MSG = (
+    "Snowflake rejected the access token because it has expired. Edit the connection and "
+    "replace the token (the programmatic access token goes in the Password/PAT "
+    "field), then test it again."
+)
+_SNOWFLAKE_TOKEN_EXPIRED = re.compile(
+    # Not "Authentication token has expired" (390112): that is the session's own
+    # token, renewed by reconnecting, not the credential saved on the connector.
+    r"\b394401\b|\b390318\b|(?:programmatic|oauth) access token (?:is |has )?expired",
+    re.I,
+)
+
 SNOWFLAKE_BAD_PASSWORD_MSG = (
     "Snowflake rejected the username or password (250001). "
     "The account host was reached — this is not a 404. "
@@ -417,8 +431,11 @@ def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | Non
         SNOWFLAKE_HOST_ONLY_URL_MSG,
         SNOWFLAKE_PLACEHOLDER_HOST_MSG,
         SNOWFLAKE_BAD_PASSWORD_MSG,
+        SNOWFLAKE_TOKEN_EXPIRED_MSG,
     }:
         return stripped
+    if _SNOWFLAKE_TOKEN_EXPIRED.search(stripped):
+        return SNOWFLAKE_TOKEN_EXPIRED_MSG
     if "form placeholder" in text or is_placeholder_snowflake_account(stripped):
         return SNOWFLAKE_PLACEHOLDER_HOST_MSG
     # 404 / 290404 / 513 on login-request is a missing account host, not auth.
@@ -448,7 +465,7 @@ def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | Non
             "Snowflake requires MFA or key-pair for this user. Password-only login "
             "is refused. Use Programmatic access token or Key-pair on Connectors."
         )
-    if re.search(r"jwt|private.?key|390144|invalid token", text):
+    if re.search(r"jwt|private.?key|390144|invalid token|programmatic access token", text):
         # A PAT is itself a JWT — an invalid-token refusal under auth_mode=pat
         # means Snowflake rejected the stored token, not a key. Name the
         # credential actually used so operators are not sent to ALTER USER.

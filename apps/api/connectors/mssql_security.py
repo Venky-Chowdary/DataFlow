@@ -283,25 +283,122 @@ def with_access_token(connect_args: dict[str, Any], cfg: Mapping[str, Any]) -> d
     return {**connect_args, "attrs_before": {**dict(connect_args.get("attrs_before") or {}), **token}}
 
 
-def check_mssql_url(raw: str, cfg: Mapping[str, Any]) -> None:
-    """A SQL Server connection string obeys the same driver policy as host/port.
+#: Under the verified-TLS policy (review round 4: an allow-list, not a deny-list).
+_ENCRYPT_OK = frozenset({"yes", "true", "mandatory", "strict"})
+_TRUST_OK = frozenset({"no", "false", "0"})
+#: Keys that decide verification: a duplicate is refused whichever one the driver reads.
+_SECURITY_KEYS = ("driver", "encrypt", "trustservercertificate", "dsn", "filedsn")
 
-    ``mssql+pymssql://`` (FreeTDS, no certificate verification) is refused
-    when the host requires verified TLS or the connector needs the Microsoft
-    driver, unless the connector chose ``sqlserver_driver=freetds``.
+
+def _odbc_connect_string(raw: str) -> str:
+    """The ODBC connection string SQLAlchemy's pyodbc dialect builds from ``raw``.
+
+    The dialect's own code, so the query keys it forwards and the second
+    decoding it applies to ``odbc_connect`` are read exactly as the driver
+    will get them.
+    """
+    from sqlalchemy.dialects.mssql.pyodbc import MSDialect_pyodbc
+    from sqlalchemy.engine import make_url
+
+    url = make_url(raw)
+    for key, value in url.query.items():
+        if isinstance(value, tuple):
+            raise SqlServerSecurityError(
+                f"This SQL Server connection string sets {key} more than once; set it once."
+            )
+    args, _kwargs = MSDialect_pyodbc().create_connect_args(url)
+    return str(args[0] if args else "")
+
+
+def _pyodbc_refusal(raw: str) -> tuple[str, bool]:
+    """``(why the string is refused or "", Encrypt is absent)`` under the policy."""
+    from services.residency_addressing import _odbc_pairs
+
+    pairs = _odbc_pairs(_odbc_connect_string(raw))
+    if pairs is None:
+        return "an ODBC connection string the driver cannot read unambiguously (an unbalanced brace)", False
+    seen: dict[str, str] = {}
+    for key, value in pairs:
+        name = key.strip().lower()
+        if name in _SECURITY_KEYS and name in seen:
+            return f"{key} more than once", False
+        seen[name] = value.strip()
+    driver = seen.get("driver", "").strip("{}").strip().lower()
+    if "dsn" in seen or "filedsn" in seen:
+        return "a DSN (its TLS settings live outside the connection string)", False
+    if driver and not (
+        (driver.startswith("odbc driver ") and driver.endswith(" for sql server")) or "msodbcsql" in driver
+    ):
+        return f"driver={seen['driver']} (not the Microsoft ODBC Driver for SQL Server)", False
+    trust = seen.get("trustservercertificate")
+    if trust is not None and trust.lower() not in _TRUST_OK:
+        return f"TrustServerCertificate={trust}", False
+    encrypt = seen.get("encrypt")
+    if encrypt is not None and encrypt.lower() not in _ENCRYPT_OK:
+        return f"Encrypt={encrypt}", False
+    return "", encrypt is None
+
+
+def _with_encrypt(raw: str) -> str:
+    """``raw`` with ``Encrypt=yes`` added where the dialect will forward it."""
+    from urllib.parse import parse_qsl, quote_plus, urlencode
+
+    base, sep, query = raw.partition("?")
+    pairs = parse_qsl(query, keep_blank_values=True) if sep else []
+    if any(k.strip().lower() == "odbc_connect" for k, _ in pairs):
+        pairs = [
+            (k, f"{v.rstrip().rstrip(';')};Encrypt=yes" if k.strip().lower() == "odbc_connect" else v)
+            for k, v in pairs
+        ]
+    else:
+        pairs.append(("Encrypt", "yes"))
+    return f"{base}?{urlencode(pairs, quote_via=quote_plus)}"
+
+
+def enforce_mssql_url(raw: str, cfg: Mapping[str, Any]) -> str:
+    """``raw`` obeying the SQL Server TLS policy, or :class:`SqlServerSecurityError`.
+
+    ``mssql+pymssql://`` (FreeTDS, no certificate verification) and every other
+    non-pyodbc DBAPI is refused when the host requires verified TLS or the
+    connector needs the Microsoft driver, unless the connector chose
+    ``sqlserver_driver=freetds``. A pyodbc string is read as the driver will
+    read it (ODBC brace quoting) and must name the Microsoft driver (or none),
+    no DSN, ``TrustServerCertificate`` absent or no, and ``Encrypt`` yes /
+    true / mandatory / strict. ``Encrypt`` absent is set to ``yes`` — the
+    same default a connector built from host and port gets
+    (:func:`odbc_security_query`), since Driver 17 would not encrypt.
     """
     scheme = str(raw or "").split("://", 1)[0].strip().lower()
-    if scheme != "mssql+pymssql":
-        return
-    if driver_choice(cfg) == "freetds":
-        return
-    if require_verified_tls() or driver_choice(cfg) == "odbc" or is_entra(cfg):
+    dialect, _, dbapi = scheme.partition("+")
+    if dialect != "mssql" or driver_choice(cfg) == "freetds":
+        return raw
+    if not (require_verified_tls() or driver_choice(cfg) == "odbc" or is_entra(cfg)):
+        return raw
+    fix = (
+        "Use mssql+pyodbc with ODBC Driver 18, or set sqlserver_driver=freetds to accept "
+        "an unverified connection."
+    )
+    if dbapi not in ("", "pyodbc"):
+        # Plain mssql:// is SQLAlchemy's pyodbc default. Every other SQL
+        # Server DBAPI (pymssql, pytds, ...) is outside the Microsoft driver's
+        # certificate verification (review N9).
         raise SqlServerSecurityError(
-            "This SQL Server connection string uses mssql+pymssql (FreeTDS, which does not "
-            "verify the server certificate), and this host or connector requires verified TLS. "
-            "Use mssql+pyodbc with ODBC Driver 18, or set sqlserver_driver=freetds to accept "
-            "an unverified connection."
+            f"This SQL Server connection string uses {scheme}, not mssql+pyodbc (the only SQL "
+            "Server path whose certificate verification Datawrap configures), and this host or "
+            f"connector requires verified TLS. {fix}"
         )
+    why, encrypt_absent = _pyodbc_refusal(raw)
+    if why:
+        raise SqlServerSecurityError(
+            f"This SQL Server connection string sets {why}, and this host or connector requires "
+            f"verified TLS (Encrypt=yes|mandatory|strict, TrustServerCertificate=no). {fix}"
+        )
+    return _with_encrypt(raw) if encrypt_absent else raw
+
+
+def check_mssql_url(raw: str, cfg: Mapping[str, Any]) -> None:
+    """Refuse ``raw`` when it breaks the SQL Server TLS policy (see :func:`enforce_mssql_url`)."""
+    enforce_mssql_url(raw, cfg)
 
 
 def connect_sqlserver_dbapi(

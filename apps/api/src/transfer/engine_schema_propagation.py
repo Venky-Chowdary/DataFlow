@@ -219,6 +219,22 @@ def _apply_schema_auto_propagate(
     return planned
 
 
+def _with_request_destination_ownership(fn: Any) -> Any:
+    """Answer ``managed_table.destination_is_owned`` for ``request`` (probed on demand)."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        from services.managed_table import destination_ownership
+
+        request = kwargs.get("request")
+        with destination_ownership(lambda: _destination_is_managed(request)):
+            return fn(*args, **kwargs)
+
+    return wrapped
+
+
+@_with_request_destination_ownership
 def _plan_schema_auto_propagate(
     *,
     request: Any,
@@ -304,9 +320,6 @@ def _plan_schema_auto_propagate(
         evolution["additive"] = _additive
 
     acknowledged = bool(getattr(request, "schema_drift_acknowledged", False))
-    managed_table = False
-    if not destination_evolution_approved_for(request) and not acknowledged:
-        managed_table = _destination_is_managed(request)
     if execute_must_pause(evolution, schema_drift_acknowledged=acknowledged):
         raise SchemaPropagationRefused(
             (drift.get("issues") or ["Breaking schema change — sync paused"])[0]
@@ -321,7 +334,6 @@ def _plan_schema_auto_propagate(
     from services.schema_drift import (
         PROPAGATE_POLICIES,
         destination_evolution_approved,
-        managed_non_key_widen_only,
         plan_destination_evolution,
     )
 
@@ -334,12 +346,7 @@ def _plan_schema_auto_propagate(
         and dest_declares_column_ddl(
             str(getattr(request.destination, "format", "") or "")
         )
-        and (
-            destination_evolution_approved(schema_policy, acknowledged=acknowledged)
-            or managed_non_key_widen_only(
-                schema_policy, acknowledged=acknowledged, managed_table=managed_table
-            )
-        )
+        and destination_evolution_approved(schema_policy, acknowledged=acknowledged)
     ):
         mappings, _evolved_types, _ = plan_destination_evolution(
             mappings,

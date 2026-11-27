@@ -143,15 +143,41 @@ def _odbc_scheme(scheme: str) -> bool:
     return "odbc" in driver if driver else base in _ODBC_DEFAULT_DIALECTS or "odbc" in base
 
 
+def _odbc_connect_decodings(value: Any) -> list[str]:
+    """``odbc_connect`` as given and as each further ``unquote_plus`` reads it.
+
+    SQLAlchemy's pyodbc connector unquote_plus-es the value it took from the
+    already-decoded URL query, so ``DSN%253Dprod`` reaches the driver as
+    ``DSN=prod``. Decoded until stable, at most four times.
+    """
+    from urllib.parse import unquote_plus
+
+    seen = [str(value or "")]
+    for _ in range(4):
+        nxt = unquote_plus(seen[-1])
+        if nxt == seen[-1]:
+            break
+        seen.append(nxt)
+    return seen
+
+
+def _odbc_connect_refusal(value: Any, where: str, *, installed_only: bool) -> str:
+    for text in _odbc_connect_decodings(value):
+        refusal = _odbc_pairs_refusal(_odbc_pairs_of(text), where, installed_only=installed_only)
+        if refusal:
+            return refusal
+    return ""
+
+
 def _odbc_url_refusal(text: str, where: str, *, installed_only: bool) -> str:
     """A ``+pyodbc`` URL as SQLAlchemy's pyodbc connector reads it."""
-    from connectors.tls_file_options import _odbc_pairs, _query_pairs
+    from connectors.tls_file_options import _query_pairs
 
     query = list(_query_pairs(text))
     for key, value in query:
         folded = _fold(key)
         if folded == "odbcconnect":
-            refusal = _odbc_pairs_refusal(_odbc_pairs(str(value)), where, installed_only=installed_only)
+            refusal = _odbc_connect_refusal(value, where, installed_only=installed_only)
         else:
             refusal = _odbc_pairs_refusal([(key, value)], where, installed_only=installed_only)
         if refusal:
@@ -217,7 +243,7 @@ def mapping_refusal(source: Any, where: str, *, libpq: bool, odbc: bool, install
         elif folded in _DRIVER_KEYS and odbc:
             refusal = _driver_refusal(value, where, installed_only=installed_only)
         elif folded == "odbcconnect" and isinstance(value, str):
-            refusal = _odbc_pairs_refusal(_odbc_pairs_of(value), where, installed_only=installed_only)
+            refusal = _odbc_connect_refusal(value, where, installed_only=installed_only)
         elif isinstance(value, Mapping):
             refusal = mapping_refusal(value, where, libpq=libpq, odbc=odbc, installed_only=installed_only,
                                       depth=depth + 1)

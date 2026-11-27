@@ -23,8 +23,10 @@ Now each workspace has its own evidence signing keyring:
 * Rotation adds a new active version and keeps every earlier one (marked
   retired), so packs signed before a rotation keep verifying.
 * Packs signed before this keyring existed carry ``key_id``
-  ``platform_auth_secret`` (or none); they still verify against the login
-  secret, reported as the legacy key. Nothing new is signed with it.
+  ``platform_auth_secret`` (or none); they verify against the login secret,
+  reported as the legacy key, only when :mod:`services.legacy_evidence_register`
+  recorded their digest at the cutover (the first keyring creation snapshots
+  it). Nothing new is signed with it.
 
 Key material never leaves this module except as the bytes an HMAC is computed
 with; status and verify answers carry key ids only, and nothing here logs a key.
@@ -174,6 +176,7 @@ def _decrypt(entry: dict[str, Any]) -> bytes | None:
 def _active_doc(scope: str) -> dict[str, Any]:
     doc = _load(scope)
     if doc is None:
+        _snapshot_legacy_evidence_before_first_keyring()
         with _LOCK:
             doc = _load(scope) or _insert_if_absent(
                 scope,
@@ -185,6 +188,21 @@ def _active_doc(scope: str) -> dict[str, Any]:
                 },
             )
     return doc
+
+
+def _snapshot_legacy_evidence_before_first_keyring() -> None:
+    """At the cutover, record what the login secret signed (legacy evidence register).
+
+    Runs before a keyring is created; once any keyring exists, the register's
+    own lazy snapshot (against that keyring's time) covers a deployment that
+    upgraded before the register existed. Never blocks signing.
+    """
+    try:
+        from services.legacy_evidence_register import ensure_snapshot
+
+        ensure_snapshot()
+    except Exception as exc:  # noqa: BLE001 - retried lazily at the next legacy verify
+        logger.error("legacy evidence snapshot failed: %s", type(exc).__name__)
 
 
 def signing_key(workspace_id: str | None) -> tuple[str, bytes, int, str]:
@@ -249,6 +267,40 @@ def rotate(workspace_id: str | None, *, actor: str) -> dict[str, Any]:
         if _replace(scope, updated, expected_version=current):
             return key_status(workspace_id)
     raise EvidenceKeyUnavailable(KEY_UNAVAILABLE_MESSAGE)
+
+
+def legacy_cutover_at() -> datetime | None:
+    """When evidence keys replaced the login secret here: the oldest keyring.
+
+    Nothing is signed with the login secret once a keyring exists, so a pack
+    filed into the evidence chain after this instant cannot be a genuine
+    legacy pack. ``None`` when no keyring was ever created.
+    """
+    try:
+        coll = _collection()
+        if coll is not None:
+            stamps = [d.get("created_at") for d in coll.find({}, {"created_at": 1})]
+        else:
+            from services.metadata_backend import load_json_doc
+
+            data = load_json_doc(_file_path(), {"keys": {}})
+            stamps = [d.get("created_at") for d in (data.get("keys") or {}).values()
+                      if isinstance(d, dict)]
+    except Exception as exc:  # noqa: BLE001 - unreadable: callers fail closed
+        logger.error("evidence keyring unreadable for the legacy cutover: %s", type(exc).__name__)
+        raise EvidenceKeyUnavailable(KEY_UNAVAILABLE_MESSAGE) from exc
+    times = [t for t in (_parse_time(s) for s in stamps) if t is not None]
+    return min(times) if times else None
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def key_status(workspace_id: str | None) -> dict[str, Any]:

@@ -1157,10 +1157,16 @@ def dest_widen_proposal(
         return None
     if stamp_is_operator_ceiling(mapping):
         stamped = str(mapping.get("target_type") or mapping.get("dest_type") or "").strip()
-        # A stamp that only echoes the live column is the catalog, not a
-        # ceiling the operator drew. Schedules drop provenance and then
-        # refuse a same-family widen (DW-D334).
-        if not (stamped and tgt_type and stamped.casefold() == str(tgt_type).casefold()):
+        # On a table Datawrap created, a stamp that only echoes the live column
+        # is the catalog, not a ceiling the operator drew: schedules drop the
+        # stamp's provenance and then refused a same-family widen (DW-D334).
+        # On anyone else's table the live type is the ceiling (D161).
+        from services.managed_table import destination_is_owned
+
+        if not (
+            stamped and tgt_type and stamped.casefold() == str(tgt_type).casefold()
+            and destination_is_owned()
+        ):
             return None
     new_type = widened_dest_carrier(tgt_type, src_type)
     # The carrier we would emit must itself be a widen. A bare VARCHAR
@@ -1274,39 +1280,18 @@ def destination_evolution_approved(
 
     Propagate policies approve it up front; ``manual_review`` approves it after
     the drift acknowledgement. ``type_locked`` / ``pause_on_change`` /
-    ``block_all`` never ALTER. A Datawrap-owned table does not flip this to
-    true: that approved ADD COLUMN and key widening with propagate off.
-    Non-key same-family widens on an owned table are
-    :func:`managed_non_key_widen_only`. Validate and Execute both ask these,
-    so they cannot disagree.
+    ``block_all`` never ALTER. A table Datawrap created is no exception: its
+    widen is proposed (``services.managed_table``) and applied under this
+    same policy. Validate and Execute both ask this, so they cannot disagree.
 
     ``managed_table`` is accepted and ignored so a caller cannot reintroduce
-    the manual_review auto-approval.
+    a manual_review auto-approval.
     """
     del managed_table
     policy = normalize_schema_policy(schema_policy)
     if policy in {"type_locked", "pause_on_change", "block_all"}:
         return False
     return policy in PROPAGATE_POLICIES or (acknowledged and policy == "manual_review")
-
-
-def managed_non_key_widen_only(
-    schema_policy: str | None,
-    *,
-    acknowledged: bool = False,
-    managed_table: bool = False,
-) -> bool:
-    """Same-family widen of non-key columns on a table Datawrap created.
-
-    Not an approval of the evolution policy. ADD COLUMN stays propagate-only.
-    Key widening stays acknowledgement-only. ``manual_review`` is not approved.
-    """
-    if not managed_table:
-        return False
-    if destination_evolution_approved(schema_policy, acknowledged=acknowledged):
-        return False
-    policy = normalize_schema_policy(schema_policy)
-    return policy not in {"type_locked", "pause_on_change", "block_all"}
 
 
 def plan_destination_evolution(

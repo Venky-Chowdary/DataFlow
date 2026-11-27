@@ -707,21 +707,40 @@ def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
         source_dbs.append(source_connector_id)
     if "" not in source_dbs:
         source_dbs.append("")
-    for src_db in source_dbs:
-        art = build_artifact_from_mappings(
-            maps,
-            dest_db=engine,
-            source_db=src_db,
-            source_fingerprint=source_fp,
-            dest_fingerprint="",
-            sync_mode=mode,
-            route_id=f"validate:{engine or 'unknown'}",
-            tenant_id="anonymous",
-            artifact_id="da_inline",
-            created_at="1970-01-01T00:00:00+00:00",
+    from contextlib import nullcontext
+
+    from services.decision_kernel.legacy_rules import legacy_plan_rules
+    from services.stamp_key_records import lookup, record_schedule
+
+    # A stored schedule read before any edit by this release: its rows are
+    # the rows saved with its stamp (a no-op once it has a record).
+    record_schedule(sched, trusted_rows=True)
+    try:
+        recorded = lookup(
+            workspace_id=str(getattr(sched, "workspace_id", "") or ""),
+            schedule_id=str(getattr(sched, "id", "") or ""), stamp=approved,
         )
-        if decision_stamps_match(approved, art):
-            return True
+    except Exception:  # noqa: BLE001 - no record: a keyed Map re-validates
+        recorded = None
+    # Review Q1: a stamp minted under the previous release's type rules.
+    for legacy in (False, True):
+        with legacy_plan_rules() if legacy else nullcontext():
+            for src_db in source_dbs:
+                art = build_artifact_from_mappings(
+                    maps,
+                    dest_db=engine,
+                    source_db=src_db,
+                    source_fingerprint=source_fp,
+                    dest_fingerprint="",
+                    sync_mode=mode,
+                    route_id=f"validate:{engine or 'unknown'}",
+                    tenant_id="anonymous",
+                    artifact_id="da_inline",
+                    created_at="1970-01-01T00:00:00+00:00",
+                )
+                if decision_stamps_match(approved, art, previous_formats_only=legacy,
+                                         recorded_keys=recorded, require_record=True):
+                    return True
     return False
 
 

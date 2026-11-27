@@ -6513,6 +6513,12 @@ _SNOWFLAKE_TEXT_ALIASES: Final[frozenset[str]] = frozenset({
 })
 
 
+def _legacy_rules() -> bool:
+    from services.decision_kernel.legacy_rules import legacy_rules_active
+
+    return legacy_rules_active()
+
+
 def snowflake_unbounded_text_alias(target_type: str | None, dest_db: str = "") -> bool:
     """True when ``target_type`` is Snowflake's ``VARCHAR(16777216)`` under another name.
 
@@ -6547,7 +6553,7 @@ def uuid_would_collapse(
         return False
     if uuid_carrier_is_dialect_equivalent(source_type, target_type, dest_db=dest_db):
         return False
-    if snowflake_unbounded_text_alias(target_type, dest_db):
+    if snowflake_unbounded_text_alias(target_type, dest_db) and not _legacy_rules():
         # ``STRING`` is ``VARCHAR(16777216)``, a capacity carrier like the
         # spelled-out width above: grade both spellings the same (D72).
         return False

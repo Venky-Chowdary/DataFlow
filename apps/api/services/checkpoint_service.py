@@ -125,6 +125,9 @@ class Checkpoint:
     #: Bounded key-aligned sample of written rows, kept once the write pass is
     #: complete so a run resumed at reconcile can still prove its write (D263).
     reconcile_sample: list[dict[str, Any]] = field(default_factory=list)
+    #: The Gate-8 uniform draw so far (seed, population, the <= k rows drawn),
+    #: so a resumed run keeps drawing over the whole population (T3).
+    reconcile_sample_draw_state: dict[str, Any] | None = None
 
     def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
         """Append rejection evidence, keeping the checkpoint document bounded.
@@ -194,6 +197,7 @@ class Checkpoint:
             "cdc_stream": self.cdc_stream,
             "cdc_shared_reader": self.cdc_shared_reader,
             "reconcile_sample": self.reconcile_sample,
+            "reconcile_sample_draw_state": self.reconcile_sample_draw_state,
         }
 
     @classmethod

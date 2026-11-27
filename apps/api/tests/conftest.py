@@ -309,9 +309,21 @@ def mcp_confirm_agent_mode(monkeypatch):
     (services.mcp_confirm_policy). Tests whose subject is what an unattended
     MCP flow does end to end opt in, as a workspace would.
     """
-    import services.mcp_confirm_policy as policy
+    from services import integrations_store
+    from services.mcp_confirm_policy import merge_confirm_change
 
-    monkeypatch.setattr(policy, "confirm_mode_for", lambda workspace_id: "agent")
+    # Set as a platform admin would (review N6): the deployment default is the
+    # floor a workspace admin cannot go below, so 'agent' is a platform choice.
+    before = integrations_store.get_mcp_policy()
+    keep = {"enabled": before["enabled"], "allowed_tools": before["allowed_tools"]}
+    integrations_store.set_mcp_policy(
+        dict(keep),
+        confirm_merge=lambda stored: merge_confirm_change(
+            stored, {"default": "agent"}, platform_admin=True, caller_workspace=""
+        ),
+    )
+    yield
+    integrations_store.set_mcp_policy({**keep, "confirm": before["confirm"]})
 
 
 @pytest.fixture()
@@ -484,6 +496,32 @@ def _isolate_process_env(monkeypatch, request):
                 f"\n[env-leak] {request.node.nodeid} "
                 f"added={added} changed={changed}"
             )
+
+
+#: Background threads whose crash must fail the test that started them, not
+#: only warn: a dead reconcile heartbeat stops a job's liveness stamps.
+_FAIL_ON_THREAD_CRASH = ("reconcile-heartbeat-",)
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_heartbeat_thread_crash():
+    import threading
+
+    crashed: list[str] = []
+    previous = threading.excepthook
+
+    def _hook(args):
+        name = getattr(args.thread, "name", "") or ""
+        if name.startswith(_FAIL_ON_THREAD_CRASH):
+            crashed.append(f"{name}: {args.exc_type.__name__}: {args.exc_value}")
+        previous(args)
+
+    threading.excepthook = _hook
+    try:
+        yield
+    finally:
+        threading.excepthook = previous
+    assert not crashed, "background thread crashed: " + "; ".join(crashed)
 
 
 @pytest.fixture(autouse=True)

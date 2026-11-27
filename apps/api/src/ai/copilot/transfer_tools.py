@@ -894,6 +894,38 @@ def _engine_format(info: dict[str, Any]) -> str:
     return fmt or str(info.get("db_type") or "")
 
 
+def _dest_probe_target(dst_conn: dict[str, Any], dest_db_type: str, dst_table: str) -> dict[str, Any]:
+    """Where Validate probes: the plan's destination schema *and* database.
+
+    ``dst_conn`` carries a schedule's own dest_schema / dest_database
+    (:func:`_with_dest_location`); probing the connector's default database
+    checked a different table than the runs write (review 2, item 6).
+    """
+    return {
+        "connector_id": str(dst_conn.get("id") or ""),
+        "dest_type": dest_db_type,
+        "dest_table": dst_table,
+        "dest_collection": dst_table,
+        "dest_schema": str(dst_conn.get("schema") or ""),
+        "dest_database": str(dst_conn.get("database") or ""),
+    }
+
+
+def _with_dest_location(conn: dict[str, Any], schema: str, database: str) -> dict[str, Any]:
+    """``conn`` aimed at an explicit destination schema / database (empty = its own)."""
+    from services.dialect_profiles import schema_from_cfg
+
+    out = dict(conn)
+    if str(schema or "").strip():
+        kind = str(conn.get("type") or conn.get("format") or "")
+        folded = schema_from_cfg(kind, None, schema=str(schema).strip())
+        if folded:
+            out["schema"] = folded
+    if str(database or "").strip():
+        out["database"] = str(database).strip()
+    return out
+
+
 def _share_catalog_reads(fn):
     """Run a read-only planning tool with one catalog read per object (D145)
     and one Snowflake login per endpoint (D187)."""
@@ -955,6 +987,8 @@ def plan_transfer(
     delete_mode: str = "",
     foreign_keys: str = "",
     fk_risk_acknowledged: bool = False,
+    dest_schema: str = "",
+    dest_database: str = "",
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -1057,6 +1091,9 @@ def plan_transfer(
         dst_conn, err = _safe_connector(dest_connector_id, dest_connector_name, tool)
         if err:
             return err
+        # A schedule's own destination namespace (QA review Q5): plan where its
+        # runs write, folded as schedule_runner._apply_schedule_dest_location does.
+        dst_conn = _with_dest_location(dst_conn, dest_schema, dest_database)
     except AmbiguousConnectorError as exc:
         return _tool_result(tool, success=False, error=exc.message)
 
@@ -1222,6 +1259,22 @@ def plan_transfer(
                 tool,
                 success=False,
                 error=_source_read_error(src_conn, src_table, str(src_info["error"] or "")),
+            )
+    if dest_exists is None and not dst_info.get("ok"):
+        # D436: a destination that refused the sign-in is that finding, not an
+        # unread schema with a mapping review on every column.
+        from services.credential_finding import credential_finding
+
+        finding = credential_finding(
+            dst_info.get("error"),
+            engine=str(dst_info.get("db_type") or dst_conn.get("type") or ""),
+            auth_mode=str(dst_conn.get("auth_mode") or ""),
+        )
+        if finding:
+            return _tool_result(
+                tool,
+                success=False,
+                error=f"Destination connection {dst_conn.get('name') or dst_table}: {finding} Nothing was staged.",
             )
 
     src_names = [str(c.get("name")) for c in src_info["columns"] if c.get("name")]
@@ -1830,6 +1883,14 @@ def _source_read_error(src_conn: dict[str, Any], src_table: str, detail: str) ->
     target = describe_target(src_conn)
     name = src_conn.get("name") or "the source"
     where = f"{name} ({target})" if target else str(name)
+    from services.credential_finding import credential_finding
+
+    finding = credential_finding(
+        detail, engine=str(src_conn.get("type") or ""), auth_mode=str(src_conn.get("auth_mode") or "")
+    )
+    if finding:
+        # D436: a rejected sign-in names the credential, not "list tables".
+        return f"Source connection {name}: {finding} Nothing was staged."
     from services.error_taxonomy import (
         SQLSERVER_OBJECT_OR_AUTH,
         sqlserver_error_numbers,
@@ -2324,11 +2385,7 @@ def _run_preflight(
     def _probe_destination() -> dict[str, Any]:
         try:
             return inspect_destination_for_preflight(
-                connector_id=str(dst_conn.get("id") or ""),
-                dest_type=dest_db_type,
-                dest_table=dst_table,
-                dest_collection=dst_table,
-                dest_schema=str(dst_conn.get("schema") or ""),
+                **_dest_probe_target(dst_conn, dest_db_type, dst_table)
             )
         except Exception as exc:
             _LOG.warning("destination probe failed: %s", exc, exc_info=True)

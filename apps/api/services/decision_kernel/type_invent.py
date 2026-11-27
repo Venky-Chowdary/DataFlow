@@ -819,7 +819,9 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
     # one-bit column BIT(1) (DW-D320): BOOLEAN there is TINYINT(1), a
     # different column. Wider fixed bit(n) and every varying bit string are
     # type_ddl_specialty's (BIT(n<=64), else 0/1 digit text) — never clamped.
-    if db in {"mysql", "mariadb", "tidb"} and re.match(
+    from services.decision_kernel.legacy_rules import legacy_rules_active
+
+    if db in {"mysql", "mariadb", "tidb"} and not legacy_rules_active() and re.match(
         r"^BIT\s*\(\s*1\s*\)$", strip_identity_qualifier(inferred or "").upper()
     ):
         return "BIT(1)"

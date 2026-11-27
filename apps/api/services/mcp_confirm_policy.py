@@ -37,7 +37,12 @@ from __future__ import annotations
 from typing import Any
 
 MODES = ("interactive", "four_eyes", "agent")
+#: Strictness order: a workspace admin may not go below the deployment default.
+STRICTNESS = {"agent": 0, "interactive": 1, "four_eyes": 2}
 DEFAULT_MODE = "interactive"
+#: Workspaces whose entry a platform admin set: only these may sit below the
+#: default. Any other entry is clamped up to the default when read.
+PLATFORM_SET = "set_by_platform_admin"
 #: Modes whose confirmations are human-bound. Weakening a workspace from one
 #: of these to ``agent`` must itself be done from an interactive session.
 HUMAN_BOUND = frozenset({"interactive", "four_eyes"})
@@ -61,7 +66,11 @@ def normalize_mode(value: Any) -> str:
 
 
 def normalize_confirm_policy(raw: Any) -> dict[str, Any]:
-    """``{"default": mode, "workspaces": {id: mode}}``; unknown values fall back to safe."""
+    """``{"default": mode, "workspaces": {id: mode}}``; unknown values fall back to safe.
+
+    ``set_by_platform_admin`` (the workspaces whose entry a platform admin set)
+    is kept only when non-empty and only for entries that exist.
+    """
     raw = raw if isinstance(raw, dict) else {}
     default = str(raw.get("default") or DEFAULT_MODE).strip().lower()
     if default not in MODES:
@@ -71,7 +80,30 @@ def normalize_confirm_policy(raw: Any) -> dict[str, Any]:
         m = str(mode or "").strip().lower()
         if str(ws).strip() and m in MODES:
             workspaces[str(ws).strip()] = m
-    return {"default": default, "workspaces": workspaces}
+    out: dict[str, Any] = {"default": default, "workspaces": workspaces}
+    raw_set = raw.get(PLATFORM_SET)
+    platform_set = sorted(
+        {str(ws).strip() for ws in raw_set if str(ws).strip() in workspaces}
+    ) if isinstance(raw_set, list) else []
+    if platform_set:
+        out[PLATFORM_SET] = platform_set
+    return out
+
+
+def effective_mode(policy: dict[str, Any], workspace_id: str) -> str:
+    """The mode in force: the default is a floor unless a platform admin set the entry.
+
+    Enforced at read, not only at write (review round 3): an entry stored
+    before the floor existed, or by a direct store write, cannot stay looser.
+    """
+    default = policy["default"]
+    ws = str(workspace_id or "").strip()
+    entry = policy["workspaces"].get(ws) if ws else None
+    if entry is None:
+        return default
+    if ws in policy.get(PLATFORM_SET, ()) or STRICTNESS[entry] >= STRICTNESS[default]:
+        return entry
+    return default
 
 
 def confirm_mode_for(workspace_id: str) -> str:
@@ -82,8 +114,7 @@ def confirm_mode_for(workspace_id: str) -> str:
         policy = normalize_confirm_policy(get_mcp_policy().get("confirm"))
     except Exception:  # noqa: BLE001 - never fall open to ``agent``
         return DEFAULT_MODE
-    ws = str(workspace_id or "").strip()
-    return policy["workspaces"].get(ws, policy["default"]) if ws else policy["default"]
+    return effective_mode(policy, workspace_id)
 
 
 def credential_kind(request: Any) -> str:
@@ -174,14 +205,17 @@ def merge_confirm_change(
     The store is deployment-wide, but ``PUT /api/v1/mcp/policy`` is open to any
     workspace admin. So: ``default`` and other workspaces' entries need a
     platform admin; a workspace admin may set (or clear, with ``null``) only
-    their own workspace's entry. Entries the request does not name are kept —
-    a change merges, it never replaces another workspace's policy.
+    their own workspace's entry, and only as strict as or stricter than the
+    default (agent < interactive < four_eyes). Entries the request does not
+    name are kept — a change merges, it never replaces another workspace's
+    policy.
     Raises ``PermissionError`` (refused) or ``ValueError`` (invalid mode).
     """
     if not isinstance(requested, dict):
         raise ValueError("confirm must be an object: {default, workspaces}")
     current = normalize_confirm_policy(stored)
     merged = {"default": current["default"], "workspaces": dict(current["workspaces"])}
+    platform_set = set(current.get(PLATFORM_SET, ()))
     if "default" in requested and requested["default"] is not None:
         mode = normalize_mode(requested["default"])
         if mode != current["default"]:
@@ -191,19 +225,63 @@ def merge_confirm_change(
                 )
             merged["default"] = mode
     own = str(caller_workspace or "").strip()
-    for ws, mode in dict(requested.get("workspaces") or {}).items():
+    workspaces = requested.get("workspaces")
+    if workspaces is not None and not isinstance(workspaces, dict):
+        raise ValueError("confirm.workspaces must be an object of workspace id -> mode")
+    for ws, mode in dict(workspaces or {}).items():
         key = str(ws or "").strip()
         if not key:
             continue
         new_mode = None if mode is None else normalize_mode(mode)
         if new_mode == current["workspaces"].get(key):
+            # Unchanged: a GET + PUT round trip of the whole policy marks
+            # nothing (review round 4). To exempt an existing entry, a platform
+            # admin names it in ``set_by_platform_admin``.
             continue
         if key != own and not platform_admin:
             raise PermissionError(
                 f"A workspace admin can change only their own workspace's confirm policy, not {key!r}."
             )
+        if (
+            new_mode is not None
+            and not platform_admin
+            and STRICTNESS[new_mode] < STRICTNESS[merged["default"]]
+        ):
+            # The deployment default is a floor: a workspace admin may be as
+            # strict or stricter, never looser (review N6).
+            raise PermissionError(
+                f"'{new_mode}' is looser than the deployment default '{merged['default']}'; "
+                "only a platform admin can set a workspace below the default."
+            )
         if new_mode is None:
             merged["workspaces"].pop(key, None)
         else:
             merged["workspaces"][key] = new_mode
-    return merged
+        if platform_admin and new_mode is not None:
+            platform_set.add(key)
+        else:
+            platform_set.discard(key)
+    explicit = requested.get(PLATFORM_SET)
+    if explicit is not None:
+        if not isinstance(explicit, list):
+            raise ValueError("confirm.set_by_platform_admin must be a list of workspace ids")
+        named = {str(ws or "").strip() for ws in explicit} - platform_set
+        if named and not platform_admin:
+            raise PermissionError("Only a platform admin can exempt a workspace from the default.")
+        platform_set |= named
+    merged[PLATFORM_SET] = sorted(platform_set)
+    return normalize_confirm_policy(merged)
+
+
+def own_admin_workspace(user: Any, header_workspace: str) -> str:
+    """The workspace a workspace admin's policy change applies to.
+
+    The same answer the RBAC gate decided the request in
+    (:func:`services.effective_role.resolved_workspace_id`): the
+    ``X-Workspace-Id`` header when sent, else the caller's single membership.
+    ``""`` when it is ambiguous or unknown (review round 3: this used to pick
+    the one *admin* membership among several, a workspace the gate never read).
+    """
+    from services.effective_role import resolved_workspace_id
+
+    return resolved_workspace_id(user, str(header_workspace or "").strip())

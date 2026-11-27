@@ -113,9 +113,7 @@ def test_masked_and_sentinel_values_are_not_keys(store):
     assert store.resolve_provider_api_key("openai") == "sk-real-key"
 
     integrations_store.update_ai_provider("anthropic", {"api_key": ""})
-    raw = integrations_store._load_raw()
-    raw["ai_providers"]["anthropic"]["api_key"] = "[decryption-failed]"
-    integrations_store._save(raw)
+    integrations_store._save_section("ai_providers.anthropic.api_key", "[decryption-failed]")
     assert store.resolve_provider_api_key("anthropic") == ""
     assert "anthropic" not in store.configured_ai_providers()
 

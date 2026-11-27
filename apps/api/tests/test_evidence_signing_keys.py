@@ -106,23 +106,41 @@ def test_tampered_pack_fails_and_a_key_id_nobody_holds_is_named():
     assert "signing key ev1:0000000000000000 is not in this deployment's evidence keyring" in out["errors"]
 
 
-def test_legacy_login_secret_packs_still_verify_and_are_named_legacy():
-    """A pack issued before evidence keys (key_id platform_auth_secret) keeps verifying."""
-    body = {"version": "1", "job_id": "job-old", "assurance": {}, "gate8": {"passed": True}}
-    digest = sha256_hex(canonical_json(body))
+def test_legacy_login_secret_packs_still_verify_and_are_named_legacy(tmp_path, monkeypatch):
+    """A pack issued before evidence keys (key_id platform_auth_secret) keeps
+    verifying when the server recorded it before the cutover (the legacy
+    evidence register, review 2 item 4); one it never recorded is refused,
+    named as the legacy key."""
+    from services import audit_log, legacy_evidence_register as register
+    from services.signed_proof_pack import LEGACY_NOT_ON_RECORD, LEGACY_NOT_ON_RECORD_REASON
+
+    monkeypatch.setattr(register, "_collection", lambda: None)
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
+    monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit_events.jsonl")
     login = b"login-secret-" + b"x" * 40
-    legacy = {
-        **body,
-        "content_sha256": digest,
-        "signature": {
-            "alg": "HMAC-SHA256", "key_id": "platform_auth_secret",
-            "value": hmac.new(login, f"{digest}:job-old".encode(), hashlib.sha256).hexdigest(),
-        },
-    }
+
+    def _legacy(job_id: str) -> dict:
+        body = {"version": "1", "job_id": job_id, "assurance": {}, "gate8": {"passed": True}}
+        digest = sha256_hex(canonical_json(body))
+        return {
+            **body,
+            "content_sha256": digest,
+            "signature": {
+                "alg": "HMAC-SHA256", "key_id": "platform_auth_secret",
+                "value": hmac.new(login, f"{digest}:{job_id}".encode(), hashlib.sha256).hexdigest(),
+            },
+        }
+
+    legacy = _legacy("job-old")
+    audit_log.append_audit_event(action="proof_pack.export", resource="job:job-old",
+                                 details={"content_sha256": legacy["content_sha256"]})
     out = verify_signed_proof_pack(legacy)
     assert out["ok"] is True, out
     assert out["signing_key"]["legacy_key"] is True
     assert out["signing_key"]["key_scope"] == "legacy_login_secret"
+    refused = verify_signed_proof_pack(_legacy("job-never-exported"))
+    assert refused["ok"] is False and refused["legacy_status"] == LEGACY_NOT_ON_RECORD
+    assert LEGACY_NOT_ON_RECORD_REASON in refused["errors"]
     # The legacy key verifies only what it signed: a new pack is never signed with it.
     assert _pack()["signature"]["key_id"] != "platform_auth_secret"
 

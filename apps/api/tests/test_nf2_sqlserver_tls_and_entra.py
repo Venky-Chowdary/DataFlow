@@ -327,3 +327,112 @@ def test_managed_identity_read_back_sends_no_default_username(monkeypatch):
     })) if gs._mssql_odbc_driver() else None
     if url is not None:
         assert url.username is None
+
+
+
+@pytest.mark.parametrize("scheme", ["mssql+pytds", "mssql+pymssql", "mssql+aioodbc"])
+def test_every_non_pyodbc_mssql_scheme_obeys_the_host_policy(monkeypatch, no_odbc, scheme):
+    """Review N9: only mssql+pymssql was refused; mssql+pytds (FreeTDS-style) passed."""
+    import re
+
+    monkeypatch.setenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", "1")
+    cfg = {"type": "sqlserver", "connection_string": f"{scheme}://u:p@db.example.test:1433/sales"}
+    with pytest.raises(SqlServerSecurityError, match=re.escape(scheme)):
+        gs._build_url_unconfined(dict(cfg))
+
+
+def test_pyodbc_and_plain_mssql_schemes_pass_the_host_policy(monkeypatch, odbc):
+    monkeypatch.setenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", "1")
+    for scheme in ("mssql+pyodbc", "mssql"):
+        url = gs._build_url_unconfined({"type": "sqlserver", "connection_string": f"{scheme}://u:p@h:1433/d"})
+        assert str(url).startswith(scheme)
+
+
+def _oc(text: str) -> str:
+    from urllib.parse import quote_plus
+
+    return "odbc_connect=" + quote_plus(text)
+
+
+_D18 = "DRIVER={ODBC Driver 18 for SQL Server};SERVER=h;"
+
+
+@pytest.mark.parametrize(("query", "refused"), [
+    # In the SQLAlchemy URL query (any key case).
+    ("driver=FreeTDS", "driver=FreeTDS"),
+    ("Driver=%2Fusr%2Flib%2Fx86_64-linux-gnu%2Fodbc%2Flibtdsodbc.so", "driver="),
+    ("driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes", "TrustServerCertificate=yes"),
+    ("driver=ODBC+Driver+18+for+SQL+Server&trustservercertificate=True", "TrustServerCertificate=True"),
+    ("driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=y", "TrustServerCertificate=y"),
+    ("driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=Y", "TrustServerCertificate=Y"),
+    ("driver=ODBC+Driver+18+for+SQL+Server&Encrypt=no", "Encrypt=no"),
+    ("driver=ODBC+Driver+18+for+SQL+Server&ENCRYPT=Optional", "Encrypt=Optional"),
+    ("driver=ODBC+Driver+18+for+SQL+Server&Encrypt=n", "Encrypt=n"),
+    ("driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&Encrypt=no", "Encrypt more than once"),
+    # Inside odbc_connect, keys in any case, ODBC brace rules.
+    (_oc("DRIVER={FreeTDS};SERVER=h;PORT=1433"), "driver=FreeTDS"),
+    (_oc(_D18 + "trustServerCertificate=yes"), "TrustServerCertificate=yes"),
+    (_oc(_D18 + "TrustServerCertificate = y"), "TrustServerCertificate=y"),   # spaces around '='
+    (_oc(_D18 + "Encrypt= no"), "Encrypt=no"),
+    # Review 4: '{' inside an unbraced value opens nothing; the driver applies these.
+    (_oc(_D18 + "UID=u;PWD=x{;TrustServerCertificate=yes;Encrypt=no;APP=}"), "TrustServerCertificate=yes"),
+    (_oc(_D18 + "PWD={a;Encrypt=no"), "unbalanced brace"),                  # unterminated brace
+    (_oc(_D18 + "PWD={a}b;Encrypt=yes"), "unbalanced brace"),               # text after the brace
+    (_oc(_D18 + "Encrypt=yes;Encrypt=no"), "Encrypt more than once"),       # duplicate key
+    (_oc(_D18 + "TrustServerCertificate=no;trustservercertificate=yes"), "more than once"),
+    (_oc("DSN=prod;UID=u"), "DSN"),
+    # A second decoding (SQLAlchemy unquotes odbc_connect again) cannot hide a key.
+    ("odbc_connect=" + "DRIVER%253D%257BODBC%2BDriver%2B18%2Bfor%2BSQL%2BServer%257D%253BEncrypt%253Dno", "Encrypt=no"),
+    # Accepted: Driver 18, verification on.
+    ("driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes", None),
+    ("driver=ODBC+Driver+18+for+SQL+Server&Encrypt=strict&TrustServerCertificate=no", None),
+    ("driver=ODBC+Driver+18+for+SQL+Server&Encrypt=Mandatory&TrustServerCertificate=0", None),
+    (_oc(_D18 + "PWD={a;Encrypt=no}};x};Encrypt=yes"), None),            # braced: '}}' escapes
+])
+def test_pyodbc_strings_obey_the_verified_tls_allow_list(monkeypatch, odbc, query, refused):
+    """Reviews 3-4: every mssql+pyodbc string passed as verified; then a deny-list
+    missed 'y' and a '{' in the middle of a value hid the keys after it."""
+    from connectors.mssql_security import enforce_mssql_url
+
+    monkeypatch.setenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", "1")
+    for scheme in ("mssql+pyodbc", "mssql"):
+        raw = f"{scheme}://u:p@db.example.test:1433/sales?{query}"
+        if refused is None:
+            assert enforce_mssql_url(raw, {}) == raw
+            continue
+        with pytest.raises(SqlServerSecurityError) as caught:
+            enforce_mssql_url(raw, {})
+        assert refused.lower() in str(caught.value).lower(), str(caught.value)
+        assert enforce_mssql_url(raw, {"sqlserver_driver": "freetds"}) == raw  # the labelled opt-out
+    monkeypatch.delenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS")
+    raw = f"mssql+pyodbc://u:p@h/d?{query}"
+    assert enforce_mssql_url(raw, {}) == raw  # no policy: as before
+
+
+@pytest.mark.parametrize("query", [
+    "driver=ODBC+Driver+18+for+SQL+Server",
+    _oc(_D18 + "UID=u"),
+    "",
+])
+def test_absent_encrypt_is_forced_to_yes_under_the_policy(monkeypatch, odbc, query):
+    """Encrypt absent gets the default a host/port connector gets (Driver 17 would not encrypt)."""
+    from sqlalchemy.dialects.mssql.pyodbc import MSDialect_pyodbc
+    from sqlalchemy.engine import make_url
+
+    from connectors.mssql_security import enforce_mssql_url
+
+    monkeypatch.setenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", "1")
+    raw = "mssql+pyodbc://u:p@db.example.test:1433/sales" + (f"?{query}" if query else "")
+    out = enforce_mssql_url(raw, {})
+    connect = MSDialect_pyodbc().create_connect_args(make_url(out))[0][0]
+    assert connect.rstrip(";").endswith("Encrypt=yes"), connect
+    assert enforce_mssql_url(out, {}) == out
+
+
+def test_connection_string_with_trust_server_certificate_is_refused_end_to_end(monkeypatch, odbc):
+    monkeypatch.setenv("DATAFLOW_MSSQL_REQUIRE_VERIFIED_TLS", "1")
+    cfg = {"type": "sqlserver", "connection_string":
+           "mssql+pyodbc://u:p@db.example.test:1433/sales?driver=ODBC+Driver+18+for+SQL+Server"
+           "&TrustServerCertificate=yes"}
+    with pytest.raises(SqlServerSecurityError, match="TrustServerCertificate"):
+        gs._build_url_unconfined(dict(cfg))

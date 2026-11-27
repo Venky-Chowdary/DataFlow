@@ -76,12 +76,21 @@ def probe_snowflake_governance(cfg: dict[str, Any], table: str) -> dict[str, Any
             if sf._kind(cur, schema, live) == "temporary":
                 return {"ran": True, "governed": False, "unreadable": ["a TEMPORARY table (no backup can outlive the run)"], "message": ""}
             gov = sf._governance(cur, sf._ref(schema, live), cfg, emulator=False)
+            unrestorable = ""
+            if gov.has_policies is not False:
+                can, why = sf._can_swap(cur, schema, live)
+                if not can:
+                    unrestorable = (
+                        "a failed run could not be restored (restoring needs ALTER TABLE ... "
+                        f"SWAP WITH, which needs OWNERSHIP, and {why})"
+                    )
     finally:
         _close_quietly(conn)
     return {
         "ran": True,
         "governed": bool(gov.grants or gov.policies or gov.tag_policies or gov.tags),
         "unreadable": list(gov.unreadable),
+        "unrestorable": unrestorable,
         "message": "",
     }
 
@@ -164,6 +173,19 @@ def build_overwrite_governance_gate(
         losses.extend(f"{item} cannot be read, so it cannot be re-created" for item in measured.get("unreadable") or [])
     details["measured_losses"] = losses
     details["requires_approval"] = bool(losses) and not acknowledged
+    if measured.get("unrestorable"):
+        # Approval accepts lost metadata, never a run that could not be undone.
+        return {
+            "id": GATE_ID,
+            "status": "block",
+            "message": (
+                f"Overwrite of '{destination_table}' is refused: {measured['unrestorable']}. "
+                "Run it with the table's owning role, or grant that role to the connector's role."
+            ),
+            "duration_ms": 0,
+            "details": {**details, "requires_approval": False, "unrestorable": measured["unrestorable"]},
+            "suggested_actions": ["Use the owning role for this connector and re-validate"],
+        }
     if not losses:
         return {
             "id": GATE_ID,

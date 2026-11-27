@@ -19,7 +19,7 @@
 #              masks); it is never written on a command line or in this file.
 # Emulator greens are labelled emulator_not_customer_tenant by the lab; they
 # are not customer-tenant certificates.
-# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls] [bigquery] [redis] [postgres] [sqlserver]
+# Usage: start_ci_databases.sh [mysql] [mysql-forcedpk] [mongo] [gcs] [adls] [bigquery] [redis] [postgres] [sqlserver]
 set -euo pipefail
 
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-public.ecr.aws/docker/library/postgres:16}"
@@ -95,6 +95,30 @@ start_mysql() {
     docker cp dataflow-ci-mysql:/var/lib/mysql/ca.pem "$ca"
     echo "DATAFLOW_TEST_MYSQL_CA=${ca}" >> "$GITHUB_ENV"
   fi
+}
+
+# MySQL 8 that refuses CREATE TABLE without a PRIMARY KEY (Aiven's default),
+# its own container and port, for the forced-PK leg (job mysql-forced-pk).
+start_mysql_forcedpk() {
+  MYSQL_IMAGE=$(pull_image "$MYSQL_IMAGE" "docker.io/library/mysql:8.0")
+  docker rm -f dataflow-ci-mysql-forcedpk >/dev/null 2>&1 || true
+  docker run -d --name dataflow-ci-mysql-forcedpk \
+    -e MYSQL_ROOT_PASSWORD=dataflow \
+    -e MYSQL_DATABASE=dataflow \
+    -e MYSQL_USER=dataflow \
+    -e MYSQL_PASSWORD=dataflow \
+    -p 3308:3306 \
+    "$MYSQL_IMAGE" \
+    --sql-require-primary-key=ON
+  wait_for "MySQL (sql_require_primary_key=ON)" 60 2 mysql_forcedpk_serving \
+    || { docker logs dataflow-ci-mysql-forcedpk || true; exit 1; }
+  docker exec dataflow-ci-mysql-forcedpk mysql -h 127.0.0.1 -u root -pdataflow -Ne \
+    "SHOW VARIABLES WHERE Variable_name = 'sql_require_primary_key'"
+}
+
+mysql_forcedpk_serving() {
+  docker exec -e MYSQL_PWD=dataflow dataflow-ci-mysql-forcedpk \
+    mysql -h 127.0.0.1 -u dataflow -D dataflow -Nse "SELECT 1" >/dev/null 2>&1
 }
 
 start_mariadb() {
@@ -346,6 +370,7 @@ for svc in "$@"; do
     postgres-cdc) start_postgres_cdc ;;
     mysql) start_mysql ;;
     mariadb) start_mariadb ;;
+    mysql-forcedpk) start_mysql_forcedpk ;;
     mongo) start_mongo ;;
     gcs) start_gcs ;;
     adls) start_adls ;;

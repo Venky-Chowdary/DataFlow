@@ -218,6 +218,11 @@ def _bitstring_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         # wider one does not fit 64 bits: clamping to BIT(n) quarantined every
         # value shorter than n (D320: varbit(16) -> BIT(16), 3 of 5 rows).
         # Those land as the 0/1 digit text every other engine uses.
+        from services.decision_kernel.legacy_rules import legacy_rules_active
+
+        if legacy_rules_active():
+            # The previous release's clamp, only to match its stamps (review Q1).
+            return "BIT(64)" if width is None else f"BIT({min(width, MYSQL_BIT_MAX_WIDTH)})"
         if width is not None and not varying and width <= MYSQL_BIT_MAX_WIDTH:
             return f"BIT({width})"
         if width is not None and width <= MYSQL_BITSTRING_VARCHAR_MAX:

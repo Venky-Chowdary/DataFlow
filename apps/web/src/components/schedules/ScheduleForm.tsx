@@ -434,7 +434,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
         <div className="df2-sched-mapping-gap" role="status">
           <p className="df2-field-hint">
             {isEdit
-              ? "This pipeline has no persisted Validate mappings, so Run now cannot start it. Plan mappings maps the columns and runs Validate for this source and destination, then arms it; or map it yourself in Transfer Studio."
+              ? "This pipeline has no persisted Validate mappings, so Run now cannot start it. Plan mappings maps the columns and runs Validate for this source and destination; enable the schedule to resume its cadence. Or map it yourself in Transfer Studio."
               : "Save plans this schedule the way Transfer Studio does: Datawrap reads both schemas, maps the columns and runs Validate, and saves the schedule only if that plan would run. To review the mapping yourself first, open Transfer Studio."}
           </p>
           {isEdit && onPlanMappings && (

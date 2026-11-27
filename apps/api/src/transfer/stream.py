@@ -2415,11 +2415,11 @@ def _stream_database_transfer_impl(
     # P0-5: the sample is a uniform random draw over every row offered the
     # writer (seeded, seed recorded), not the first rows read, so Gate-8's
     # sample bounds the rows it did not check.
-    from services.gate8_uniform_sample import UniformSampleMerger, new_draw
+    from services.gate8_uniform_sample import resume_draw
 
-    sample_draw = new_draw(run.cfg._RECONCILE_SAMPLE_CAP)
+    # T3: a resumed pass continues the checkpointed draw (else it is partial).
+    sample_draw, sample_merger = resume_draw(checkpoint, run.cfg._RECONCILE_SAMPLE_CAP, resumed=resumed_pass)
     run.cfg._RECONCILE_SAMPLE_DRAW = sample_draw
-    sample_merger = UniformSampleMerger(sample_draw["seed"], run.cfg._RECONCILE_SAMPLE_CAP)
 
     # The destination DDL rides on the first page that reaches the writer, which
     # is not necessarily the first page read: a source filter or a recipe can
@@ -2571,6 +2571,7 @@ def _stream_database_transfer_impl(
         # ordered result stream so checkpoint offsets/cursors can never skip
         # ahead of an in-flight batch.
         checkpoint.chunk_index = idx
+        checkpoint.reconcile_sample_draw_state = sample_merger.state(sample_draw, idx)
         checkpoint.offset = committed_offset
         checkpoint.rows_processed = run.tally.written
         # Persist cumulative quarantine counts so a crash-resume restores them and
@@ -3636,7 +3637,7 @@ def _stream_database_transfer_impl(
             ) + diverted
     if reconcile_sample:
         run.tally.dest_summary["reconcile_sample"] = reconcile_sample[:run.cfg._RECONCILE_SAMPLE_CAP]
-    if sample_merger.population and sample_merger.rows and sample_merger.rows is reconcile_sample:
+    if sample_merger.population and sample_merger.rows and sample_merger.rows is reconcile_sample and not sample_merger.partial:
         run.tally.dest_summary["reconcile_sample_draw"] = sample_merger.draw_record(sample_draw)
     if load_methods_seen:
         if "copy_into" in load_methods_seen:

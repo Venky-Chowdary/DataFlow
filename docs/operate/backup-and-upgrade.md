@@ -101,9 +101,9 @@ Apply the same retention and access rules to these as to the source data.
 
 | Priority | What | Why |
 |---|---|---|
-| 1 | The secrets: `AUTH_SECRET`, `SECRETS_KEY`, `AUDIT_HMAC_KEY` and any retired audit keys | Without `SECRETS_KEY`, stored connector credentials and the evidence signing keys cannot be decrypted, so signed packs can no longer be verified. Without the audit keys, old audit records cannot be verified. Packs signed before evidence keys existed (key id `platform_auth_secret`) verify only with the `AUTH_SECRET` they were signed under. Keep them in your secret manager, not only on the host. |
-| 2 | MongoDB, database `datatransfer` | Jobs, schedules, connectors, audit events, accounts, CDC and incremental positions. |
-| 3 | The data directory | Workspace settings, customer-managed keys, plans, ACLs, anchors. |
+| 1 | The secrets: `AUTH_SECRET`, `SECRETS_KEY`, `AUDIT_HMAC_KEY` and any retired audit keys | Without `SECRETS_KEY`, stored connector credentials and the evidence signing keys cannot be decrypted, so signed packs can no longer be verified. Without the audit keys, old audit records cannot be verified. Packs signed before evidence keys existed (key id `platform_auth_secret`) verify only with the `AUTH_SECRET` they were signed under, and only while the legacy evidence register (below) still holds their digest. Keep them in your secret manager, not only on the host. |
+| 2 | MongoDB, database `datatransfer` | Jobs, schedules, connectors, audit events, accounts, CDC and incremental positions, and the legacy evidence register (collection `legacy_evidence_register`). |
+| 3 | The data directory | Workspace settings, customer-managed keys, plans, ACLs, anchors, and the legacy evidence register when no MongoDB is connected (`legacy_evidence_register.json`). The register is written once, at the first evidence key; it cannot be rebuilt after the audit records it was taken from are purged. |
 | 4 | Upload and export locations | Only if you need to resume jobs from uploaded files or keep exports. |
 
 Take the MongoDB backup and the data directory backup as close together as you
@@ -171,6 +171,31 @@ backfill code that runs at start (for example
 - **Flag names.** `DATAFLOW_` names keep working. See the prefix rule in
   [configuration.md](configuration.md).
 - **API keys.** Keys starting `dfk_` stay valid.
+- **Map approvals that do not record the key.** Approvals made by the
+  previous releases (the feature/Cleanup format, and PR #435's interim
+  format) do not cover which columns are the key. On this release such an
+  approval runs only where Datawrap knows the key it was taken over, and only
+  for that key:
+  - A schedule saved before the upgrade: its stored rows, recorded per
+    schedule the first time this release reads it, before any edit (a
+    scheduled run, or a save). The record is kept in the MongoDB collection
+    `decision_stamp_key_records`, or in `decision_stamp_key_records.json` in
+    the data directory.
+  - A Studio or API run: the Decision Artifact the earlier release stored on
+    a job for that approval (its rows keep the key flag).
+  - With neither, the run is refused with "re-Validate this route — the
+    approval predates key tracking", keyed or not. A schedule created on this
+    release with such an approval has no record.
+  - A key added, removed or moved is refused with "re-Validate this route".
+  - An edit of a schedule's route, mappings, key, sync mode or error
+    handling drops such an approval, and the save answers "Run Validate
+    again". Until then the schedule is unvalidated, like any schedule whose
+    route was edited without Validate.
+  - Run Validate again; the new approval covers the key.
+  - **The gap before this release.** The earlier releases let a key-only
+    edit keep such an approval. So the rows this release records for a
+    schedule at first sight may already differ from what was approved. To be
+    sure, run Validate again on every keyed schedule after the upgrade.
 
 
 #### Workspace isolation and residency (PR 403)
