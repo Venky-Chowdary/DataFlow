@@ -858,6 +858,7 @@ class UniversalTransferEngine:
             rollback_uncommitted_auto_creates,
         )
 
+        from services.oracle_session_scope import oracle_run_scope
         from services.source_engine_scope import bind_source_engine
 
         # Resolve first: a connector_id reference carries the engine id that
@@ -952,7 +953,9 @@ class UniversalTransferEngine:
         try:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
-            ), baseline_before_success(request, job_id) as pending_baseline:
+            ), oracle_run_scope(request, job_id, _probe_mongo), baseline_before_success(
+                request, job_id
+            ) as pending_baseline:
                 from services.destination_write_lock import hold_destination_write_lock
 
                 hold_destination_write_lock(request, job_id)  # released by tracked_job_scope

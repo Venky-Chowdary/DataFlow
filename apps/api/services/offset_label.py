@@ -155,8 +155,12 @@ def attach_offset_label(utc_instant: datetime, label: OffsetLabel) -> datetime:
     return utc_instant.astimezone(label.to_tzinfo())
 
 
-def stores_originating_offset(engine: str, type_name: str) -> bool:
+def stores_originating_offset(engine: str, type_name: str, *, as_destination: bool = False) -> bool:
     """True only when this engine physically stores the writer's offset.
+
+    ``as_destination``: whether DataFlow's write keeps it there. An Oracle
+    ``WITH TIME ZONE`` source holds offsets; as a destination it keeps them
+    only on a committed server-side copy (the row writer binds UTC, finding 8).
 
     Fail-closed without an engine: only unambiguous spellings
     (``DATETIMEOFFSET``, Snowflake ``TIMESTAMP_TZ``) count. SQL-standard
@@ -193,10 +197,16 @@ def stores_originating_offset(engine: str, type_name: str) -> bool:
         return "DATETIMEOFFSET" in collapsed
 
     if eng == "oracle":
+        # The column can hold an offset, but the row writer binds UTC digits
+        # (python-oracledb cannot carry one, finding 8): only this run's
+        # committed server-side INSERT ... SELECT keeps the originating offset.
+        from services.oracle_session_scope import oracle_same_instance
+
         return (
             "WITH TIME ZONE" in collapsed
             and "LOCAL" not in collapsed
             and not collapsed.startswith("TIME ")
+            and (not as_destination or oracle_same_instance())
         )
 
     if eng == "snowflake":
@@ -218,7 +228,7 @@ def restore_offset_after_utc(
     dest_type: str,
 ) -> datetime:
     """UTC-normalize for instant-only dests; re-attach the label when dest stores it."""
-    if not stores_originating_offset(engine, dest_type):
+    if not stores_originating_offset(engine, dest_type, as_destination=True):
         if utc_instant.tzinfo is None:
             return utc_instant.replace(tzinfo=timezone.utc)
         return utc_instant.astimezone(timezone.utc)
@@ -273,7 +283,7 @@ def decide_offset_label(
     if src_pol not in {"tz", "ltz"}:
         return None
     src_stores = stores_originating_offset(source_engine, source_type)
-    dst_stores = stores_originating_offset(dest_engine, dest_type)
+    dst_stores = stores_originating_offset(dest_engine, dest_type, as_destination=True)
     col = dest_column or source_column
     if not src_stores:
         return OffsetLabelDecision(

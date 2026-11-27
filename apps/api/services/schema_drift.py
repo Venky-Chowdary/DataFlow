@@ -377,7 +377,9 @@ def _semantic_rename_pairs(
             or _entity_conflict_requires_review(d, a)
         ):
             continue
-        if float(row.get("confidence") or 0) < 0.72:
+        # A pair Map would send to review (an inferred abbreviation, a
+        # near-tie) is not proof of a rename (accuracy review finding 10).
+        if float(row.get("confidence") or 0) < 0.72 or row.get("requires_review"):
             continue
         pairs.append((d, a))
         used_added.add(a)

@@ -92,6 +92,13 @@ def record_job_outcome(
         _inc("dataflow_reconcile_fail_total")
 
 
+def record_validate_execute(outcome: str) -> None:
+    """Count one run of the Validate-vs-Execute ledger by outcome class."""
+    safe = "".join(ch for ch in str(outcome or "unvalidated") if ch.isalnum() or ch == "_")[:30]
+    _inc("dataflow_validate_execute_runs_total")
+    _inc(f"dataflow_validate_execute_{safe or 'unvalidated'}_total")
+
+
 def record_terminal_job_transition(
     *,
     previous_status: str | None,

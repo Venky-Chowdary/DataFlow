@@ -109,6 +109,22 @@ jobs:
         run: |
           python -m pytest tests/test_evidence_pack.py -q --tb=short
 
+      # Held-out mapping benchmark (tests/fixtures/mapping_holdout_v1.json),
+      # measured on Map's pipeline (run_mapping_pipeline, use_llm=False) and,
+      # labelled, the bare scorer. Floors/ceilings in
+      # services/mapping_holdout_eval.py, ratchet only: auto-approve precision
+      # >= 0.98, no column without a right answer auto-approved. dev2 is an
+      # inspected split; the blind number comes from a sealed external fixture.
+      # The leak check fails on any new name/token association of a dev2
+      # answer; the invariant test forbids any policy-made auto-approval.
+      - name: Held-out mapping gate + leak check
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .:../../packages/preflight/src
+        run: |
+          python -m pytest tests/test_mapping_holdout_gate.py tests/test_mapping_holdout_leak.py tests/test_mapping_policy_invariant.py -q --tb=short
+          { echo "### Held-out mapping benchmark (dev2, inspected; Map pipeline)"; echo '```'; python scripts/run_mapping_holdout.py --split dev2 --bootstrap 500; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: God-module size budgets (Phase F8)
         working-directory: apps/api
         run: |
@@ -164,6 +180,27 @@ jobs:
           python -m pytest \
             tests/test_item1_llm_never_correctness_path.py \
             tests/test_llm_mapping.py \
+            -q --tb=short
+
+      # Accuracy A8: Gate-8 cell fingerprint property (fixed seed, 29 carriers
+      # x 400 single-cell mutations and re-spellings, well under 60 s):
+      # a changed value is never "proven", a re-spelled equal value never
+      # flagged. Plus the mapping policy unit tests (no network, no keys).
+      - name: Fingerprint properties + mapping policy (offline)
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .:../../packages/preflight/src
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          OPENAI_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+          OLLAMA_HOST: "http://127.0.0.1:9"
+        run: |
+          timeout 300 python -m pytest \
+            tests/test_fingerprint_properties.py \
+            tests/test_mapping_assignment_policy.py \
+            tests/test_accuracy_type_pairs.py \
+            tests/test_type_fidelity_truth_table.py \
             -q --tb=short
 
   # Data Pilot answer floors: local engine only, no network LLM. The provider

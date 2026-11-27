@@ -145,8 +145,14 @@ def _oracle_connect(cfg: dict[str, Any]) -> Any:
     except Exception as exc:
         raise FastPathUnavailable(f"Oracle connect failed: {exc}") from exc
     from connectors.oracle_numbers import attach_oracle_number_output
+    from connectors.oracle_session import pin_utc_session
 
     attach_oracle_number_output(conn)
+    # Every Oracle writer session runs in UTC (finding 8). The bulk paths decline
+    # zone-bearing sources, so an unconfirmed pin here only gets logged.
+    pinned, reason = pin_utc_session(conn)
+    if not pinned:
+        logger.warning("Oracle bulk session time zone pin not confirmed: %s", reason)
     return conn
 
 
@@ -555,6 +561,11 @@ def copy_oracle_to_oracle(
             and not str(to_copy[0].get("predicate") or "")
         )
         copy_split = "insert_select_append" if use_append else "insert_select"
+        # Every decline is behind us: from here the rows move server side,
+        # offsets and all (finding 8). Any failure below clears the mark.
+        from services.oracle_session_scope import mark_server_side_oracle_copy
+
+        mark_server_side_oracle_copy(source_cfg, dest_cfg)
         for item in to_copy:
             clause = str(item.get("predicate") or "")
             params = list(item.get("params") or [])
@@ -631,6 +642,9 @@ def copy_oracle_to_oracle(
             ),
         )
     except Exception:
+        from services.oracle_session_scope import clear_server_side_oracle_copy
+
+        clear_server_side_oracle_copy()  # a declined or failed copy falls back to the row writer
         if created_here:
             try:
                 cur.execute(_drop_sql(dest_ref))

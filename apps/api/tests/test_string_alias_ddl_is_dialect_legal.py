@@ -48,7 +48,12 @@ def test_widthed_string_alias_keeps_width_in_dialect_spelling(dest: str) -> None
     """``STRING(36)`` (a UUID exact wire) must not paste STRING into CREATE."""
     ddl = ddl_type(dest, "STRING(36)")
     assert ddl.upper().split("(", 1)[0].strip() != "STRING", (dest, ddl)
-    if dest not in {"sqlite", "duckdb"}:
+    if dest == "redshift":
+        # Redshift VARCHAR counts bytes: 36 characters of up to 4 UTF-8 bytes
+        # need VARCHAR(144) to keep the 36-char contract (accuracy review 8,
+        # docs.aws.amazon.com/redshift/latest/dg/r_Character_types.html).
+        assert "144" in ddl, (dest, ddl)
+    elif dest not in {"sqlite", "duckdb"}:
         # Engines with a bounded string wire keep the declared 36-char contract.
         assert "36" in ddl, (dest, ddl)
 

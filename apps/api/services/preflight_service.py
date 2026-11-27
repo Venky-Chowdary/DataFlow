@@ -35,6 +35,7 @@ from services.connector_capability_registry import (
     recommended_batch_size,
 )
 from services.data_profiler import source_types_are_authoritative
+from services.oracle_session_scope import with_oracle_session_pin
 from services.db_type_utils import (
     DESTS_WITHOUT_SCHEMA_RECREATE,
     NO_RELATIONAL_DDL_DESTS,
@@ -298,6 +299,7 @@ def _policy_source_config(
 @_with_date_locale
 @_with_source_engine
 @with_preflight_destination_ownership
+@with_oracle_session_pin
 def run_file_preflight(
     *,
     columns: list[str],

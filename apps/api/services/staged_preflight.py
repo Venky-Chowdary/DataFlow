@@ -166,6 +166,9 @@ def preflight_input_fingerprint(**parts: Any) -> str:
             parts.get("empty_source_overwrite_acknowledged")
         ),
         "load_volume_acknowledged": bool(parts.get("load_volume_acknowledged")),
+        "session_zone_acknowledged": bool(parts.get("session_zone_acknowledged")),
+        "session_zone_ack_actor": str(parts.get("session_zone_ack_actor") or ""),
+        "session_zone_ack_reason": str(parts.get("session_zone_ack_reason") or ""),
         "acknowledgment_actor": str(parts.get("acknowledgment_actor") or ""),
         "acknowledgment_reason": str(parts.get("acknowledgment_reason") or ""),
         "date_locale": str(parts.get("date_locale") or ""),
@@ -438,6 +441,9 @@ def request_preflight_fingerprint(request: Any) -> str:
             request, "empty_source_overwrite_acknowledged", False
         ),
         load_volume_acknowledged=getattr(request, "load_volume_acknowledged", False),
+        session_zone_acknowledged=getattr(request, "session_zone_acknowledged", False),
+        session_zone_ack_actor=getattr(request, "session_zone_ack_actor", "") or "",
+        session_zone_ack_reason=getattr(request, "session_zone_ack_reason", "") or "",
         acknowledgment_actor=getattr(request, "acknowledgment_actor", "") or "",
         acknowledgment_reason=getattr(request, "acknowledgment_reason", "") or "",
         date_locale=getattr(request, "date_locale", "") or "",

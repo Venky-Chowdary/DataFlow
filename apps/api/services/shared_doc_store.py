@@ -711,6 +711,7 @@ _STORE_MODULES = (
     "services.cdc_mapping_review",
     "services.mcp_invocation_log",
     "services.audit_anchor",
+    "services.validate_execute_ledger",
 )
 
 
@@ -752,6 +753,7 @@ CONTROL_PLANE_STORES: tuple[tuple[str, str, bool], ...] = (
     ("cdc_mapping_reviews", "cdc_mapping_reviews.jsonl", True),
     ("mcp_invocations", "mcp_invocations.jsonl", True),
     ("audit_tip_anchors", "audit_tip_anchors.jsonl", True),
+    ("validate_execute_runs", "validate_execute_runs.jsonl", True),
     # No shared backend yet: their modules still read and write the file directly.
     ("transfer_plans", "transfer_plans.json", False),
     ("pilot_results", "pilot_results.json", False),

@@ -104,6 +104,9 @@ def _calibrated_confidence(
 
 
 from services.semantic_abbreviations import ABBREVIATIONS  # noqa: E402
+from services.mapping_assignment_policy import (  # noqa: E402
+    pin_decisive_pairs, presented_mappings, rescore_pairs, solver_moves, suggestion_policy,
+)
 
 
 
@@ -1289,12 +1292,12 @@ def authority_mappings(
     confidence or assignment. Transfer, Validate, and G4 already consume
     ``map_columns`` — AI surfaces must too.
     """
-    return map_columns(source_columns, target_columns, **kwargs)
+    return presented_mappings(source_columns, target_columns, **kwargs)
 
 
 def pair_mapping_authority(source: str, target: str) -> dict:
     """Single-pair view of the Map SSOT for RAG suggest/retrieve."""
-    rows = map_columns([source], [target])
+    rows = presented_mappings([source], [target])
     row = rows[0] if rows else {}
     return {
         "source": source,
@@ -1305,7 +1308,7 @@ def pair_mapping_authority(source: str, target: str) -> dict:
         "reasoning": str(row.get("reasoning") or ""),
         "assignment_strategy": str(row.get("assignment_strategy") or ""),
         "review_kind": row.get("review_kind"),
-        "authority": "semantic_mapper.map_columns",
+        "authority": "mapping_pipeline.run_mapping_pipeline",
     }
 
 
@@ -1529,10 +1532,16 @@ def map_columns(
                 create_new_target=create_new_pairs.get(target) == source,
             )
             pair_scores[(source, target)] = (score, reason)
+    base_scores = dict(pair_scores)
+    review_sources = rescore_pairs(
+        pair_scores, source_columns, target_columns, source_samples=src_samples,
+        expand=lambda t: _expand_abbrev(t).split("_"), blocked=_key_blocked,
+    )
 
     assigned_sources: set[str] = set()
     dest_collisions = _dest_fold_collisions(target_columns)
-    pinned = _pin_exact_name_pairs(source_columns, target_columns)
+    exact_pins = _pin_exact_name_pairs(source_columns, target_columns)
+    pinned = pin_decisive_pairs(exact_pins, source_columns, target_columns, pair_scores)
     optimal = {src: (tgt, *pair_scores[(src, tgt)]) for src, tgt in pinned.items()}
     optimal.update(
         _optimal_assignment(
@@ -1541,6 +1550,7 @@ def map_columns(
             pair_scores,
         )
     )
+    review_sources |= solver_moves(base_scores, source_columns, target_columns, exact_pins, optimal)
     for source in source_columns:
         assigned = optimal.get(source)
         if not assigned:
@@ -1627,19 +1637,7 @@ def map_columns(
         for target in target_columns:
             if target in used_targets or _key_blocked(source, target):
                 continue
-            score, reason = _score_pair(
-                source,
-                target,
-                idf,
-                avgdl,
-                src_roles.get(source),
-                tgt_roles.get(target),
-                src_types.get(source, "VARCHAR"),
-                tgt_types.get(target, "VARCHAR"),
-                src_samples.get(source),
-                dest_db=dest_db,
-                create_new_target=create_new_pairs.get(target) == source,
-            )
+            score, reason = pair_scores[(source, target)]
             if score > best_score:
                 best_score, best_target, best_reason = score, target, reason
         alternatives = _alternatives(source, target_columns, pair_scores)
@@ -1950,6 +1948,10 @@ def map_columns(
             if row.get("assignment_strategy") == "optimal_bipartite_hungarian":
                 row["assignment_strategy"] = "hungarian_with_greedy_patch"
 
+    mappings = suggestion_policy(mappings, target_columns, {
+        "dest_db": dest_db, "src_db": src_db, "source_samples": src_samples, "target_types": tgt_types,
+        "review_sources": review_sources,
+        "names_only_existing": destination_table_exists is True and not target_schemas})
     mappings.sort(key=lambda m: source_columns.index(m["source"]))
     return _stamp_review_kinds(
         _apply_create_new_risk_stamps(

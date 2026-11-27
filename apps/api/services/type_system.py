@@ -2957,8 +2957,11 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
             return "NCLOB" if national else "CLOB"
         if db == "sqlserver":
             return "NVARCHAR(MAX)" if national else "VARCHAR(MAX)"
-        if db in {"postgresql", "redshift"}:
+        if db == "postgresql":
             return "TEXT"
+        if db == "redshift":
+            # Redshift TEXT is VARCHAR(256); the widest carrier is 65535 bytes.
+            return "VARCHAR(65535)"
         if db == "snowflake":
             return "VARCHAR(16777216)"
         if db == "bigquery":
@@ -2988,7 +2991,13 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         if national:
             return f"{'NCHAR' if fixed else 'NVARCHAR'}({min(width, cap)})"
         return f"{'CHAR' if fixed else 'VARCHAR'}({min(width, cap)})"
-    if db in {"postgresql", "redshift"}:
+    if db == "redshift":
+        # Redshift counts bytes and CHAR is single-byte only: a width of n
+        # characters needs 4n bytes of VARCHAR (accuracy review 8). An Oracle
+        # ``(n BYTE)`` source already counts bytes.
+        per_char = 1 if re.search(r"\(\s*\d+\s*BYTE\s*\)", upper) else 4
+        return f"VARCHAR({min(width * per_char, cap)})"
+    if db == "postgresql":
         # No national types — CHAR/VARCHAR; remap polarity via national_charset_would_collapse.
         return f"{'CHAR' if fixed else 'VARCHAR'}({min(width, cap)})"
     if db == "oracle":
@@ -3839,6 +3848,12 @@ def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> st
     # spelling, and missing it would fall through and invent TZ polarity.
     # Keep ``raw`` for the dialect checks that need the parenthesis.
     collapsed = re.sub(r"\s*\(\s*\d+\s*\)", "", raw).strip()
+    # A time of day (TIME, TIMETZ, TIME [(p)] WITH TIME ZONE) is not a
+    # timestamp: it has no date and is not an instant, whatever its offset.
+    # Its offset polarity is :func:`time_timezone_polarity`'s; every spelling
+    # answers ``None`` here (only TIME WITH TIME ZONE used to match "tz").
+    if re.match(r"^TIME(TZ)?\b", collapsed) and not collapsed.startswith("TIMESTAMP"):
+        return None
     ntz_tokens = (
         "TIMESTAMP NTZ",
         "TIMESTAMP WITHOUT TIME ZONE",
@@ -5247,6 +5262,62 @@ def char_count_into_oracle_bytes_would_truncate(
     if normalize_logical_type(source_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
         return False
     return int(tgt.group(2)) < src_w * 4
+
+
+def char_count_into_redshift_bytes_would_truncate(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
+    """True when a character-counted width lands on Redshift's byte-counted VARCHAR.
+
+    Redshift CHAR/VARCHAR(n) count bytes; a UTF-8 character is 1 to 4 bytes, so
+    a ``varchar(n)`` of characters needs ``4n`` bytes, and CHAR holds single-byte
+    characters only. An Oracle ``(n BYTE)`` source already counts bytes. An
+    unknown source width is not proof of a loss.
+    """
+    if _normalize_dest_db(dest_db) != "redshift":
+        return False
+    if normalize_logical_type(source_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    engine = _normalize_dest_db(active_source_engine() or "")
+    if engine == "redshift":
+        return False
+    tgt = re.match(
+        r"^\s*(CHARACTER\s+VARYING|VARCHAR|NVARCHAR|CHARACTER|CHAR|NCHAR|BPCHAR|TEXT)\s*(?:\(\s*(\d+))?",
+        strip_identity_qualifier(target_type).upper(),
+    )
+    if not tgt:
+        return False
+    src_w = parse_string_carrier_width(source_type)
+    if src_w is None:
+        return False
+    if tgt.group(1) in {"CHARACTER", "CHAR", "NCHAR", "BPCHAR"}:
+        return True
+    tgt_w = int(tgt.group(2)) if tgt.group(2) else 256
+    per_char = 1 if oracle_char_byte_unit(source_type) == "BYTE" else 4
+    return tgt_w < src_w * per_char
+
+
+_MYSQL_SMALL_BLOBS = {"TINYBLOB": 255, "BLOB": 65535, "MEDIUMBLOB": 16777215}
+
+
+def mysql_small_blob_would_truncate(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
+    """True when an unbounded binary source lands on a MySQL TINY/BLOB/MEDIUMBLOB.
+
+    PostgreSQL bytea holds up to 1 GB, SQL Server varbinary(max) 2 GB, an Oracle
+    or MySQL LONGBLOB 4 GB; MySQL BLOB stops at 65535 bytes (accuracy review 8).
+    """
+    if _normalize_dest_db(dest_db) not in {"mysql", "mariadb"}:
+        return False
+    cap = _MYSQL_SMALL_BLOBS.get(strip_identity_qualifier(target_type).upper().strip())
+    if cap is None:
+        return False
+    src = " ".join(strip_identity_qualifier(source_type).upper().split())
+    if src.replace(" ", "") == "VARBINARY(MAX)" or src in {"BYTEA", "LONGBLOB", "IMAGE", "LONG RAW"}:
+        return True
+    if src == "BLOB" and _normalize_dest_db(active_source_engine() or "") == "oracle":
+        return True
+    width = parse_binary_carrier_width(source_type)
+    return width is not None and width > cap
 
 
 def is_oracle_long_text_carrier(inferred: str | None) -> bool:

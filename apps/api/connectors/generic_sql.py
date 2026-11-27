@@ -1297,11 +1297,15 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
                 guard_mariadb_bulk_insert_pool_session(dbapi_conn)
 
         if _is_oracle_wire(driver.split("+", 1)[0], db_type):
+            from connectors.oracle_session import install_utc_session_pin
             from connectors.oracle_tstz import pin_oracle_timestamp_format
 
             @event.listens_for(engine, "connect")
             def _oracle_ts_format(dbapi_conn, _connection_record):  # noqa: ANN001
                 pin_oracle_timestamp_format(dbapi_conn)
+
+            # Instants bind as UTC digits; the session must read them as UTC.
+            install_utc_session_pin(engine)
 
         return engine
     except (NoSuchModuleError, ImportError) as exc:
@@ -2110,6 +2114,12 @@ def _to_sa_value(
                         f"generic SQL {ddl_type} refused naive datetime — provide "
                         "offset/Z (refuse silent UTC invent)"
                     )
+                if _is_oracle_wire(dialect_name, str(db_type or "")):
+                    # python-oracledb sends clock digits, never tzinfo: bind UTC
+                    # digits; the session is pinned to +00:00 (finding 8).
+                    from connectors.oracle_session import oracle_instant_bind
+
+                    return oracle_instant_bind(coerced)
                 from connectors.sqlserver_datetime2 import refuse_datetimeoffset_rounding
 
                 aware = bind_aware_datetime(
@@ -5641,6 +5651,9 @@ def write_mapped_rows(
     try:
         with engine.connect() as conn:
             db_type = (cfg.get("type") or "").lower()
+            from services.oracle_session_scope import assert_writer_session
+
+            assert_writer_session(conn, db_type)  # Oracle: this batch's session reads back UTC (finding 8)
             if db_type == "questdb":
                 # QuestDB's pg_catalog reflection is incomplete; use idempotent DDL.
                 table_exists = False
@@ -6237,6 +6250,9 @@ def write_mapped_rows(
             if identity_session is not None:
                 identity_session.close()
                 identity_session = None
+            from services.oracle_session_scope import note_oracle_rows_written
+
+            note_oracle_rows_written(written, db_type)
 
         if ledger_chunks_skipped:
             transform_errors.append(

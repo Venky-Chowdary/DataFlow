@@ -61,7 +61,7 @@ in the group need.
 | `/copilot`, `/ai` | 24 | `ai.use` | Pilot and the AI helpers |
 | `/mcp` | 13 | public discovery, tool gate to run | MCP server |
 | `/audit` | 10 | `audit.read`, `workspace.manage` | Audit events, verify, export, anchors |
-| `/ops` | 14 | `workspace.manage` | Operator views: freshness, dead-letter queue, CDC leases, cursors and captures |
+| `/ops` | 15 | `workspace.manage` | Operator views: freshness, dead-letter queue, CDC leases, cursors and captures, Validate-vs-Execute outcomes |
 | `/workspace` | 46 | `workspace.manage` | Settings, SSO, notifications, keys, proofs |
 | `/team`, `/invites` | 25 | `workspace.read`, `workspace.manage` | Members, workspaces, invitations |
 | `/iam` | 9 | `iam.manage` | Service accounts, API key rotation, SCIM token and group mappings |

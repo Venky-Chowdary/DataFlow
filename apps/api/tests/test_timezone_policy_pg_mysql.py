@@ -1,8 +1,8 @@
 """PostgreSQL → MySQL timezone policy: one named contract, no blanket block.
 
 The rule under test: MySQL ``TIMESTAMP`` is a UTC instant carrier (epoch-bounded),
-MySQL ``DATETIME`` is a zoneless wall clock that can only carry an instant under an
-explicit UTC-normalize contract. Validate and Execute must read the same policy, and
+MySQL ``DATETIME`` is a zoneless wall clock that carries an instant as UTC digits,
+disclosed rather than contracted (finding 8). Validate and Execute must read the same policy, and
 an out-of-range instant must be held out rather than zeroed by MySQL.
 """
 
@@ -41,12 +41,15 @@ def test_pg_timestamptz_to_mysql_timestamp_is_a_native_instant_carrier() -> None
     assert "2038" in policy.range_limit
 
 
-def test_pg_timestamptz_to_mysql_datetime_needs_a_utc_normalize_contract() -> None:
+def test_pg_timestamptz_to_mysql_datetime_is_utc_normalized_and_disclosed() -> None:
+    # The instant is kept as UTC digits in a zone-less column: disclosed, not a
+    # Risk Contract (accuracy review finding 8, lead rule).
     policy = resolve_timezone_policy("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql")
     assert policy is not None
     assert policy.policy == POLICY_UTC_NORMALIZED
     assert policy.instant_preserved is True
-    assert policy.requires_contract is True
+    assert policy.requires_contract is False
+    assert "zone-less column" in policy.note
     assert "TIMESTAMP(6)" in policy.remediation
 
 

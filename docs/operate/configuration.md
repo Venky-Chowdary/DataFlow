@@ -93,7 +93,7 @@ The scan covers the runtime Python under `apps/api/src`, `apps/api/services`,
 
 <!-- BEGIN GENERATED: config-flags (docs/tools/gen_config_reference.py) -->
 
-592 flags: 511 accept both prefixes, 5 are read under one exact product-prefixed name only, 76 are unprefixed.
+595 flags: 514 accept both prefixes, 5 are read under one exact product-prefixed name only, 76 are unprefixed.
 
 ### Flags that accept both prefixes
 
@@ -120,7 +120,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `ASSUME_PRODUCTION` | `0` | `1` turns production policy on for a host that does not set `ENV` (bare metal, Kubernetes). | `apps/api/services/platform_config.py` |
 | `AUDIT_ANCHOR_EVERY` | `1` | Read by `_maybe_anchor_tip()`: Best-effort seal of the chain tip (never fails the audit append) | `apps/api/services/audit_log.py` |
 | `AUDIT_ANCHOR_MIN_INTERVAL_SECONDS` | `""` | Read by `_min_interval()`: External anchoring of digests — the audit chain tip and signed evidence packs | `apps/api/services/audit_anchor.py` |
-| `AUDIT_ANCHOR_PROVIDER` | `stub` | The anchor provider. `stub` (default, alias `local`) keeps a receipt in the built-in store, which is not write-once, so every receipt reads `not_anchored`. `s3` anchors in S3 Object Lock (compliance mode) and reads `anchored` only after the object and its retention were read back. Any other value (for example `tsa`) is not implemented: the receipt is recorded as `requested_provider` with status `failed`, and a warning is logged. | `apps/api/services/audit_anchor.py` |
+| `AUDIT_ANCHOR_PROVIDER` | `stub` | The anchor provider asked for. Only the local anchor file is implemented: any other value is recorded on the receipt as `requested_provider`, the receipt says the request was not met, and a warning is logged. | `apps/api/services/audit_anchor.py` |
 | `AUDIT_ANCHOR_RETENTION_DAYS` | `""` | Read by `retention_days()`: S3 Object Lock (compliance mode) anchor provider for :mod:`services.audit_anchor` | `apps/api/services/audit_anchor_s3.py` |
 | `AUDIT_ANCHOR_S3_BUCKET` | `""` | Read by `bucket()`: S3 Object Lock (compliance mode) anchor provider for :mod:`services.audit_anchor` | `apps/api/services/audit_anchor_s3.py` |
 | `AUDIT_ANCHOR_S3_PREFIX` | `""` | Read by `prefix()`: S3 Object Lock (compliance mode) anchor provider for :mod:`services.audit_anchor` | `apps/api/services/audit_anchor_s3.py` |
@@ -409,6 +409,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `ORACLE_SQLITE_COPY` | `1` | Read by `oracle_sqlite_copy_enabled()`: Oracle SHARE-lock SELECT → SQLite executemany (cross-engine bulk) | `apps/api/services/copy_oracle_sqlite.py` |
 | `ORACLE_SQLITE_COPY_BATCH` | `5000` | Read by `oracle_sqlite_copy_batch()`: Oracle SHARE-lock SELECT → SQLite executemany (cross-engine bulk) | `apps/api/services/copy_oracle_sqlite.py` |
 | `ORACLE_SQLSERVER_COPY` | `1` | Read by `oracle_sqlserver_copy_enabled()`: Oracle SELECT → SQL Server fast_executemany (cross-engine bulk) | `apps/api/services/copy_oracle_sqlserver.py` |
+| `ORACLE_UPGRADE_LOOKBACK_DAYS` | `400` | Days of job history Validate reads to find runs into an Oracle table that were written before sessions were pinned to UTC, or on a session that did not read back UTC (one-line upgrade advisory). Default 400. | `apps/api/services/oracle_session_scope.py` |
 | `OTEL_LOGS` | `0` | Read by `otel_logs_enabled()`: Optional OpenTelemetry log export for the centralized logging pipeline | `apps/api/services/otel_logging.py` |
 | `OTLP_ENDPOINT` | unset | Read by `otlp_endpoint()`: OpenTelemetry tracing for Datawrap transfers — optional, fail-closed | `apps/api/services/tracing.py` |
 | `OTLP_INSECURE` | `1` | Read by `_otlp_insecure()`: OpenTelemetry tracing for Datawrap transfers — optional, fail-closed | `apps/api/services/tracing.py` |

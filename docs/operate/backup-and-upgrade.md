@@ -380,6 +380,47 @@ Changed shapes:
   label that the client does dial (a dot-less host plus a port) is still
   checked.
 
+#### Oracle sessions pinned to UTC (accuracy review finding 8)
+
+- **What changed.** Every Oracle connection now runs
+  `ALTER SESSION SET TIME_ZONE = '+00:00'` and reads `SESSIONTIMEZONE` back.
+  Instants written into `TIMESTAMP WITH TIME ZONE` and
+  `TIMESTAMP WITH LOCAL TIME ZONE` columns are sent as UTC digits. Validate
+  treats an offset or instant column going into one of these as keeping its
+  instant only when the destination session reads back UTC. If it does not,
+  the column needs a Risk Contract, and Validate says why.
+- **Rows written by the previous release may be shifted.** python-oracledb
+  sends a value's clock digits without its offset, and Oracle reads them in
+  the session time zone. Before this release, rows loaded from offset or
+  instant sources (SQL Server `datetimeoffset`, Oracle `TIMESTAMP WITH TIME
+  ZONE`, PostgreSQL `timestamptz`, offset text in files) into those Oracle
+  columns can hold a shifted instant. That happens when the Datawrap
+  process did not run in UTC (`TZ` set on the host, `ORA_SDTZ`, thick-mode
+  client settings), and for `WITH TIME ZONE` columns that received the
+  source's own offset digits. The default container runs in UTC and stores
+  the correct instant for `WITH LOCAL TIME ZONE`.
+- **Finding them.** Validate of a route into such a table shows a one-line
+  advisory when the job history has completed runs into the same connector,
+  schema and table that are from before this release, or whose session did
+  not read back UTC. It looks back 400 days by default
+  (`DATAWRAP_ORACLE_UPGRADE_LOOKBACK_DAYS`).
+  To check the data, compare `SYS_EXTRACT_UTC(column)` on the destination
+  with the source's UTC instant for a few keys, for example with
+  `SELECT id, TO_CHAR(SYS_EXTRACT_UTC(col), 'YYYY-MM-DD"T"HH24:MI:SS.FF6')`.
+- **Fixing them.** A full re-run with overwrite rewrites every row with the
+  correct instant. Append and upsert re-runs only rewrite the rows they touch.
+- **Non-UTC session defaults.** If an Oracle session used to open in another
+  zone, `CURRENT_DATE`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`, implicit
+  comparisons with timestamp literals, LogMiner renderings of `WITH LOCAL TIME
+  ZONE` columns, destination `DEFAULT CURRENT_*` values and mirror
+  `_deleted_at` stamps now evaluate in UTC. A route with a custom source
+  query, a source filter, CDC or mirror stops once with a notice until someone
+  acknowledges it (`session_zone_acknowledged` together with its own
+  `session_zone_ack_actor` and `session_zone_ack_reason`; the actor and reason
+  given for another acknowledgement do not count). The acknowledgement is
+  kept per route: workspace, both connectors, host, port, SID or service
+  name, connection string, schema and table.
+
 ## Not covered
 
 - Tested restore times or recovery objectives. No restore has been rehearsed

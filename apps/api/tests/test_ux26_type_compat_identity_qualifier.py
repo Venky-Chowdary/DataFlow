@@ -42,4 +42,7 @@ def test_narrowing_into_an_identity_column_is_still_lossy() -> None:
 def test_collation_is_kept_for_the_charset_verdict() -> None:
     # COLLATE is not a generator attribute: the grade must still see it.
     assert grade_type_pair("CHAR(2)", "CHAR(2) COLLATE utf8mb4_bin", dest_db="mysql")["verdict"] == "safe"
-    assert grade_type_pair("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql")["verdict"] == "lossy"
+    # An instant into DATETIME(6) keeps it as UTC digits (disclosed, finding 8);
+    # dropping its fractional seconds is still lossy.
+    assert grade_type_pair("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql")["verdict"] == "safe"
+    assert grade_type_pair("TIMESTAMPTZ", "DATETIME(0)", dest_db="mysql")["verdict"] == "lossy"
