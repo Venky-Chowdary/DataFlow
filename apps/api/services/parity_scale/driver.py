@@ -540,10 +540,20 @@ class ParityScan:
         """The streamed pass as resumable items: one per key range when the key orders the
         same on both engines (each range read under its own timeouts), else one item."""
         one = [{"t": "stream", "shape": shape}]
-        if shape == "multiset" or not self.plan.order_portable:
-            return one
         src = self.side("source")
-        if not getattr(src, "range_stream", False):
+        why = ("the table has no key" if shape == "multiset"
+               else f"its key does not order the same way on both databases ({self.plan.order_reason})"
+               if not self.plan.order_portable
+               else "this engine reads it in one statement" if not getattr(src, "range_stream", False) else "")
+        if why:
+            # One read under the stream's server-side timeout: on MySQL / MariaDB that bounds the
+            # whole SELECT, so a table too large to stream within it is not fully compared.
+            self.state["stream_reads"] = {
+                "parts": 1,
+                "reason": (f"The streamed columns are read in one pass because {why}; that read is "
+                           f"limited to {int((self.config.stream_timeout_s or 0) // 60)} minutes. A key with a "
+                           "binary collation on both sides lets the pass be read in parts."),
+            }
             return one
         if bounds is None:
             try:
@@ -554,6 +564,7 @@ class ParityScan:
             except UnitTimeout:
                 return one
             bounds = [None, *[encode_key(p) for p in points], None]
+        self.state["stream_reads"] = {"parts": len(bounds) - 1, "reason": ""}
         return [{"t": "stream", "shape": shape, "lo": bounds[i], "hi": bounds[i + 1]}
                 for i in range(len(bounds) - 1)]
 
@@ -977,7 +988,9 @@ class ParityScan:
                 deadline=deadline, tick=self._tick, nulls=bool(item.get("nulls")),
             )
         except UnitTimeout as exc:
-            self._not_compared(item, f"streamed pass timed out: {exc}")
+            single = (self.state.get("stream_reads") or {}).get("reason") if item.get("lo") is None \
+                and item.get("hi") is None and not item.get("nulls") else ""
+            self._not_compared(item, f"streamed pass timed out: {exc}" + (f". {single}" if single else ""))
             return
         except SnapshotYielded:
             # A session waited on the snapshot's locks mid-read: that side let it go; this part

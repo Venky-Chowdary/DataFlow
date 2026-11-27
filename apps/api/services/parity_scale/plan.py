@@ -64,7 +64,10 @@ _NO_OP_TRANSFORMS: Final[frozenset[str]] = frozenset(
      "integer", "boolean", "date", "datetime", "time", "uuid"}
 )
 _BINARY_TEXT_COLLATIONS: Final[frozenset[str]] = frozenset(
-    {"c", "posix", "ucs_basic", "binary", "pg_c_utf8"}
+    # Code-point (UTF-8 byte) order with no padding: PostgreSQL C / POSIX / ucs_basic /
+    # pg_c_utf8; MySQL binary and utf8mb4_0900_bin; MariaDB utf8mb4_nopad_bin. (MySQL's
+    # utf8mb4_bin pads trailing spaces, so it is not one of them.)
+    {"c", "posix", "ucs_basic", "binary", "pg_c_utf8", "utf8mb4_0900_bin", "utf8mb4_nopad_bin"}
 )
 
 
@@ -492,6 +495,7 @@ def _order_portable(
     source_engine: str,
     dest_engine: str,
     key_collations: dict[str, str] | None,
+    dest_key_collations: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     if not key_cols:
         return False, "keyless table"
@@ -511,7 +515,10 @@ def _order_portable(
         if kind in {"text", "char"}:
             collations = key_collations or {}
             src_coll = str(collations.get(col.source) or "").strip('"').lower()
-            dst_coll = str(collations.get(col.target) or collations.get(col.source) or "").strip('"').lower()
+            if dest_key_collations is not None:
+                dst_coll = str(dest_key_collations.get(col.target) or "").strip('"').lower()
+            else:
+                dst_coll = str(collations.get(col.target) or collations.get(col.source) or "").strip('"').lower()
             if normalize_engine(source_engine) == "sqlite" and same:
                 if src_coll in {"", "binary"} and dst_coll in {"", "binary"}:
                     continue
@@ -536,6 +543,7 @@ def build_plan(
     allow_native: bool = True,
     key_collations: dict[str, str] | None = None,
     number_locale: str | None = None,
+    dest_key_collations: dict[str, str] | None = None,
     run_number_locale: str = "",
     run_date_locale: str = "",
 ) -> TablePlan:
@@ -590,7 +598,7 @@ def build_plan(
         # A native rendering has no Python reference, so the driver could not
         # name such a key outside the engine.
         key_encodable = False
-    portable, why = _order_portable(key_cols, src_eng, dst_eng, key_collations)
+    portable, why = _order_portable(key_cols, src_eng, dst_eng, key_collations, dest_key_collations)
     notes: list[str] = []
     if not key_encodable and key_cols:
         notes.append("key not encodable in-engine: the table is compared by streamed fingerprint")

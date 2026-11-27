@@ -171,6 +171,16 @@ comparing every row inside both databases (see
   row may be one the destination still has). Only missing rows beyond the
   keys the report keeps are matched to held rows by count, and the report
   says so.
+- A text key is read in key ranges only when it orders the same way on
+  both databases: a binary collation on both sides (PostgreSQL `C`,
+  `POSIX`, `ucs_basic`, `pg_c_utf8`; MySQL `binary` or `utf8mb4_0900_bin`;
+  MariaDB `utf8mb4_nopad_bin`), read from each catalog. Otherwise the table
+  is compared by hash buckets, and its streamed columns (transformed,
+  crosswalked, floats across engines, JSON) are read in one pass. On MySQL /
+  MariaDB that one read is a single statement limited to the stream timeout
+  (30 minutes), so a table too large to stream within it is reported as not
+  fully compared, with that reason; the Trust Report's coverage says how the
+  pass was read.
 - Rows whose key is NULL fall in no key range: they are compared as whole
   rows (content), reported as "rows without key", and never attributed to a
   key. Before any match, each side's units must add up to its row count;

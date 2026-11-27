@@ -350,10 +350,53 @@ def catalog_types(engine: str, conn: Any, schema: str, table: str) -> dict[str, 
     return out
 
 
+def catalog_collations(engine: str, conn: Any, schema: str, table: str) -> dict[str, str]:
+    """``{text column: collation}`` as the engine orders it (PostgreSQL's ``default`` is the
+    database's own; an ICU default reads ``icu:<locale>``). Unknown engines: ``{}``."""
+    with conn.cursor() as cur:
+        if engine == "postgresql":
+            cur.execute("SELECT to_jsonb(d) ->> 'datlocprovider', d.datcollate, to_jsonb(d) ->> 'daticulocale' "
+                        "FROM pg_database d WHERE d.datname = current_database()")
+            provider, datcollate, icu = cur.fetchone() or ("c", "", "")
+            default = f"icu:{icu}" if str(provider or "c") == "i" else str(datcollate or "")
+            cur.execute(
+                "SELECT a.attname, co.collname, co.collprovider FROM pg_attribute a "
+                "JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "JOIN pg_collation co ON co.oid = a.attcollation "
+                "WHERE c.relname = %s AND n.nspname = %s AND a.attnum > 0 AND NOT a.attisdropped",
+                (table, schema or "public"),
+            )
+            rows = [(name, default if coll == "default" else (f"icu:{coll}" if prov == "i" else coll))
+                    for name, coll, prov in cur.fetchall()]
+        elif engine == "mysql":
+            cur.execute(
+                "SELECT COLUMN_NAME, COLLATION_NAME FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = COALESCE(NULLIF(%s, ''), DATABASE()) AND TABLE_NAME = %s "
+                "AND COLLATION_NAME IS NOT NULL",
+                (schema or "", table),
+            )
+            rows = list(cur.fetchall())
+        else:
+            rows = []
+    conn.commit()
+    return {str(name): str(coll or "") for name, coll in rows}
+
+
 def _types_of(side: dict[str, Any]) -> dict[str, str]:
     conn = connect(side["engine"], side["cfg"])
     try:
         return catalog_types(side["engine"], conn, side["schema"], side["table"])
+    finally:
+        conn.close()
+
+
+def _collations_of(side: dict[str, Any]) -> dict[str, str]:
+    conn = connect(side["engine"], side["cfg"])
+    try:
+        return catalog_collations(side["engine"], conn, side["schema"], side["table"])
+    except Exception:  # noqa: BLE001 — collations unknown: text keys are treated as not order-portable
+        logger.warning("Key collations could not be read; text keys are compared without key ranges")
+        return {}
     finally:
         conn.close()
 
@@ -364,9 +407,12 @@ def plan_for(spec: dict[str, Any]) -> Any:
     src, dst = spec["source"], spec["destination"]
     s_types = _types_of(src)
     d_types = _types_of(dst)
+    # Text keys order identically on both sides only under binary collations (then key ranges,
+    # and a chunked streamed pass, are possible); the catalogs say which.
     return build_plan(spec["mappings"], source_types=s_types, dest_types=d_types,
                       source_engine=src["engine"], dest_engine=dst["engine"],
                       key_columns=spec["key_columns"], error_policy=spec["error_policy"],
+                      key_collations=_collations_of(src), dest_key_collations=_collations_of(dst),
                       run_number_locale=str(spec.get("number_locale") or ""),
                       run_date_locale=str(spec.get("date_locale") or ""))
 

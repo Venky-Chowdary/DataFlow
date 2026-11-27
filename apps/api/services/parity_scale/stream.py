@@ -130,6 +130,17 @@ def stream_compare(
     fd, path = tempfile.mkstemp(prefix="psd1-stream-", suffix=".sqlite", dir=spill_dir)
     os.close(fd)
     conn = sqlite3.connect(path)
+    if tick is not None or deadline is not None:
+        # The spill's own work (inserts, CREATE INDEX, the merge) can run for minutes on a large
+        # table: it is progress for the worker's heartbeat, and it stops at the wall-clock budget.
+        import time
+
+        def progress() -> int:
+            if tick is not None:
+                tick()
+            return 1 if deadline is not None and time.monotonic() > deadline else 0
+
+        conn.set_progress_handler(progress, 20_000)
     try:
         conn.execute("PRAGMA journal_mode=OFF")
         conn.execute("PRAGMA synchronous=OFF")
@@ -140,12 +151,19 @@ def stream_compare(
                                     **bounds)
         result.rows_destination = _spill(conn, "d", destination, cols, keyed=keyed, keep_values=not keyed,
                                          batch=batch, **bounds)
-        if keyed:
-            conn.execute("CREATE INDEX s_k ON s(k)")
-            conn.execute("CREATE INDEX d_k ON d(k)")
-            _merge_keyed(conn, result, full=shape == "keyed", keys_cap=keys_cap)
-        else:
-            _merge_multiset(conn, result, examples_cap=examples_cap)
+        try:
+            if keyed:
+                conn.execute("CREATE INDEX s_k ON s(k)")
+                conn.execute("CREATE INDEX d_k ON d(k)")
+                _merge_keyed(conn, result, full=shape == "keyed", keys_cap=keys_cap)
+            else:
+                _merge_multiset(conn, result, examples_cap=examples_cap)
+        except sqlite3.OperationalError as exc:
+            if "interrupt" in str(exc).lower():
+                from services.parity_scale.dialects.base import UnitTimeout
+
+                raise UnitTimeout("the scan's wall-clock budget ran out while merging the streamed pass") from exc
+            raise
     finally:
         conn.close()
         try:

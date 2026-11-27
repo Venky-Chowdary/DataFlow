@@ -202,6 +202,8 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
             "columns_streamed": sum(1 for c in columns if c["cls"] == "stream"),
             "columns_excluded": sum(1 for c in columns if c["cls"] == "excluded"),
             "stream": state.get("stream"),
+            # How the streamed pass was read: in key-range parts, or in one read (and why).
+            "stream_reads": state.get("stream_reads"),
         },
         "units": dict(units),
         "differences": differences,
