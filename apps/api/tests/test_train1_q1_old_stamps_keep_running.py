@@ -94,14 +94,19 @@ def test_a_real_plan_change_is_still_refused(name):
 
 
 @pytest.mark.parametrize("name", [n for n in _CASES if n.endswith("|create_new")])
-def test_the_schedule_side_checks_keep_the_old_stamp(name, monkeypatch):
+def test_the_schedule_side_checks_keep_the_old_stamp(name, monkeypatch, tmp_path):
+    from services import stamp_key_records
     from services.schedule_approvals import create_new_stamp_matches_schedule
+
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(stamp_key_records, "_collection", lambda: None)
 
     monkeypatch.setattr("services.connector_store.get_connector",
                         lambda *a, **k: SimpleNamespace(to_dict=lambda: {"type": "postgresql"}))
 
     case = _FIX["cases"][name]
     sched = SimpleNamespace(
+        id="s-" + name.replace("|", "-"),
         mappings=case["mappings"], approved_decision_artifact_hash=case["content_hash"],
         sync_mode="incremental_append", stream_contracts=[], source_connector_id="",
         workspace_id="", source_schema_fingerprint=_FIX["source_fingerprint"],

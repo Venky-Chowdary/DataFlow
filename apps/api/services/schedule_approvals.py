@@ -710,13 +710,15 @@ def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
     from contextlib import nullcontext
 
     from services.decision_kernel.legacy_rules import legacy_plan_rules
-    from services.stamp_key_records import lookup
+    from services.stamp_key_records import lookup, record_schedule
 
+    # A stored schedule read before any edit by this release: its rows are
+    # the rows saved with its stamp (a no-op once it has a record).
+    record_schedule(sched, trusted_rows=True)
     try:
         recorded = lookup(
-            workspace_id=str(getattr(sched, "workspace_id", "") or ""), stamp=approved,
-            dest_connector_id=str(getattr(sched, "dest_connector_id", "") or ""),
-            dest_table=str(getattr(sched, "dest_table", "") or ""),
+            workspace_id=str(getattr(sched, "workspace_id", "") or ""),
+            schedule_id=str(getattr(sched, "id", "") or ""), stamp=approved,
         )
     except Exception:  # noqa: BLE001 - no record: a keyed Map re-validates
         recorded = None
@@ -737,7 +739,7 @@ def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
                     created_at="1970-01-01T00:00:00+00:00",
                 )
                 if decision_stamps_match(approved, art, previous_formats_only=legacy,
-                                         recorded_keys=recorded):
+                                         recorded_keys=recorded, require_record=True):
                     return True
     return False
 

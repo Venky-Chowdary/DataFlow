@@ -11,6 +11,7 @@ A blank hash stays blank — that schedule still has to be validated.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
@@ -42,15 +43,15 @@ def _engines(merged: dict[str, Any]) -> tuple[str, str]:
     return dest, source
 
 
-def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
-    """Hashes Execute will accept for these saved rows. Empty if the dest engine is unknown."""
+def _replay_artifacts(merged: dict[str, Any]) -> Iterator[tuple[bool, Any]]:
+    """``(legacy, artifact)`` for every variant Execute replays these saved rows as."""
     from services.decision_kernel import build_artifact_from_mappings
     from services.schedule_mapping_contract import persisted_mapping_rows
 
     maps = persisted_mapping_rows(merged.get("mappings"))
     dest, source = _engines(merged)
     if not maps or not dest:
-        return set()
+        return
     from services.conversion_contract import bind_stream_maps
 
     # Each stream's own rows are part of the stamp, as at Execute (F1c).
@@ -62,7 +63,6 @@ def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
     if connector_id and connector_id not in source_dbs:
         source_dbs.append(connector_id)
     fingerprints = ["", stored_fp] if stored_fp else [""]
-    found: set[str] = set()
     from contextlib import nullcontext
 
     from services.decision_kernel.legacy_rules import legacy_plan_rules
@@ -73,7 +73,7 @@ def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
             for src in source_dbs:
                 for sfp in fingerprints:
                     for rid in (f"validate:{dest}", f"execute:{dest}"):
-                        art = build_artifact_from_mappings(
+                        yield legacy, build_artifact_from_mappings(
                             maps,
                             dest_db=dest,
                             source_db=src,
@@ -85,18 +85,69 @@ def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
                             artifact_id="da_inline",
                             created_at="1970-01-01T00:00:00+00:00",
                         )
-                        if art.content_hash and not legacy:
-                            found.add(art.content_hash.lower())
-                        if art.content_hash:
-                            # The same decision under every accepted digest (the
-                            # feature/Cleanup and PR #435 interim stamps).
-                            from services.decision_kernel.models import (
-                                accepted_stamps,
-                                previous_release_stamps,
-                            )
 
-                            found.update(previous_release_stamps(art) if legacy else accepted_stamps(art))
+
+def replay_decision_hashes(merged: dict[str, Any]) -> set[str]:
+    """Hashes Execute will accept for these saved rows. Empty if the dest engine is unknown."""
+    from services.decision_kernel.models import accepted_stamps, previous_release_stamps
+
+    found: set[str] = set()
+    for legacy, art in _replay_artifacts(merged):
+        if art.content_hash and not legacy:
+            found.add(art.content_hash.lower())
+        if art.content_hash:
+            # The same decision under every accepted digest (the
+            # feature/Cleanup and PR #435 interim stamps).
+            found.update(previous_release_stamps(art) if legacy else accepted_stamps(art))
     return found
+
+
+#: Schedule fields a Decision Artifact stamp was taken over: an edit of any of
+#: them drops a key-blind stamp (review 3, round 2 item 1).
+_DECISION_FIELDS = (
+    "source_connector_id", "source_table", "dest_connector_id", "dest_table",
+    "dest_schema", "dest_database", "mappings", "stream_contracts", "sync_mode",
+    "primary_key", "source_primary_key", "validation_mode", "duplicate_policy",
+    "error_policy",
+)
+
+KEY_BLIND_STAMP_DROPPED = (
+    "This pipeline's approval was made by an earlier release and does not record "
+    "the key columns, so it does not carry over an edit of the route, mappings, key, "
+    "sync mode or error handling. Run Validate again to approve the edited pipeline."
+)
+
+
+def _stamp_is_key_blind(merged: dict[str, Any]) -> bool:
+    """The schedule's stamp is a feature/Cleanup or PR #435 interim digest of its rows.
+
+    True also when that cannot be told (the destination engine is unknown):
+    only a stamp known to cover key flags is kept across a decision edit.
+    """
+    from services.decision_kernel.models import stamp_format
+
+    approved = str(merged.get("approved_decision_artifact_hash") or "").strip().lower()
+    if len(approved) != 64:
+        return False
+    seen = blind = False
+    for _legacy, art in _replay_artifacts(merged):
+        seen = True
+        fmt = stamp_format(approved, art)
+        if fmt in ("current", "scored"):
+            return False
+        blind = blind or fmt in ("base", "interim")
+    return blind or not seen
+
+
+def drop_key_blind_stamp_on_edit(before: dict[str, Any], merged: dict[str, Any]) -> str:
+    """Drop a key-blind stamp when this edit touches what it was taken over; the note, or ''."""
+    if not any(merged.get(key) != before.get(key) for key in _DECISION_FIELDS):
+        return ""
+    if not _stamp_is_key_blind(merged):
+        return ""
+    merged["approved_decision_artifact_hash"] = ""
+    merged["approved_ddl_identity_hash"] = ""
+    return KEY_BLIND_STAMP_DROPPED
 
 
 def decision_hash_for_sync(merged: dict[str, Any]) -> str:

@@ -893,7 +893,7 @@ def test_decision_hash_keeps_name_keyed_columns_out_of_the_score_strip():
         assert structural_decision_hash(edited) != structural_decision_hash(art.to_dict()), name
 
 
-def test_schedules_saved_with_the_base_or_the_interim_hash_still_run():
+def test_schedules_saved_with_the_base_or_the_interim_hash_still_run(tmp_path, monkeypatch):
     """A schedule stamped by feature/Cleanup (confidence inside the digest)
     and one stamped by #435's interim build (scores stripped at every depth)
     both still pass the schedule-side check and the Execute gate a beat
@@ -916,8 +916,14 @@ def test_schedules_saved_with_the_base_or_the_interim_hash_still_run():
     interim = _interim_digest(art.to_dict())
     assert base != interim
 
+    from services import stamp_key_records
+
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(stamp_key_records, "_collection", lambda: None)
     for label, stamp in (("base", base), ("interim", interim)):
+        # A stored schedule (an id; review 3: its key record is its rows).
         sched = SimpleNamespace(
+            id=f"s-{label}",
             mappings=maps, approved_decision_artifact_hash=stamp, sync_mode="incremental_append",
             stream_contracts=[], source_connector_id="", workspace_id="", source_schema_fingerprint="",
         )

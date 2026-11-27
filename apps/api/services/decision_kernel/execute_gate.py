@@ -8,6 +8,7 @@ an inline artifact (same pattern as DDL identity inline stamp).
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Callable, Mapping
 
@@ -43,6 +44,8 @@ from services.shape_contract import (
     SHAPE_UNKNOWN,
     classify_dest_exists_shape,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _norm_col(name: str) -> str:
@@ -335,6 +338,42 @@ def planned_ddl_matches_live(
     return all(want[name] == have[name] for name in want)
 
 
+def live_widened_columns(
+    planned: Mapping[str, str] | None,
+    live: Mapping[str, str] | None,
+    *,
+    dest_db: str = "",
+    owned_columns: frozenset[str] = frozenset(),
+) -> set[str] | None:
+    """The planned columns the live table holds wider, or None if it differs otherwise.
+
+    Same column set as :func:`planned_ddl_matches_live`; each column is the
+    planned type or a lossless widening of it in the same type family
+    (``VARCHAR(40)`` live ``VARCHAR(80)``). A narrowing, another type or an
+    extra column is None.
+    """
+    if not planned or not live:
+        return None
+    want = {str(n).strip().lower(): str(t) for n, t in planned.items() if str(n).strip()}
+    have = {
+        str(n).strip().lower(): str(t) for n, t in live.items()
+        if str(n).strip() and (str(n).strip().lower() not in owned_columns
+                               or str(n).strip().lower() in want)
+    }
+    if not want or set(want) != set(have):
+        return None
+    from services.create_width_adopt import _is_widening
+
+    widened: set[str] = set()
+    for name, typ in want.items():
+        if _catalog_token(typ, dest_db) == _catalog_token(have[name], dest_db):
+            continue
+        if not _is_widening(typ, have[name], dest_db):
+            return None
+        widened.add(name)
+    return widened
+
+
 def _planned_create_still_holds(
     *,
     planned: dict[str, str],
@@ -471,7 +510,8 @@ def create_new_validate_holds_after_dest_exists(
     route_id: str = "",
     schema_policy: str = "",
     reference: DecisionArtifact | None = None,
-    recorded_keys: frozenset[str] | None = None,
+    recorded_keys: Any = None,
+    require_record: bool = False,
 ) -> tuple[bool, str]:
     """True when a create-new Validate stamp remains the Map contract after dest exists.
 
@@ -536,7 +576,7 @@ def create_new_validate_holds_after_dest_exists(
                         )
                         if decision_stamps_match(
                             approved, create_new, previous_formats_only=legacy,
-                            recorded_keys=recorded_keys,
+                            recorded_keys=recorded_keys, require_record=require_record,
                         ) or (
                             not legacy and reference is not None
                             and same_structural_decision(reference, create_new)
@@ -608,24 +648,44 @@ def enforce_decision_artifact(
     approved = (approved_content_hash or "").strip().lower()
     owned = _datawrap_owned_columns(sync_mode, surrogate_approved=surrogate_approved)
 
-    def _recorded(stamp: str) -> frozenset[str] | None:
-        """The key set recorded with ``stamp`` (review 3 item 1), or None."""
-        if stamp_key_record is None or not stamp:
-            return None
-        return stamp_key_record(stamp)
+    # Execute always says where the key a key-blind stamp was taken over is
+    # recorded; with no record such a stamp approves nothing (review 3, r2 item 2).
+    require = stamp_key_record is not None
+    looked_up: dict[str, frozenset[str] | None] = {}
 
-    def _live_drifted(planned: Mapping[str, str] | None) -> bool:
+    def _recorded(stamp: str) -> Callable[[], frozenset[str] | None]:
+        """The key set recorded with ``stamp`` (review 3 item 1), read only when needed."""
+        def read() -> frozenset[str] | None:
+            if stamp_key_record is None or not stamp:
+                return None
+            if stamp not in looked_up:
+                looked_up[stamp] = stamp_key_record(stamp)
+            return looked_up[stamp]
+        return read
+
+    def _live_drifted(planned: Mapping[str, str] | None, *, allow_widening: bool = False) -> bool:
         """The live table is not the DDL this create-new plan would make (review 3 item 2).
 
         Datawrap's own bookkeeping columns for this plan and the catalog's
         spelling of a planned type are not drift; a narrowed or changed type
-        and any other extra column are.
+        and any other extra column are. ``allow_widening`` (the stamp-only
+        path, as before review 3): a live column wider in the same type family
+        passes and is logged.
         """
-        return bool(
-            destination_table_exists is True and live_column_types and planned
-            and not planned_ddl_matches_live(planned, live_column_types,
-                                             dest_db=dest_db, owned_columns=owned)
-        )
+        if not (destination_table_exists is True and live_column_types and planned):
+            return False
+        if planned_ddl_matches_live(planned, live_column_types, dest_db=dest_db,
+                                    owned_columns=owned):
+            return False
+        if not allow_widening:
+            return True
+        widened = live_widened_columns(planned, live_column_types, dest_db=dest_db,
+                                       owned_columns=owned)
+        if widened is None:
+            return True
+        logger.info("Decision Artifact: live columns wider than planned, in the same "
+                    "type family (not drift): %s", ", ".join(sorted(widened)))
+        return False
 
     drift_msg = ("Decision Artifact dest schema drifted since Validate — "
                  "re-run Validate before Execute.")
@@ -656,6 +716,7 @@ def enforce_decision_artifact(
             route_id=route_id,
             schema_policy=schema_policy,
             recorded_keys=_recorded(stamp),
+            require_record=require,
         )
 
     if artifact_payload:
@@ -714,6 +775,7 @@ def enforce_decision_artifact(
             key_reason = stamp_key_refusal(
                 stamp_format(supplied.content_hash, supplied), supplied,
                 decision_key_columns(current), _recorded(supplied.content_hash),
+                require_record=require,
             )
             if key_reason:
                 return (f"Decision Artifact refused: {key_reason}", None)
@@ -759,7 +821,9 @@ def enforce_decision_artifact(
                         "re-run Validate before Execute.",
                         None,
                     )
-                if approved and not decision_stamps_match(approved, supplied):
+                if approved and not decision_stamps_match(
+                    approved, supplied, recorded_keys=_recorded(approved), require_record=require,
+                ):
                     return (
                         "Decision Artifact content_hash does not match approved hash — "
                         "refuse write.",
@@ -770,7 +834,9 @@ def enforce_decision_artifact(
                 policy_same = (not error_policy) or error_policy == (
                     supplied.error_policy or error_policy
                 )
-                hash_same = (not approved) or decision_stamps_match(approved, supplied)
+                hash_same = (not approved) or decision_stamps_match(
+                    approved, supplied, recorded_keys=_recorded(approved), require_record=require,
+                )
                 # DW-D407: only a create-new plan (empty dest fingerprint) whose
                 # table this job created, and only after the checks above.
                 if (
@@ -811,7 +877,9 @@ def enforce_decision_artifact(
                     "re-run Validate before Execute.",
                     None,
                 )
-            if approved and not decision_stamps_match(approved, supplied):
+            if approved and not decision_stamps_match(
+                approved, supplied, recorded_keys=_recorded(approved), require_record=require,
+            ):
                 return (
                     "Decision Artifact content_hash does not match approved hash — "
                     "refuse write.",
@@ -861,7 +929,8 @@ def enforce_decision_artifact(
         key_reason = ""
         for rid in route_candidates:
             candidate = _rebuild(rid, dest_fp_now)
-            why = stamp_refusal(approved, candidate, recorded_keys=recorded)
+            why = stamp_refusal(approved, candidate, recorded_keys=recorded,
+                                require_record=require)
             if not why:
                 return (None, candidate)
             if why != "mismatch":
@@ -872,7 +941,7 @@ def enforce_decision_artifact(
             with legacy_plan_rules():
                 legacy = _rebuild(rid, dest_fp_now)
             why = stamp_refusal(approved, legacy, recorded_keys=recorded,
-                                previous_formats_only=True)
+                                previous_formats_only=True, require_record=require)
             if not why and _legacy_plan_holds(
                 legacy, current, live_column_types, destination_table_exists
             ):
@@ -881,7 +950,7 @@ def enforce_decision_artifact(
                 key_reason = key_reason or why
         if key_reason:
             return (f"Decision Artifact refused: {key_reason}", None)
-        if _live_drifted(dict(current.ddl.column_ddl or {})):
+        if _live_drifted(dict(current.ddl.column_ddl or {}), allow_widening=True):
             # Review 3 item 2: the create-new hold below judges the mapped
             # shape only; a live table that is not the planned DDL is drift.
             return (drift_msg, None)

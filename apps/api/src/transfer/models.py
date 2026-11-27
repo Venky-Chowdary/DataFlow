@@ -176,6 +176,9 @@ class TransferRequest:
     reversibility_row_rule_exemption: str = ""
     # Operator identity for Jobs audit (email / subject).
     triggered_by: str = ""
+    # Set only by the scheduler (never a client field): the schedule whose
+    # stamp key record Execute reads for a key-blind stamp (review 3).
+    decision_stamp_schedule_id: str = ""
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian),
     # 'MDY' (US), or '' to infer from env DATAFLOW_DATE_ORDER / fail closed.
     date_locale: str = ""
@@ -402,6 +405,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "require_reversibility": bool(getattr(request, "require_reversibility", False)),
         "reversibility_row_rule_exemption": str(getattr(request, "reversibility_row_rule_exemption", "") or ""),
         "triggered_by": request.triggered_by,
+        "decision_stamp_schedule_id": str(getattr(request, "decision_stamp_schedule_id", "") or ""),
         "date_locale": request.date_locale,
         "number_locale": request.number_locale,
         "number_locale_assumed": bool(request.number_locale_assumed),
@@ -680,6 +684,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         require_reversibility=bool(data.get("require_reversibility", False)),
         reversibility_row_rule_exemption=str(data.get("reversibility_row_rule_exemption") or "").strip(),
         triggered_by=(data.get("triggered_by") or "").strip(),
+        decision_stamp_schedule_id=str(data.get("decision_stamp_schedule_id") or "").strip(),
         date_locale=(data.get("date_locale") or "").strip().upper(),
         number_locale=(
             loc

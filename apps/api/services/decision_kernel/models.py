@@ -453,47 +453,59 @@ def stamp_format(stamp: str, artifact: DecisionArtifact | Mapping[str, Any]) -> 
     return (blind or matches or [""])[0]
 
 
+#: The key set recorded with a stamp: a set, ``None`` (no record), or a
+#: callable giving either, consulted only for a key-blind stamp.
+KeyRecord = Any
+
+
+def _resolve_record(recorded_keys: KeyRecord) -> frozenset[str] | None:
+    value = recorded_keys() if callable(recorded_keys) else recorded_keys
+    return frozenset(value) if value is not None else None
+
+
 def stamp_key_refusal(
     fmt: str,
     stamped: DecisionArtifact | Mapping[str, Any],
     current_keys: frozenset[str],
-    recorded_keys: frozenset[str] | None,
+    recorded_keys: KeyRecord,
+    *,
+    require_record: bool = False,
 ) -> str:
     """Why a stamp of format ``fmt`` may not approve a run keyed on ``current_keys``.
 
     The current and PR #435 scored digests cover each row's key flag, so the
     stamped key set is the stamped decision's own. The feature/Cleanup (base)
     and PR #435 interim digests drop key flags: the key set they were taken
-    over is known only from ``recorded_keys`` (the schedule's rows when the
-    stamp was recorded, :mod:`services.stamp_key_records`), ``None`` when
-    there is no record.
+    over is known only from ``recorded_keys`` (the schedule's record, or the
+    Decision Artifact the server stored for that stamp), ``None`` when there
+    is none.
 
     * interim: only when neither the stamped nor the current decision is keyed;
-    * base: a keyed decision only when the recorded key set is the current one
-      (no record: :data:`NO_KEY_RECORD_REASON`); an unkeyed decision unless the
-      record says the stamp was keyed.
+    * base: only when the recorded key set is the current one.
+    * No record: refused with :data:`NO_KEY_RECORD_REASON` for a keyed
+      decision, and for any decision when ``require_record`` (Execute; review
+      3 round 2 item 2). Without ``require_record`` an unkeyed decision is a
+      plain digest match (the kernel's own unit checks).
     """
     if fmt in _KEY_AWARE_FORMATS:
         return "" if decision_key_columns(stamped) == current_keys else KEY_CHANGED_REASON
-    if fmt == "interim":
-        if current_keys:
-            return NO_KEY_RECORD_REASON if recorded_keys is None else KEY_CHANGED_REASON
-        return KEY_CHANGED_REASON if recorded_keys else ""
-    if fmt == "base":
-        if current_keys:
-            if recorded_keys is None:
-                return NO_KEY_RECORD_REASON
-            return "" if recorded_keys == current_keys else KEY_CHANGED_REASON
-        return KEY_CHANGED_REASON if recorded_keys else ""
-    return ""
+    if fmt not in ("base", "interim"):
+        return ""
+    recorded = _resolve_record(recorded_keys)
+    if recorded is None:
+        return NO_KEY_RECORD_REASON if (current_keys or require_record) else ""
+    if fmt == "interim" and (recorded or current_keys):
+        return KEY_CHANGED_REASON
+    return "" if recorded == current_keys else KEY_CHANGED_REASON
 
 
 def stamp_refusal(
     approved: str,
     art: DecisionArtifact,
     *,
-    recorded_keys: frozenset[str] | None = None,
+    recorded_keys: KeyRecord = None,
     previous_formats_only: bool = False,
+    require_record: bool = False,
 ) -> str:
     """'' when ``approved`` names ``art``, else 'mismatch' or the key rule's reason."""
     fmt = stamp_format(approved, art)
@@ -502,7 +514,8 @@ def stamp_refusal(
         and (approved or "").strip().lower() == compute_content_hash(_payload(art))
     ):
         return "mismatch"
-    return stamp_key_refusal(fmt, art, decision_key_columns(art), recorded_keys)
+    return stamp_key_refusal(fmt, art, decision_key_columns(art), recorded_keys,
+                             require_record=require_record)
 
 
 def decision_stamps_match(
@@ -510,7 +523,8 @@ def decision_stamps_match(
     art: DecisionArtifact,
     *,
     previous_formats_only: bool = False,
-    recorded_keys: frozenset[str] | None = None,
+    recorded_keys: KeyRecord = None,
+    require_record: bool = False,
 ) -> bool:
     """True when a stored stamp names this artifact.
 
@@ -523,7 +537,7 @@ def decision_stamps_match(
     """
     return not stamp_refusal(
         approved, art, recorded_keys=recorded_keys,
-        previous_formats_only=previous_formats_only,
+        previous_formats_only=previous_formats_only, require_record=require_record,
     )
 
 

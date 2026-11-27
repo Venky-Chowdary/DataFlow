@@ -672,6 +672,7 @@ def build_schedule_request(
         ),
         approved_set_hash=str(getattr(sched, "approved_set_hash", "") or ""),
         approved_decision_artifact_hash=_sync_decision_hash(sched),
+        decision_stamp_schedule_id=str(getattr(sched, "id", "") or ""),
         approved_ddl_identity_hash=str(
             getattr(sched, "approved_ddl_identity_hash", "") or ""
         ),

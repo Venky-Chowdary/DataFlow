@@ -212,6 +212,8 @@ def test_a_pr435_scored_stamp_is_accepted():
 
 @pytest.fixture
 def _records(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
     import services.schedule_store as store
     from services import stamp_key_records
 
@@ -219,66 +221,184 @@ def _records(tmp_path, monkeypatch):
     monkeypatch.setattr(stamp_key_records, "_collection", lambda: None)
     monkeypatch.setattr(store, "STORE_PATH", tmp_path / "schedules.json")
     monkeypatch.setattr(store, "_mongo_backend", lambda: None)
+    # Known connectors, so the stamp's format can be told on the edit.
+    monkeypatch.setattr("services.connector_store.get_connector",
+                        lambda *a, **k: SimpleNamespace(to_dict=lambda: {"type": "postgresql"}))
     return stamp_key_records
 
 
-def test_records_are_append_only_and_unknown_is_no_record(_records):
+def test_records_are_append_only_per_schedule_and_unknown_is_no_record(_records):
     stamp = "a" * 64
-    args = dict(workspace_id="ws", stamp=stamp, dest_connector_id="dst", dest_table="t")
+    args = dict(workspace_id="ws", schedule_id="s1", stamp=stamp)
     assert _records.record_if_absent(**args, key_columns=["ID"])
     assert not _records.record_if_absent(**args, key_columns=["code"])
     assert _records.lookup(**args) == frozenset({"id"})
-    other = {**args, "dest_table": "t2"}
+    other = {**args, "schedule_id": "s2"}
     _records.record_if_absent(**other, key_columns=None)
     assert _records.lookup(**other) is None
 
 
-def test_a_schedule_edit_pins_the_stored_key_before_changing_it(_records):
-    """The stored rows are the rows saved with the stamp: the first edit records
-    their key, so moving the key afterwards is refused at Execute."""
-    import services.schedule_store as store
+def _sched_base(maps: list[dict]) -> str:
+    """The base stamp a schedule replays for these rows (empty source fingerprint)."""
+    return base_content_hash(build_artifact_from_mappings(
+        maps, dest_db="postgresql", source_db="postgresql", source_fingerprint="",
+        dest_fingerprint="", sync_mode="incremental_append", route_id="validate:postgresql",
+        tenant_id="anonymous", artifact_id="da_inline", created_at="1970-01-01T00:00:00+00:00",
+    ).to_dict())
 
-    stamp = _base(_keyed("id"))
+
+def _stored_schedule(store, stamp: str):
     sched = store.PipelineSchedule.from_dict({
         "id": "s1", "name": "n", "source_connector_id": "src", "source_table": "o",
         "dest_connector_id": "dst", "dest_table": "o_wh", "interval": "hourly",
-        "workspace_id": "ws", "enabled": False, "mappings": _keyed("id"),
-        "approved_decision_artifact_hash": stamp,
+        "sync_mode": "incremental_append", "workspace_id": "ws", "enabled": False,
+        "mappings": _keyed("id"), "approved_decision_artifact_hash": stamp,
     })
     store._save_all([sched])
-    store.update_schedule("s1", {"mappings": _keyed("code")})
-    where = dict(workspace_id="ws", stamp=stamp, dest_connector_id="dst", dest_table="o_wh")
-    assert _records.lookup(**where) == frozenset({"id"})
-    record = _records.lookup(**where)
-    err, _ = _enforce(_keyed("code"), stamp, record)
+    return sched
+
+
+def _run_on(record_reader, maps, stamp):
+    from types import SimpleNamespace
+
+    from src.transfer.engine_identity import _stamp_key_record
+
+    request = SimpleNamespace(workspace_id="ws", decision_stamp_schedule_id="s1",
+                              destination=SimpleNamespace(connector_id="dst2", table="o_wh2"))
+    return _enforce(maps, stamp, record=None, source_fingerprint="",
+                    stamp_key_record=lambda s: _stamp_key_record(request, s))
+
+
+@pytest.mark.parametrize("patch", [
+    {"dest_table": "o_wh2"},
+    {"dest_connector_id": "dst2"},
+    {},
+])
+def test_an_edit_never_carries_an_old_stamp_onto_a_moved_key(_records, patch):
+    """Round 2 item 1 repro: PATCH the route (or nothing else) with the key moved
+    to ``code`` and the old stamp resupplied: the stamp is dropped with a plain
+    note, and the stamp's record stays the unedited schedule's key."""
+    import services.schedule_store as store
+
+    stamp = _sched_base(_keyed("id"))
+    _stored_schedule(store, stamp)
+    warnings: list[str] = []
+    updated = store.update_schedule(
+        "s1", {**patch, "mappings": _keyed("code"), "approved_decision_artifact_hash": stamp},
+        warnings=warnings,
+    )
+    assert updated.approved_decision_artifact_hash == ""
+    assert any("Run Validate again" in w for w in warnings), warnings
+    assert _records.lookup(workspace_id="ws", schedule_id="s1", stamp=stamp) == frozenset({"id"})
+    # A run that still carries the old stamp (a stored request) is refused.
+    err, art = _run_on(None, _keyed("code"), stamp)
     assert err and "key columns changed" in err, err
-    assert _enforce(_keyed("id"), stamp, record)[0] is None
+    assert art is None
 
 
-def test_a_stamp_a_new_schedule_brings_names_no_key(_records):
+def test_an_unedited_pre_upgrade_schedule_still_runs(_records):
+    import services.schedule_runner as runner  # noqa: F401 - the run's own record write
+    import services.schedule_store as store
+
+    stamp = _sched_base(_keyed("id"))
+    sched = _stored_schedule(store, stamp)
+    _records.record_schedule(sched, trusted_rows=True)  # what the scheduler does first
+    err, art = _run_on(None, _keyed("id"), stamp)
+    assert err is None, err
+    assert art is not None
+
+
+def test_a_stamp_a_new_schedule_brings_names_no_key_and_a_failed_write_fails_the_save(
+    _records, monkeypatch,
+):
     stamp = _base(_keyed("id"))
-    _records.record_schedule({"approved_decision_artifact_hash": stamp, "workspace_id": "ws",
-                              "dest_connector_id": "dst", "dest_table": "t",
-                              "mappings": _keyed("id")}, trusted_rows=False)
-    # The scheduler's later first read cannot launder it.
-    _records.record_schedule({"approved_decision_artifact_hash": stamp, "workspace_id": "ws",
-                              "dest_connector_id": "dst", "dest_table": "t",
-                              "mappings": _keyed("id")}, trusted_rows=True)
-    assert _records.lookup(workspace_id="ws", stamp=stamp, dest_connector_id="dst",
-                           dest_table="t") is None
+    sched = {"id": "s9", "approved_decision_artifact_hash": stamp, "workspace_id": "ws",
+             "mappings": _keyed("id")}
+    _records.record_schedule(sched, trusted_rows=False, strict=True)
+    _records.record_schedule(sched, trusted_rows=True)  # the scheduler cannot launder it
+    assert _records.lookup(workspace_id="ws", schedule_id="s9", stamp=stamp) is None
+
+    def broken(**_kw):
+        raise OSError("store down")
+
+    monkeypatch.setattr(_records, "record_if_absent", broken)
+    with pytest.raises(OSError):
+        _records.record_schedule({**sched, "id": "s10"}, trusted_rows=False, strict=True)
 
 
-def test_execute_reads_the_record_for_the_requests_destination(_records):
+# -- round 2 item 2: no record means the stored Decision Artifact decides ------------
+
+
+def test_without_a_record_the_stored_artifact_decides_and_none_refuses(_records, monkeypatch):
+    from services import mongodb_service
+
+    memory = mongodb_service.MemoryMongoDBService()
+    memory.connect()
+    monkeypatch.setattr(mongodb_service, "_mongodb_service", memory)
     from types import SimpleNamespace
 
     from src.transfer.engine_identity import _stamp_key_record
 
     stamp = _base(_keyed("id"))
-    _records.record_if_absent(workspace_id="ws", stamp=stamp, dest_connector_id="dst",
-                              dest_table="t", key_columns=["id"])
-    request = SimpleNamespace(workspace_id="ws",
-                              destination=SimpleNamespace(connector_id="dst", table="t"))
-    assert _stamp_key_record(request, stamp) == frozenset({"id"})
-    elsewhere = SimpleNamespace(workspace_id="ws",
-                                destination=SimpleNamespace(connector_id="dst", table="t2"))
-    assert _stamp_key_record(elsewhere, stamp) is None
+    request = SimpleNamespace(workspace_id="ws", decision_stamp_schedule_id="",
+                              destination=SimpleNamespace(connector_id="d", table="t"))
+    reader = lambda s: _stamp_key_record(request, s)  # noqa: E731
+    # No stored artifact: refused even for an unkeyed Map (the key may have been removed).
+    err, _ = _enforce(_keyed(), stamp, record=None, stamp_key_record=reader)
+    assert err and "re-Validate this route" in err, err
+    # The artifact the previous release stored for that stamp keeps the key flag.
+    stored = {**_art(_keyed("id")).to_dict(), "content_hash": stamp}
+    memory._jobs["j1"] = {"_id": "j1", "workspace_id": "ws", "decision_artifact_hash": stamp,
+                          "decision_artifact": stored}
+    err, _ = _enforce(_keyed(), stamp, record=None, stamp_key_record=reader)
+    assert err and "key columns changed" in err, err
+    err, _ = _enforce(_keyed("code"), stamp, record=None, stamp_key_record=reader)
+    assert err and "key columns changed" in err, err
+    assert _enforce(_keyed("id"), stamp, record=None, stamp_key_record=reader)[0] is None
+    # Interim: an unkeyed stored decision runs an unkeyed Map; a keyed one never.
+    interim = _interim(_keyed())
+    memory._jobs["j2"] = {"_id": "j2", "workspace_id": "ws", "decision_artifact_hash": interim,
+                          "decision_artifact": {**_art(_keyed()).to_dict(), "content_hash": interim}}
+    assert _enforce(_keyed(), interim, record=None, stamp_key_record=reader)[0] is None
+
+
+# -- round 2 item 4: a wider live column on the stamp-only path -----------------------
+
+
+def test_the_stamp_only_path_lets_a_same_family_wider_live_column_pass():
+    """As before review 3: a live column wider in the same type family is
+    harmless for writes on the stamp-only path; narrowing, another type and an
+    extra column stay drift there, and the payload path stays exact."""
+    from services.schema_fingerprint import fingerprint_schema
+
+    maps = [
+        {"source": "id", "target": "id", "source_type": "BIGINT", "target_type": "BIGINT", "create_new": True},
+        {"source": "name", "target": "name", "source_type": "VARCHAR(40)", "target_type": "VARCHAR(40)",
+         "create_new": True},
+    ]
+    art = build_artifact_from_mappings(
+        maps, dest_db="mysql", source_db="postgresql", source_fingerprint="",
+        dest_fingerprint="", sync_mode="incremental_append", route_id="validate:mysql",
+        tenant_id="anonymous", artifact_id="da_inline", created_at="1970-01-01T00:00:00+00:00",
+    )
+
+    def gate(live: dict[str, str], payload: bool = False):
+        return enforce_decision_artifact(
+            mappings=maps, dest_db="mysql", source_db="postgresql",
+            approved_content_hash=art.content_hash,
+            artifact_payload=art.to_dict() if payload else None,
+            source_fingerprint="", dest_fingerprint=fingerprint_schema(list(live), live),
+            destination_table_exists=True, dest_column_names=list(live),
+            source_column_names=["id", "name"], live_column_types=live,
+            sync_mode="incremental_append", error_policy="quarantine",
+        )
+
+    planned = {"id": "bigint", "name": "varchar(40)"}
+    assert gate(planned)[0] is None
+    assert gate({**planned, "name": "varchar(80)"})[0] is None
+    for drifted in ({**planned, "name": "varchar(5)"}, {**planned, "id": "int"},
+                    {**planned, "id": "text"}, {**planned, "note": "int"}):
+        err, _ = gate(drifted)
+        assert err and "drifted" in err.lower(), (drifted, err)
+    err, _ = gate({**planned, "name": "varchar(80)"}, payload=True)
+    assert err and "drifted" in err.lower(), err
