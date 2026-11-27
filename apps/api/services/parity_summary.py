@@ -221,7 +221,12 @@ def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
     )
     # A run Gate-8 failed without naming the rows is decided as far as the KPI goes: it is not proven.
     failed = {job_id for job_id, tables in by_job.items() if any(t.get("failed_verification") for t in tables.values())}
-    decided = [r for r in runs if r["verdict"] != "unverifiable" or r["job_id"] in failed]
+    # A run still being verified after the write (Parity at Scale, flag-gated) has
+    # no verdict yet: it waits outside the denominator instead of reading as unproven.
+    decided = [
+        r for r in runs
+        if r["verdict"] != "verifying" and (r["verdict"] != "unverifiable" or r["job_id"] in failed)
+    ]
     return {
         "generated_at": now_iso(),
         "kpis": {
