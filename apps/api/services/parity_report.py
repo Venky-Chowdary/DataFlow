@@ -1072,11 +1072,15 @@ def summary_stamp(job: dict[str, Any]) -> dict[str, str]:
     """
     from services.parity_scale.verification import effective_block
 
+    stamp = {"job_status": str(job.get("status") or "").strip().lower(),
+             "job_updated_at": str(job.get("updated_at") or "")}
     block = effective_block(job)
-    return {"job_status": str(job.get("status") or "").strip().lower(),
-            "job_updated_at": str(job.get("updated_at") or ""),
-            "verification_state": str(block.get("state") or ""),
-            "verification_finished_at": str(block.get("finished_at") or "")}
+    if block:
+        # Only a job verified after the write carries these: every other stamp (and the
+        # summaries stored with it) is exactly what it was before Parity at Scale.
+        stamp.update(verification_state=str(block.get("state") or ""),
+                     verification_finished_at=str(block.get("finished_at") or ""))
+    return stamp
 
 
 def compact_summary(report: dict[str, Any], job: dict[str, Any] | None = None) -> dict[str, Any]:
