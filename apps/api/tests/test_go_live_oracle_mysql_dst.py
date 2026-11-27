@@ -236,8 +236,9 @@ def test_oracle_timestamp_tz_on_postgres_timestamptz_is_not_a_collapse() -> None
     """DEF-B-009. PostgreSQL has one aware timestamp.
 
     TIMESTAMP_TZ and TIMESTAMPTZ are two spellings of that instant, so the
-    pair is not a fidelity collapse. An offset label on MySQL DATETIME(6)
-    stays a collapse (DEF-B-016).
+    pair is not a fidelity collapse. An offset label on MySQL DATETIME(6) is
+    lost while the instant is kept: disclosed, not a collapse (finding 8; the
+    create-new carrier stays offset-keeping text, DEF-B-016).
     """
     from services.mapping_proof import mapping_fidelity
 
@@ -256,9 +257,11 @@ def test_oracle_timestamp_tz_on_postgres_timestamptz_is_not_a_collapse() -> None
     )
     assert verdict["verdict"] == "preserve"
     assert verdict["requires_risk_contract"] is False
+    # MySQL DATETIME(6) keeps the instant as UTC digits; only the offset label
+    # is lost, which is disclosed rather than contracted (finding 8).
     assert is_lossy_coercion(
         "TIMESTAMP WITH TIME ZONE", "DATETIME(6)", dest_db="mysql"
-    ) is True
+    ) is False
     assert is_lossy_coercion(
         "TIMESTAMP_TZ", "DATETIME(6)", dest_db="mysql"
-    ) is True
+    ) is False

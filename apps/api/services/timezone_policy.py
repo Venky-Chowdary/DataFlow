@@ -605,17 +605,19 @@ def resolve_timezone_policy(
                 policy=POLICY_UTC_NORMALIZED,
                 instant_preserved=True,
                 offset_label_preserved=False,
-                requires_contract=True,
+                # The instant is kept (UTC digits): disclosed, not contracted
+                # (accuracy review finding 8, lead rule).
+                requires_contract=False,
                 destination_reads_as="UTC wall clock in a DATETIME column",
                 range_limit="1000-01-01 .. 9999-12-31",
                 note=(
-                    "MySQL DATETIME carries no polarity marker. The instant is "
-                    "recoverable only because the writer normalizes to UTC — a "
-                    "reader that assumes local time will be wrong."
+                    "MySQL DATETIME carries no polarity marker: the instant is "
+                    "stored as UTC digits in a zone-less column, and a reader "
+                    "that assumes local time will be wrong."
                 ),
                 remediation=(
-                    "Prefer TIMESTAMP(6) (self-describing instant, 1970..2038), "
-                    "or sign a UTC-normalize contract to use DATETIME(6)."
+                    "Prefer TIMESTAMP(6) (self-describing instant, 1970..2038) "
+                    "when readers need the column to say it is UTC."
                 ),
             )
         return TimezoneTransferPolicy(

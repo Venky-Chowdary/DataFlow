@@ -161,13 +161,23 @@ def is_precision_collapse_coercion(
     """
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     target_type = _ts.weaviate_gate_type(target_type, dest_db)
-    from services.source_engine_semantics import create_new_source_type, engine_semantic_loss
+    from services.source_engine_semantics import (
+        create_new_source_type,
+        engine_semantic_loss,
+        instant_kept_label_lost,
+    )
 
     # C3: what the token means on the engine that declared it (unsigned
     # tinyint, Oracle DATE with time, MySQL TIMESTAMP instant, unbounded
     # numeric) — the bare token alone graded these pairs lossless.
     if engine_semantic_loss(source_type, target_type, dest_db=dest_db, population=population):
         return True
+    if instant_kept_label_lost(source_type, target_type, dest_db=dest_db):
+        # Finding 8: instant kept, offset label disclosed; fractional digits a
+        # value actually uses are still judged (D372).
+        from services.decision_kernel.type_invent import temporal_precision_would_narrow as _narrows
+
+        return bool(_narrows(source_type, target_type, dest_db=dest_db, population=population))
     source_type = create_new_source_type(source_type, dest_db)
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
@@ -850,13 +860,23 @@ def is_lossy_coercion(
             )
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     target_type = _ts.weaviate_gate_type(target_type, dest_db)
-    from services.source_engine_semantics import create_new_source_type, engine_semantic_loss
+    from services.source_engine_semantics import (
+        create_new_source_type,
+        engine_semantic_loss,
+        instant_kept_label_lost,
+    )
 
     # C3: what the token means on the engine that declared it (unsigned
     # tinyint, Oracle DATE with time, MySQL TIMESTAMP instant, unbounded
     # numeric) — the bare token alone graded these pairs lossless.
     if engine_semantic_loss(source_type, target_type, dest_db=dest_db, population=population):
         return True
+    if instant_kept_label_lost(source_type, target_type, dest_db=dest_db):
+        # Finding 8: instant kept, offset label disclosed; fractional digits a
+        # value actually uses are still judged (D372).
+        from services.decision_kernel.type_invent import temporal_precision_would_narrow as _narrows
+
+        return bool(_narrows(source_type, target_type, dest_db=dest_db, population=population))
     source_type = create_new_source_type(source_type, dest_db)
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)

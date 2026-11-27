@@ -374,7 +374,10 @@ Changed shapes:
   source's own offset digits. The default container runs in UTC and stores
   the correct instant for `WITH LOCAL TIME ZONE`.
 - **Finding them.** Validate of a route into such a table shows a one-line
-  advisory when the job history has completed runs from before this release.
+  advisory when the job history has completed runs into the same connector,
+  schema and table that are from before this release, or whose session did
+  not read back UTC. It looks back 400 days by default
+  (`DATAWRAP_ORACLE_UPGRADE_LOOKBACK_DAYS`).
   To check the data, compare `SYS_EXTRACT_UTC(column)` on the destination
   with the source's UTC instant for a few keys, for example with
   `SELECT id, TO_CHAR(SYS_EXTRACT_UTC(col), 'YYYY-MM-DD"T"HH24:MI:SS.FF6')`.
@@ -386,8 +389,11 @@ Changed shapes:
   ZONE` columns, destination `DEFAULT CURRENT_*` values and mirror
   `_deleted_at` stamps now evaluate in UTC. A route with a custom source
   query, a source filter, CDC or mirror stops once with a notice until someone
-  acknowledges it (`session_zone_acknowledged` together with
-  `acknowledgment_actor` and `acknowledgment_reason`).
+  acknowledges it (`session_zone_acknowledged` together with its own
+  `session_zone_ack_actor` and `session_zone_ack_reason`; the actor and reason
+  given for another acknowledgement do not count). The acknowledgement is
+  kept per route: workspace, both connectors, host, port, SID or service
+  name, connection string, schema and table.
 
 ## Not covered
 

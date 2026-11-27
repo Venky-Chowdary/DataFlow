@@ -256,7 +256,10 @@ def classify_conversion(
             "contract_version": CONVERSION_CONTRACT_VERSION,
         }
 
-    invent = invents_unproven_capacity(src, tgt, dest_db=dest_db)
+    from services.source_engine_semantics import instant_kept_label_lost
+
+    kept_instant = instant_kept_label_lost(src, tgt, dest_db=dest_db)
+    invent = invents_unproven_capacity(src, tgt, dest_db=dest_db) and not kept_instant
     # Measured cells decide a declared narrowing (D148): TIMESTAMPTZ(6) → a
     # millisecond instant is not lossy until a value actually has a finer digit.
     lossy = bool(is_lossy_coercion(src, tgt, dest_db=dest_db, population=population))
@@ -347,6 +350,8 @@ def classify_conversion(
     unmeasured = temporal_tick_disclosure(src, tgt, dest_db=dest_db, population=population) or (
         _value_dependent_loss(src, tgt, dest_db=dest_db) if population is None else ""
     )
+    if kept_instant and kept_instant not in unmeasured and "the offset is not" not in unmeasured:
+        unmeasured = "; ".join(p.rstrip(".") for p in (unmeasured, kept_instant) if p)
     if unmeasured:
         out["reason"] = (
             f"{src} → {tgt} keeps every value up to the destination's precision; {unmeasured}"

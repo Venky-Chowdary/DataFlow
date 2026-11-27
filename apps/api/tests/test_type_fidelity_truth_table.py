@@ -9,9 +9,10 @@ documentation citations. It is not derived from the product's predicate.
 * ``loses``: the classifier must not grade the pair a safe path, and it must
   need a Risk Contract (the fidelity predicate calls it lossy or the contract
   requires approval);
-* ``loses_if_values`` / ``loses_disclosed``: a safe grade must carry the
-  ``unmeasured_loss`` sentence (a dropped UTC offset is loaded as the instant
-  by product decision D136 and disclosed);
+* ``loses_if_values``: a safe grade must carry the ``unmeasured_loss`` sentence;
+* ``loses_disclosed``: the instant is kept and only the offset label (or a
+  zone-less column's zone marker) is lost — the grade discloses it and needs no
+  Risk Contract (D136; lead rule on finding 8);
 * ``keeps``: the product's carrier must not be called lossy (no refused
   second run of the product's own table).
 
@@ -67,7 +68,10 @@ def _agrees(truth, target, conv, lossy) -> None:
     cls = conv["conversion_class"]
     if truth == "loses":
         assert cls not in SAFE and (lossy or conv.get("requires_risk_contract")), (target, conv)
-    elif truth in ("loses_if_values", "loses_disclosed"):
+    elif truth == "loses_disclosed":
+        # Instant kept, only the label (or zone marker) lost: disclosed, never a Risk Contract.
+        assert conv.get("unmeasured_loss") and not lossy and not conv.get("requires_risk_contract"), (target, conv)
+    elif truth == "loses_if_values":
         assert cls not in SAFE or conv.get("unmeasured_loss"), (target, conv)
     else:
         assert not lossy, (target, conv)

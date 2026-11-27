@@ -93,7 +93,7 @@ The scan covers the runtime Python under `apps/api/src`, `apps/api/services`,
 
 <!-- BEGIN GENERATED: config-flags (docs/tools/gen_config_reference.py) -->
 
-591 flags: 510 accept both prefixes, 5 are read under one exact product-prefixed name only, 76 are unprefixed.
+592 flags: 511 accept both prefixes, 5 are read under one exact product-prefixed name only, 76 are unprefixed.
 
 ### Flags that accept both prefixes
 
@@ -262,8 +262,8 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `ENGINE_CACHE` | `1` | Read by `cache_enabled()`: Whether engines are reused. Off restores per-call construction | `apps/api/services/engine_pool.py` |
 | `ENGINE_CACHE_SIZE` | `32` | Read by `max_engines()`: Process-wide SQLAlchemy Engine cache | `apps/api/services/engine_pool.py` |
 | `ENGINE_DIGEST` | `0` | Read by `_engine_digest_enabled()`: Operator gate — default **off** until two gaps are closed | `apps/api/src/transfer/reconcile_step.py` |
-| `ENV` | computed | Declares the environment. `production` or `prod` turns production policy on; `development`, `dev`, `local` or `test` turns it off. Falls back to the unprefixed `ENVIRONMENT`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +1 more |
-| `ENVIRONMENT`<br>also unprefixed `ENVIRONMENT` | `""` | Unprefixed fallback for `DATAWRAP_ENV`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +1 more |
+| `ENV` | computed | Declares the environment. `production` or `prod` turns production policy on; `development`, `dev`, `local` or `test` turns it off. Falls back to the unprefixed `ENVIRONMENT`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +2 more |
+| `ENVIRONMENT`<br>also unprefixed `ENVIRONMENT` | `""` | Unprefixed fallback for `DATAWRAP_ENV`. | `apps/api/services/platform_config.py`, `apps/api/services/secret_vault.py` +2 more |
 | `ES_HOST` | `127.0.0.1` | Read by `_es_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
 | `ES_PORT` | `9200` | Read by `_es_local_cfg()`: PostgreSQL → MySQL volume run through the production stream engine (and other readers) | `apps/api/services/million_row_bench.py` |
 | `EXIT_VERIFY_MAX_SECONDS` | `""` | Read by `max_verify_seconds()`: The most a rehearsal's verification may take, all attempts together | `apps/api/services/exit_verify_guard.py` |
@@ -407,6 +407,7 @@ Set `DATAWRAP_<flag>` (preferred) or `DATAFLOW_<flag>`. The table shows the part
 | `ORACLE_SQLITE_COPY` | `1` | Read by `oracle_sqlite_copy_enabled()`: Oracle SHARE-lock SELECT → SQLite executemany (cross-engine bulk) | `apps/api/services/copy_oracle_sqlite.py` |
 | `ORACLE_SQLITE_COPY_BATCH` | `5000` | Read by `oracle_sqlite_copy_batch()`: Oracle SHARE-lock SELECT → SQLite executemany (cross-engine bulk) | `apps/api/services/copy_oracle_sqlite.py` |
 | `ORACLE_SQLSERVER_COPY` | `1` | Read by `oracle_sqlserver_copy_enabled()`: Oracle SELECT → SQL Server fast_executemany (cross-engine bulk) | `apps/api/services/copy_oracle_sqlserver.py` |
+| `ORACLE_UPGRADE_LOOKBACK_DAYS` | `400` | Days of job history Validate reads to find runs into an Oracle table that were written before sessions were pinned to UTC, or on a session that did not read back UTC (one-line upgrade advisory). Default 400. | `apps/api/services/oracle_session_scope.py` |
 | `OTEL_LOGS` | `0` | Read by `otel_logs_enabled()`: Optional OpenTelemetry log export for the centralized logging pipeline | `apps/api/services/otel_logging.py` |
 | `OTLP_ENDPOINT` | unset | Read by `otlp_endpoint()`: OpenTelemetry tracing for Datawrap transfers — optional, fail-closed | `apps/api/services/tracing.py` |
 | `OTLP_INSECURE` | `1` | Read by `_otlp_insecure()`: OpenTelemetry tracing for Datawrap transfers — optional, fail-closed | `apps/api/services/tracing.py` |
@@ -711,6 +712,7 @@ Standard or third-party names (cloud SDKs, database URLs, platform variables), r
 
 These functions read a variable whose name is built at run time, so the name does not appear in the tables above.
 
+- `apps/api/services/call_lanes.py` — `lane_size()`
 - `apps/api/services/export_object_store.py` — `s3_client_for()`
 - `apps/api/services/integrations_store.py` — `apply_integrations_to_env()`
 - `apps/api/services/integrations_store.py` — `provider_key_state()`

@@ -191,6 +191,55 @@ def oracle_zone_bind_shifts_instant(
     )
 
 
+_MYSQL_INSTANT_CARRIERS = frozenset({"DATETIME", "TIMESTAMP"})
+
+
+def _fraction_digits(type_text: str, default: int) -> int:
+    digits = _fsp(type_text)
+    return int(digits) if digits else default
+
+
+def instant_kept_label_lost(source_type: str, target_type: str, *, dest_db: str = "") -> str:
+    """The disclosure for an instant the writer keeps while dropping its offset, or ``""``.
+
+    Accuracy review finding 8 (lead rule): an offset or instant source whose
+    writer binds the UTC instant, where only the offset label (or, for MySQL
+    ``DATETIME``, the zone marker) is lost, is disclosed, not a Risk Contract.
+    Writers pinned by the type-fidelity truth table: MySQL/MariaDB
+    ``DATETIME``/``TIMESTAMP`` (UTC digits, session pinned to UTC), Snowflake
+    ``TIMESTAMP_LTZ``, BigQuery ``TIMESTAMP``, and Oracle ``WITH LOCAL TIME
+    ZONE`` on a session that read back UTC. A narrower fraction than the
+    source keeps (below six digits) is a different loss and is not covered.
+    """
+    from services.type_system import datetime_timezone_polarity
+
+    if datetime_timezone_polarity(source_type) not in {"tz", "ltz"}:
+        return ""
+    dest = _dest(dest_db)
+    bare = _bare(target_type)
+    if dest in _MYSQL and bare in _MYSQL_INSTANT_CARRIERS:
+        tgt_digits = _fraction_digits(target_type, 0)
+        zone_less = bare == "DATETIME"
+    elif dest == "snowflake" and bare == "TIMESTAMP_LTZ":
+        tgt_digits, zone_less = _fraction_digits(target_type, 9), False
+    elif dest == "bigquery" and bare == "TIMESTAMP":
+        tgt_digits, zone_less = 6, False
+    elif dest in _ORACLE and bare == "TIMESTAMP WITH LOCAL TIME ZONE":
+        from services.oracle_session_scope import oracle_utc_pin
+
+        if not oracle_utc_pin()[0]:
+            return ""
+        tgt_digits, zone_less = _fraction_digits(target_type, 6), False
+    else:
+        return ""
+    if tgt_digits < min(_fraction_digits(source_type, 6), 6):
+        return ""
+    if zone_less:
+        return (f"{target_type}: the instant is stored as UTC digits in a zone-less column; "
+                "the offset is not kept")
+    return f"{target_type} keeps the instant but not the offset"
+
+
 def _offsets_all_utc(population: Any) -> bool:
     if population is None:
         return False

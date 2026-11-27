@@ -510,11 +510,6 @@ def copy_oracle_to_oracle(
             )
             created_here = True
 
-        # Every decline is behind us: this run copies server side, offsets and
-        # all, so the grade may treat it as such (finding 8).
-        from services.oracle_session_scope import mark_server_side_oracle_copy
-
-        mark_server_side_oracle_copy(source_cfg, dest_cfg)
         cur.execute(f"LOCK TABLE {source_ref} IN SHARE MODE")  # nosec B608
         source_count = _count(cur, source_ref)
         workers = pg_mysql_copy_workers(source_count)
@@ -566,6 +561,11 @@ def copy_oracle_to_oracle(
             and not str(to_copy[0].get("predicate") or "")
         )
         copy_split = "insert_select_append" if use_append else "insert_select"
+        # Every decline is behind us: from here the rows move server side,
+        # offsets and all (finding 8). Any failure below clears the mark.
+        from services.oracle_session_scope import mark_server_side_oracle_copy
+
+        mark_server_side_oracle_copy(source_cfg, dest_cfg)
         for item in to_copy:
             clause = str(item.get("predicate") or "")
             params = list(item.get("params") or [])
@@ -642,6 +642,9 @@ def copy_oracle_to_oracle(
             ),
         )
     except Exception:
+        from services.oracle_session_scope import clear_server_side_oracle_copy
+
+        clear_server_side_oracle_copy()  # a declined or failed copy falls back to the row writer
         if created_here:
             try:
                 cur.execute(_drop_sql(dest_ref))

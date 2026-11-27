@@ -553,9 +553,11 @@ def test_dest_db_aliases_normalize_inside_lossy_ssot():
     # MySQL DATETIME(6) stores the UTC-normalized instant. TIMESTAMP(6) would
     # refuse every year outside 1970..2038.
     assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is False
+    # An offset-pinned source keeps its instant there too; the label loss is
+    # disclosed, not a Risk Contract (accuracy review finding 8).
     assert is_lossy_coercion(
         "TIMESTAMP WITH TIME ZONE", "DATETIME(6)", dest_db="mysql"
-    ) is True
+    ) is False
 
 
 def test_oracle_time_lossy_and_iceberg_objectid_hex_wire():

@@ -429,6 +429,8 @@ class ExecuteTransferRequest(PolicyFieldsModel):
     # Accept a load far below this route's history (strict volume guard, D82).
     load_volume_acknowledged: bool = False
     session_zone_acknowledged: bool = False
+    session_zone_ack_actor: str = ""
+    session_zone_ack_reason: str = ""
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     # Phase C11 — pin Validate Decision Artifact (64-hex content_hash).
@@ -1414,6 +1416,8 @@ async def execute_transfer_json(
         ),
         load_volume_acknowledged=bool(body.load_volume_acknowledged),
         session_zone_acknowledged=bool(body.session_zone_acknowledged),
+        session_zone_ack_actor=str(body.session_zone_ack_actor or ""),
+        session_zone_ack_reason=str(body.session_zone_ack_reason or ""),
         acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
         acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
         approved_decision_artifact_hash=str(

@@ -117,10 +117,10 @@ class _SAConn:
 def test_writer_refuses_a_batch_on_a_non_utc_session_and_counts_what_was_written():
     with bind_oracle_utc_pin(True, "session time zone read back as +00:00"):
         assert_writer_session(_SAConn("+00:00"))  # fine
-        with pytest.raises(RuntimeError, match="Nothing was written in this run"):
+        with pytest.raises(RuntimeError, match="No batch of this run had been written"):
             assert_writer_session(_SAConn("Asia/Kolkata"))
         note_oracle_rows_written(1500)
-        with pytest.raises(RuntimeError, match="1500 row\\(s\\) written earlier in this run stay"):
+        with pytest.raises(RuntimeError, match="had committed 1500 row"):
             assert_writer_session(_SAConn("Asia/Kolkata"))
     with bind_oracle_utc_pin(False, "not checked"):  # graded with a Risk Contract: writes as accepted
         assert_writer_session(_SAConn("Asia/Kolkata"))
@@ -324,8 +324,13 @@ def test_non_utc_default_needs_one_acknowledgement_per_route(monkeypatch, tmp_pa
     with pytest.raises(ValueError, match=f"defaulted to America/St_Johns.*CURRENT_DATE.*{why}"):
         with oracle_run_scope(req):
             pass
+    # An actor/reason given for another acknowledgement never stands in for this one.
     req.session_zone_acknowledged = True
-    req.acknowledgment_actor, req.acknowledgment_reason = "ops", "UTC is intended for this route"
+    req.acknowledgment_actor, req.acknowledgment_reason = "ops", "compliance reviewed for this table"
+    with pytest.raises(ValueError, match="session_zone_ack_actor"):
+        with oracle_run_scope(req):
+            pass
+    req.session_zone_ack_actor, req.session_zone_ack_reason = "ops", "UTC is intended for this route"
     with oracle_run_scope(req):
         pass
     req.session_zone_acknowledged = False  # one-time: the route stays acknowledged
@@ -351,7 +356,7 @@ def test_validate_outside_a_run_probes_and_warns(monkeypatch):
     from services.oracle_session_scope import with_oracle_session_pin
 
     monkeypatch.setattr(scope, "probe_oracle_session", lambda cfg: (False, "session time zone read back as -03:30, not UTC", "-03:30"))
-    monkeypatch.setattr(scope, "_recent_jobs", lambda: [])
+    monkeypatch.setattr(scope, "_jobs_in_window", lambda store=None: [])
     seen = with_oracle_session_pin(lambda **kw: {"pin": oracle_utc_pin(), "warnings": []})
     out = seen(destination_db_type="oracle", destination_config={"host": "o"}, destination_connected=True,
                sync_mode="cdc", destination_table="T")
@@ -360,9 +365,9 @@ def test_validate_outside_a_run_probes_and_warns(monkeypatch):
     assert seen(destination_db_type="oracle", destination_config={"host": "o"})["pin"][1].endswith("not checked")
 
 
-def _job(stamp=None, mappings=None, table="T", status="completed"):
+def _job(stamp=None, mappings=None, table="T", status="completed", connector="ora-prod", schema="APP"):
     job = {"status": status, "transfer_request": {
-        "destination": {"format": "oracle", "table": table},
+        "destination": {"format": "oracle", "table": table, "connector_id": connector, "schema": schema},
         "mappings": mappings if mappings is not None else [
             {"source": "at", "target": "AT", "source_type": "TIMESTAMPTZ(6)",
              "target_type": "TIMESTAMP(6) WITH TIME ZONE"}],
@@ -372,14 +377,204 @@ def _job(stamp=None, mappings=None, table="T", status="completed"):
     return job
 
 
+TARGET = {"connector_id": "ora-prod", "schema": "APP", "table": "T"}
+
+
 def test_upgrade_advisory_names_unpinned_instant_writes_only():
     from services.oracle_session_scope import UPGRADE_ADVISORY, upgrade_advisory
 
-    assert upgrade_advisory("oracle", "T", lambda: [_job()]) == UPGRADE_ADVISORY
-    assert upgrade_advisory("oracle", "t", lambda: [_job(mappings=[])]) == UPGRADE_ADVISORY  # unrecorded mapping
-    assert upgrade_advisory("oracle", "T", lambda: [_job(stamp={"utc_pinned": True})]) == ""
-    assert upgrade_advisory("oracle", "T", lambda: [_job(table="OTHER")]) == ""
-    assert upgrade_advisory("oracle", "T", lambda: [_job(status="failed")]) == ""
-    assert upgrade_advisory("oracle", "T", lambda: [_job(mappings=[
-        {"source": "n", "target": "N", "source_type": "INTEGER", "target_type": "NUMBER(10)"}])]) == ""
-    assert upgrade_advisory("postgresql", "T", lambda: [_job()]) == ""
+    def adv(*jobs, target=TARGET):
+        return upgrade_advisory("oracle", target, lambda: list(jobs))
+
+    assert adv(_job()) == UPGRADE_ADVISORY
+    assert adv(_job(mappings=[])) == UPGRADE_ADVISORY  # unrecorded mapping
+    assert adv(_job(stamp={"utc_pinned": False, "reason": "read back Asia/Kolkata"})) == UPGRADE_ADVISORY
+    assert adv(_job(stamp={"utc_pinned": True})) == ""
+    assert adv(_job(table="OTHER")) == ""
+    assert adv(_job(connector="ora-test")) == ""  # same table name, another database
+    assert adv(_job(schema="OTHER")) == ""
+    assert adv(_job(status="failed")) == ""
+    assert adv(_job(mappings=[
+        {"source": "n", "target": "N", "source_type": "INTEGER", "target_type": "NUMBER(10)"}])) == ""
+    assert upgrade_advisory("postgresql", TARGET, lambda: [_job()]) == ""
+
+
+def test_upgrade_advisory_reads_the_whole_window_not_the_last_200(monkeypatch):
+    import services.oracle_session_scope as scope
+
+    old = _job()
+    old["job_id"] = "old"
+    newer = []
+    for i in range(450):
+        j = _job(stamp={"utc_pinned": True})
+        j["job_id"] = f"j{i}"
+        newer.append(j)
+
+    class _Store:
+        calls: list = []
+
+        def list_jobs(self, limit=50, *, destination_type="", date_from=None, offset=0, **_):
+            self.calls.append((offset, date_from))
+            return (newer + [old])[offset:offset + limit]
+
+        def get_jobs(self, ids):
+            return {j["job_id"]: j for j in newer + [old] if j["job_id"] in ids}
+
+    store = _Store()
+    jobs = scope._jobs_in_window(store)
+    assert len(jobs) == 451 and scope.unpinned_history(jobs, TARGET)
+    assert [c[0] for c in store.calls] == [0, 200, 400] and all(c[1] for c in store.calls)
+
+
+class _StatusOnlyStore:
+    """A job store with no ``update_job_fields``: the stamp goes through the status update."""
+
+    def __init__(self):
+        self.jobs: dict = {}
+
+    def update_job_status(self, job_id, status, **kw):
+        self.jobs.setdefault(job_id, {}).update(kw)
+        self.jobs[job_id]["status"] = status
+        return True
+
+    def get_job(self, job_id):
+        return self.jobs.get(job_id)
+
+
+@pytest.mark.parametrize("make", ["fake_mongo", "status_only"])
+def test_run_stamps_its_job_whatever_the_store_offers(monkeypatch, make):
+    from services.oracle_session_scope import oracle_run_scope
+    from tests.test_property2_golden_path_never_blocked import _FakeMongo
+
+    _fake_sessions(monkeypatch)
+    store = _FakeMongo() if make == "fake_mongo" else _StatusOnlyStore()
+    store.update_job_status("j1", "running")
+    with oracle_run_scope(_req(), "j1", store):
+        pass
+    assert store.get_job("j1")["oracle_session"]["utc_pinned"] is True
+    assert store.get_job("j1")["status"] == "running"
+
+
+def test_partial_range_append_declines_after_the_lock_and_leaves_no_mark(monkeypatch):
+    """Review: an append into an occupied table whose key range is only partly
+    present declines (copy_fast_path) after the share lock and falls back to the
+    row writer — the server-side mark must not survive it."""
+    import services.copy_oracle_oracle as coo
+    from services.copy_fast_path import FastPathUnavailable
+
+    class _Cur:
+        def execute(self, sql, *a):
+            self.last = sql
+
+        def close(self):
+            pass
+
+    class _OraConn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    same = {"host": "db1", "port": 1521, "service_name": "FREEPDB1", "username": "u", "password": "p"}
+    monkeypatch.setenv("DATAFLOW_ORACLE_ORACLE_INSERT_SELECT", "1")
+    monkeypatch.setattr(coo, "_oracle_connect", lambda cfg: _OraConn())
+    monkeypatch.setattr(coo, "_ora_table_pk_and_types", lambda cur, schema, table, cols: (
+        ["ID"], {"ID": "NUMBER(10)", "AT": "TIMESTAMP(6) WITH TIME ZONE"}))
+    monkeypatch.setattr(coo, "_table_exists", lambda cur, schema, table: True)
+    monkeypatch.setattr(coo, "_count", lambda cur, ref: 10)
+    monkeypatch.setattr(coo, "_plan_pk_partitions", lambda *a: [
+        {"lo": 1, "hi": 10, "null_shard": False, "source_count": 10, "predicate": "", "params": []}])
+    monkeypatch.setattr(coo, "_range_count", lambda *a: 4)  # partly present
+    with server_side_copy_scope():
+        with pytest.raises(FastPathUnavailable, match="partly present"):
+            coo.copy_oracle_to_oracle(
+                source_cfg=same, source_table="S", dest_cfg=dict(same), dest_table="D",
+                pairs=[("ID", "ID"), ("AT", "AT")],
+                oracle_ddls=["NUMBER(10)", "TIMESTAMP(6) WITH TIME ZONE"], replace_destination=False,
+            )
+        assert not oracle_same_instance()
+        from services.timezone_policy import resolve_timezone_policy
+
+        assert not resolve_timezone_policy(
+            "TIMESTAMP(6) WITH TIME ZONE", "TIMESTAMP(6) WITH TIME ZONE", dest_db="oracle").offset_label_preserved
+
+
+def test_a_failed_insert_select_clears_the_mark(monkeypatch):
+    import services.copy_oracle_oracle as coo
+
+    class _Cur:
+        def execute(self, sql, *a):
+            if sql.lstrip().upper().startswith("INSERT"):
+                raise RuntimeError("ORA-01653: unable to extend table")
+
+        def close(self):
+            pass
+
+    class _OraConn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    same = {"host": "db1", "port": 1521, "service_name": "FREEPDB1", "username": "u", "password": "p"}
+    monkeypatch.setenv("DATAFLOW_ORACLE_ORACLE_INSERT_SELECT", "1")
+    monkeypatch.setattr(coo, "_oracle_connect", lambda cfg: _OraConn())
+    monkeypatch.setattr(coo, "_ora_table_pk_and_types", lambda cur, schema, table, cols: ([], {}))
+    monkeypatch.setattr(coo, "_table_exists", lambda cur, schema, table: False)
+    monkeypatch.setattr(coo, "settle_fast_path_create_on", lambda *a, **k: None)
+    monkeypatch.setattr(coo, "_count", lambda cur, ref: 3)
+    with server_side_copy_scope():
+        with pytest.raises(RuntimeError, match="ORA-01653"):
+            coo.copy_oracle_to_oracle(
+                source_cfg=same, source_table="S", dest_cfg=dict(same), dest_table="D",
+                pairs=[("AT", "AT")], oracle_ddls=["TIMESTAMP(6) WITH TIME ZONE"], replace_destination=False,
+            )
+        assert not oracle_same_instance()
+
+
+def _route(**over):
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    src = dict(kind="database", format="oracle", host="db1", port=1521, database="FREEPDB1", table="S")
+    dst = dict(kind="database", format="oracle", host="db1", port=1521, database="FREEPDB1", table="D")
+    src.update(over.pop("src", {}))
+    dst.update(over.pop("dst", {}))
+    return TransferRequest(source=EndpointConfig(**src), destination=EndpointConfig(**dst), **over)
+
+
+@pytest.mark.parametrize("a,b,cfgs_a,cfgs_b", [
+    (_route(workspace_id="ws-a"), _route(workspace_id="ws-b"), None, None),
+    (_route(dst={"connector_id": "prod"}), _route(dst={"connector_id": "test"}), None, None),
+    (_route(dst={"host": "", "database": "", "connection_string": "oracle://u@prod-scan:1521/PROD"}),
+     _route(dst={"host": "", "database": "", "connection_string": "oracle://u@test-scan:1521/TEST"}), None, None),
+    (_route(dst={"extra": {"sid": "PROD"}, "database": ""}), _route(dst={"extra": {"sid": "TEST"}, "database": ""}),
+     None, None),
+    (_route(dst={"database": ""}), _route(dst={"database": ""}),
+     {"destination": {"sid": "PROD"}}, {"destination": {"sid": "TEST"}}),  # SID only in the connector config
+    (_route(dst={"extra": {"service_name": "PDB1"}}), _route(dst={"extra": {"service_name": "PDB2"}}), None, None),
+])
+def test_route_key_separates_routes_that_only_look_alike(a, b, cfgs_a, cfgs_b):
+    from services.oracle_session_scope import route_key
+
+    assert route_key(a, cfgs_a) != route_key(b, cfgs_b)
+    assert route_key(a, cfgs_a) == route_key(a, cfgs_a)
+
+
+def test_zone_acknowledgement_is_part_of_the_staged_fingerprint():
+    from services.staged_preflight import request_preflight_fingerprint
+
+    base = _route()
+    acked = _route(session_zone_acknowledged=True)
+    actor = _route(session_zone_acknowledged=True, session_zone_ack_actor="ops")
+    reason = _route(session_zone_acknowledged=True, session_zone_ack_actor="ops",
+                    session_zone_ack_reason="UTC is intended for this route")
+    prints = {request_preflight_fingerprint(r) for r in (base, acked, actor, reason)}
+    assert len(prints) == 4

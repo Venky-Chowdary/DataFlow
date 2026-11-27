@@ -5,7 +5,7 @@
   "keeps": "every value of the source type lands unchanged",
   "loses": "some legal source value cannot land unchanged",
   "loses_if_values": "loses only for some values; a safe grade must say so (unmeasured_loss) unless measured",
-  "loses_disclosed": "always loses part of the value (the UTC offset, or the zone marker of a zone-less column) where the product deliberately loads the rest; the grade or Validate must say so"
+  "loses_disclosed": "the instant is kept and only the UTC offset label (or a zone-less column's zone marker) is lost: the grade discloses it (unmeasured_loss) and needs no Risk Contract"
  },
  "rows": [
   {
@@ -662,9 +662,9 @@
    "source_type": "datetimeoffset(7)",
    "dest": "bigquery",
    "target": "TIMESTAMP",
-   "truth": "loses_disclosed",
+   "truth": "loses_if_values",
    "writer": "utc",
-   "why": "BigQuery TIMESTAMP is a UTC instant with microseconds. The writer binds the UTC instant.",
+   "why": "BigQuery TIMESTAMP keeps the instant (not the offset) to microseconds: a datetimeoffset(7) value using its 7th digit loses it. The writer binds the UTC instant.",
    "citations": [
     "https://learn.microsoft.com/en-us/sql/t-sql/data-types/datetimeoffset-transact-sql",
     "https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types"

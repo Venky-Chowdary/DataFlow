@@ -103,6 +103,11 @@ def mark_server_side_oracle_copy(source_cfg: Mapping[str, Any], dest_cfg: Mappin
     return same
 
 
+def clear_server_side_oracle_copy() -> None:
+    """The copy declined or failed after marking: the row writer takes over."""
+    _SERVER_SIDE.set(False)
+
+
 def oracle_same_instance() -> bool:
     """True only after this run committed to the server-side Oracle copy."""
     return _SERVER_SIDE.get()
@@ -117,7 +122,9 @@ def server_side_copy_scope() -> Iterator[None]:
         _SERVER_SIDE.reset(token)
 
 
-def note_oracle_rows_written(count: int) -> None:
+def note_oracle_rows_written(count: int, db_type: Any = "oracle") -> None:
+    if not is_oracle(db_type):
+        return
     box = _ROWS_WRITTEN.get()
     if box is not None:
         box[0] += max(int(count or 0), 0)
@@ -128,14 +135,14 @@ def oracle_rows_written() -> int:
     return box[0] if box else 0
 
 
-def assert_writer_session(connection: Any) -> None:
-    """Refuse to write on a destination connection that is no longer UTC.
+def assert_writer_session(connection: Any, db_type: Any = "oracle") -> None:
+    """Refuse to write on an Oracle destination connection that is no longer UTC.
 
     Only while the run was graded on a confirmed pin (no Risk Contract). The
     check reads the zone on the very connection the batch writes through.
     """
     confirmed, _ = oracle_utc_pin()
-    if not confirmed:
+    if not confirmed or not is_oracle(db_type):
         return
     from connectors.oracle_session import confirm_utc_session
 
@@ -146,8 +153,8 @@ def assert_writer_session(connection: Any) -> None:
     raise RuntimeError(
         f"Oracle destination session is not UTC on this batch ({reason}); Validate graded "
         "this run's instants on a UTC session, so this batch is not written. "
-        + (f"{done} row(s) written earlier in this run stay as written (their session read "
-           "back UTC). " if done else "Nothing was written in this run. ")
+        + (f"Earlier batches of this run had committed {done} row(s) on a session that read "
+           "back UTC. " if done else "No batch of this run had been written. ")
         + "Re-run Validate."
     )
 
@@ -239,15 +246,40 @@ def _ack_log() -> Any:
 _ACKS: Any = None
 
 
-def route_key(request: Any) -> str:
-    """One route: both endpoints' engine, host, port, database, schema, table, service."""
-    def side(ep: Any) -> list[str]:
-        extra = getattr(ep, "extra", None) or {}
-        keys = ("format", "host", "port", "database", "schema", "table")
-        return [str(getattr(ep, k, "") or "").lower() for k in keys] + [
-            str(extra.get("service_name") or "").lower()]
+def _digest(text: Any) -> str:
+    raw = str(text or "")
+    return hashlib.sha256(raw.encode()).hexdigest()[:16] if raw else ""
 
-    raw = json.dumps([side(request.source), side(request.destination)])
+
+def route_key(request: Any, cfgs: Mapping[str, Mapping[str, Any] | None] | None = None) -> str:
+    """One route, in one workspace, on one pair of logins.
+
+    Workspace, each side's saved connector, engine, host, port, database,
+    schema, table, SID or service name (from the endpoint, its ``extra`` or the
+    resolved connector config) and a digest of any connection string: two
+    connectors that differ only there are two routes.
+    """
+    cfgs = cfgs or {}
+
+    def side(name: str, ep: Any) -> list[str]:
+        extra = getattr(ep, "extra", None) or {}
+        cfg = cfgs.get(name) or {}
+
+        def pick(*keys: str) -> str:
+            for source in (extra, cfg):
+                for key in keys:
+                    if str(source.get(key) or "").strip():
+                        return str(source.get(key)).strip().lower()
+            return ""
+
+        keys = ("format", "connector_id", "host", "port", "database", "schema", "table")
+        return [str(getattr(ep, k, "") or "").lower() for k in keys] + [
+            pick("sid"), pick("service_name", "service"),
+            _digest(getattr(ep, "connection_string", "") or cfg.get("connection_string") or cfg.get("dsn")),
+        ]
+
+    raw = json.dumps([str(getattr(request, "workspace_id", "") or ""),
+                      side("source", request.source), side("destination", request.destination)])
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
@@ -279,23 +311,29 @@ def record_route_ack(key: str, *, actor: str, reason: str) -> None:
             fh.write(json.dumps(record) + "\n")
 
 
-def require_route_ack(request: Any, prior_zone: str) -> None:
-    """Refuse a zone-sensitive route on a non-UTC default until acknowledged once."""
+def require_route_ack(request: Any, prior_zone: str,
+                      cfgs: Mapping[str, Mapping[str, Any] | None] | None = None) -> None:
+    """Refuse a zone-sensitive route on a non-UTC default until acknowledged once.
+
+    The acknowledgement has its own actor and reason
+    (``session_zone_ack_actor`` / ``session_zone_ack_reason``): one given for
+    another risk never stands in for this one.
+    """
     extra = getattr(request.source, "extra", None) or {}
     notice = zone_change_notice(prior_zone, zone_sensitive_route(
         getattr(request, "sync_mode", ""), extra.get("source_query"), getattr(request, "source_filter", None)))
     if not notice:
         return
-    key = route_key(request)
+    key = route_key(request, cfgs)
     if route_acknowledged(key):
         return
-    actor = str(getattr(request, "acknowledgment_actor", "") or "").strip()
-    reason = str(getattr(request, "acknowledgment_reason", "") or "").strip()
+    actor = str(getattr(request, "session_zone_ack_actor", "") or "").strip()
+    reason = str(getattr(request, "session_zone_ack_reason", "") or "").strip()
     if getattr(request, "session_zone_acknowledged", False) and len(actor) >= 2 and len(reason) >= 8:
         record_route_ack(key, actor=actor, reason=reason)
         return
     raise ValueError(
-        notice + " Set session_zone_acknowledged with acknowledgment_actor and acknowledgment_reason."
+        notice + " Set session_zone_acknowledged with session_zone_ack_actor and session_zone_ack_reason."
     )
 
 
@@ -323,20 +361,33 @@ def _zone_mapping(mappings: Any) -> bool:
 _DONE = frozenset({"completed", "completed_with_warnings", "success", "succeeded"})
 
 
-def unpinned_history(jobs: Any, dest_table: str) -> bool:
-    """A completed job into this Oracle table, written before the pin, that may carry instants.
+def _same_destination(dest: Mapping[str, Any], target: Mapping[str, Any]) -> bool:
+    """Same saved connector (when either names one), same schema and table."""
+    def norm(v: Any) -> str:
+        return str(v or "").strip().lower()
 
-    A job without :data:`JOB_STAMP` predates the pin. Its mappings decide
-    when it recorded them; a job that recorded none may have carried instants.
+    if (norm(dest.get("connector_id")) or norm(target.get("connector_id"))) and norm(
+            dest.get("connector_id")) != norm(target.get("connector_id")):
+        return False
+    if norm(target.get("schema")) and norm(dest.get("schema")) and norm(dest.get("schema")) != norm(target.get("schema")):
+        return False
+    return norm(dest.get("table")) == norm(target.get("table"))
+
+
+def unpinned_history(jobs: Any, target: Mapping[str, Any]) -> bool:
+    """A completed job into this Oracle table, not written on a confirmed UTC session.
+
+    A job without :data:`JOB_STAMP` predates the pin; one stamped
+    ``utc_pinned: false`` ran on a session that did not read back UTC. Its
+    mappings decide when it recorded them; a job that recorded none may have
+    carried instants.
     """
     for job in jobs or []:
-        if not isinstance(job, Mapping) or job.get(JOB_STAMP):
+        if not isinstance(job, Mapping) or (job.get(JOB_STAMP) or {}).get("utc_pinned") is True:
             continue
         req = job.get("transfer_request") or {}
         dest = req.get("destination") or {}
-        if not is_oracle(dest.get("format") or dest.get("type")):
-            continue
-        if str(dest.get("table") or "").lower() != str(dest_table or "").lower():
+        if not is_oracle(dest.get("format") or dest.get("type")) or not _same_destination(dest, target):
             continue
         if str(job.get("status") or "").lower() not in _DONE:
             continue
@@ -345,24 +396,54 @@ def unpinned_history(jobs: Any, dest_table: str) -> bool:
     return False
 
 
-def upgrade_advisory(dest_db: Any, dest_table: str, jobs_loader: Callable[[], Any] | None = None) -> str:
-    if not is_oracle(dest_db) or not dest_table:
+def upgrade_advisory(dest_db: Any, target: Mapping[str, Any], jobs_loader: Callable[[], Any] | None = None) -> str:
+    if not is_oracle(dest_db) or not str((target or {}).get("table") or ""):
         return ""
     try:
-        jobs = jobs_loader() if jobs_loader else _recent_jobs()
+        jobs = jobs_loader() if jobs_loader else _jobs_in_window()
     except Exception:  # noqa: BLE001 - history is advisory only
         return ""
-    return UPGRADE_ADVISORY if unpinned_history(jobs, dest_table) else ""
+    return UPGRADE_ADVISORY if unpinned_history(jobs, target) else ""
 
 
-def _recent_jobs() -> list[dict[str, Any]]:
-    from services.mongodb_service import get_mongodb_service
+def _lookback_days() -> int:
+    from services.brand_env import getenv_brand
 
-    store = get_mongodb_service()
-    listed = store.list_jobs(limit=200, destination_type="oracle") or []
-    ids = [str(j.get("job_id") or j.get("_id") or "") for j in listed]
-    full = store.get_jobs([i for i in ids if i]) if hasattr(store, "get_jobs") else {}
-    return list((full or {}).values()) or listed
+    try:
+        return max(int(getenv_brand("ORACLE_UPGRADE_LOOKBACK_DAYS", "400") or 400), 1)
+    except ValueError:
+        return 400
+
+
+def _jobs_in_window(store: Any = None) -> list[dict[str, Any]]:
+    """Every Oracle-destination job of the look-back window (default 400 days), paged.
+
+    A window rather than the newest N: a busy instance's last 200 runs can all
+    postdate the upgrade while older unpinned writes still sit in the table.
+    """
+    from datetime import timedelta
+
+    if store is None:
+        from services.mongodb_service import get_mongodb_service
+
+        store = get_mongodb_service()
+    since = (datetime.now(timezone.utc) - timedelta(days=_lookback_days())).date()
+    out: list[dict[str, Any]] = []
+    page, offset = 200, 0
+    for _ in range(100):
+        try:
+            listed = store.list_jobs(limit=page, destination_type="oracle", date_from=since, offset=offset) or []
+        except TypeError:  # a store without paging/date filters: one page
+            listed = store.list_jobs(limit=page) or []
+            out.extend(listed)
+            break
+        ids = [str(j.get("job_id") or j.get("_id") or "") for j in listed]
+        full = store.get_jobs([i for i in ids if i]) if hasattr(store, "get_jobs") else {}
+        out.extend(list((full or {}).values()) or listed)
+        if len(listed) < page:
+            break
+        offset += page
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -371,7 +452,7 @@ def _recent_jobs() -> list[dict[str, Any]]:
 
 
 @contextmanager
-def oracle_run_scope(request: Any, job_id: str = "") -> Iterator[None]:
+def oracle_run_scope(request: Any, job_id: str = "", store: Any = None) -> Iterator[None]:
     """Execute: probe Oracle sessions, gate a non-UTC default, bind the pin, stamp the job."""
     dest = getattr(request, "destination", None)
     src = getattr(request, "source", None)
@@ -383,36 +464,39 @@ def oracle_run_scope(request: Any, job_id: str = "") -> Iterator[None]:
 
     workspace = getattr(request, "workspace_id", None)
 
-    def probe(ep: Any) -> tuple[bool, str, str]:
+    def resolve(ep: Any) -> dict[str, Any] | None:
         try:
-            cfg = resolve_connector_config(ep, workspace_id=workspace)
+            return resolve_connector_config(ep, workspace_id=workspace) if ep is not None else None
         except Exception:  # noqa: BLE001 - an unresolved login leaves the pin unchecked
-            return False, _UNCHECKED[1], ""
-        return probe_oracle_session(cfg)
+            return None
 
-    probes = {id(ep): probe(ep) for ep in touches}
+    cfgs = {"source": resolve(src), "destination": resolve(dest)}
+    by_ep = {id(src): cfgs["source"], id(dest): cfgs["destination"]}
+    probes = {id(ep): probe_oracle_session(c) if (c := by_ep.get(id(ep))) else (False, _UNCHECKED[1], "")
+              for ep in touches}
     prior = next((p[2] for p in probes.values() if p[2]), "")
-    require_route_ack(request, prior)
+    require_route_ack(request, prior, cfgs)
     if dest is None or not is_oracle(getattr(dest, "format", "")) or oracle_pin_bound():
         yield
         return
     confirmed, reason, _ = probes[id(dest)]
-    _stamp_job(job_id, confirmed, reason, prior)
+    _stamp_job(store, job_id, confirmed, reason, prior)
     with bind_oracle_utc_pin(confirmed, reason), server_side_copy_scope():
         yield
 
 
-def _stamp_job(job_id: str, confirmed: bool, reason: str, prior: str) -> None:
-    if not job_id:
+def _stamp_job(store: Any, job_id: str, confirmed: bool, reason: str, prior: str) -> None:
+    """Stamp the run's session on its job: through ``update_job_fields`` or, when the
+    store has none, ``update_job_status`` at the job's current status."""
+    if not job_id or store is None:
         return
-    try:
-        from services.mongodb_service import get_mongodb_service
-
-        update = getattr(get_mongodb_service(), "update_job_fields", None)
-        if callable(update):
-            update(job_id, {JOB_STAMP: {"utc_pinned": confirmed, "reason": reason, "default_zone": prior}})
-    except Exception:  # noqa: BLE001 - a stamp must not fail the transfer
-        pass
+    stamp = {JOB_STAMP: {"utc_pinned": confirmed, "reason": reason, "default_zone": prior}}
+    update = getattr(store, "update_job_fields", None)
+    if callable(update):
+        update(job_id, stamp)
+        return
+    current = (store.get_job(job_id) or {}).get("status") if hasattr(store, "get_job") else None
+    store.update_job_status(job_id, str(current or "running"), **stamp)
 
 
 def with_oracle_session_pin(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -437,7 +521,9 @@ def with_oracle_session_pin(fn: Callable[..., Any]) -> Callable[..., Any]:
         notes = [n for n in (
             zone_change_notice(prior, zone_sensitive_route(
                 kwargs.get("sync_mode"), (source or {}).get("source_query"), kwargs.get("source_filter"))),
-            upgrade_advisory(dest_db, str(kwargs.get("destination_table") or "")),
+            upgrade_advisory(dest_db, {
+                "connector_id": kwargs.get("destination_connector_id"),
+                "schema": (cfg or {}).get("schema"), "table": kwargs.get("destination_table")}),
         ) if n]
         if notes and isinstance(result, dict) and isinstance(result.setdefault("warnings", []), list):
             result["warnings"].extend(notes)

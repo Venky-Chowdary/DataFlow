@@ -954,7 +954,7 @@ class UniversalTransferEngine:
         try:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
-            ), oracle_run_scope(request, job_id), baseline_before_success(
+            ), oracle_run_scope(request, job_id, _probe_mongo), baseline_before_success(
                 request, job_id
             ) as pending_baseline:
                 from services.destination_write_lock import hold_destination_write_lock
