@@ -3,6 +3,7 @@
  * Run: npx tsx --test apps/web/src/lib/gateChecklist.test.ts
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { buildChecklist, checklistSummary, findingGroupLine, findingsFromDetails, gateOutcome, groupFindingsByCause, scopeLine } from "./gateChecklist.ts";
 import { explainGate, explainVerdict } from "./explainCatalog.ts";
@@ -85,16 +86,60 @@ describe("findings come from structured fields only (re-review G)", () => {
     assert.deepEqual(groups.map((g) => findingGroupLine(g)), ["Table: orders missing", "Probe: information_schema", "Error: connection refused"]);
   });
   it("takes objects from the engine's fields", () => {
-    const found = findingsFromDetails({
-      issues_detail: [{ column: "email", message: "Value too long" }],
-      low_confidence: [{ source: "cust_nm", reason: "Low confidence" }],
-      unmeasured_columns: ["created_at"],
-    });
-    assert.deepEqual(found, [
+    assert.deepEqual(findingsFromDetails({ issues_detail: [{ column: "email", message: "Value too long" }], unmeasured_columns: ["created_at"] }), [
       { cause: "Value too long", object: "email" },
-      { cause: "Low confidence", object: "cust_nm" },
       { cause: "Required-column coverage not measured", object: "created_at" },
     ]);
+    assert.deepEqual(findingsFromDetails({ low_confidence: [{ source: "cust_nm", reason: "Low confidence" }] }), [
+      { cause: "Low confidence", object: "cust_nm" },
+    ]);
+  });
+});
+
+/** Gate payloads the preflight package produced (apps/api/tests/test_gate_payloads_fixture.py keeps them in step). */
+const ENGINE = (JSON.parse(readFileSync(new URL("./__fixtures__/gate_payloads.json", import.meta.url), "utf8")) as {
+  payloads: Record<string, { id: string; status: string; message: string; details: Record<string, unknown> }>;
+}).payloads;
+
+describe("findings from real engine payloads (review round 3)", () => {
+  it("counts a G3 problem once although the engine sends it as a line and as an entry", () => {
+    const gate = ENGINE.g3_probed_with_signed_column;
+    const issues = gate.details.issues as string[];
+    const found = findingsFromDetails(gate.details);
+    assert.equal(found.length, issues.length);
+    assert.deepEqual(found.map((f) => f.object), ["qty", "code"]);
+  });
+  it("leaves out warn-level and Risk-Contract-signed entries", () => {
+    const probed = findingsFromDetails(ENGINE.g3_probed_with_signed_column.details);
+    assert.ok(!probed.some((f) => f.object === "price"), "price is signed (severity warn, risk_acknowledged)");
+    const doc = findingsFromDetails(ENGINE.g3_schemaless_with_signed_column.details);
+    assert.deepEqual(doc.map((f) => f.object), ["owner_id"], "team_id is signed although its severity stays block");
+  });
+  it("words an entry without a message from its fields, never as a bare 'needs a look'", () => {
+    const [qty] = findingsFromDetails(ENGINE.g3_probed_with_signed_column.details);
+    assert.deepEqual(qty, { cause: "1 of 3 sample values do not convert from VARCHAR to INTEGER", object: "qty" });
+    for (const payload of Object.values(ENGINE)) {
+      for (const f of findingsFromDetails(payload.details)) assert.doesNotMatch(f.cause, /needs a look/i);
+    }
+  });
+  it("keeps every blocking line when the entries do not cover them all", () => {
+    const gate = ENGINE.g3_declared_without_samples;
+    const found = findingsFromDetails(gate.details);
+    assert.deepEqual(found.map((f) => f.cause), gate.details.issues);
+  });
+  it("shows the G2 privilege and COPY staging probes", () => {
+    assert.deepEqual(findingsFromDetails(ENGINE.g2_privilege_probe_unavailable.details).map((f) => f.cause), [
+      "Probe: has_table_privilege", "Privilege status: unavailable", "Engine: postgresql", "ACL describe unavailable",
+    ]);
+    assert.deepEqual(findingsFromDetails(ENGINE.g2_redshift_staging_denied.details).map((f) => f.cause), [
+      "COPY staging: denied", "Staging bucket `dw-stage` ACL does not grant write for COPY FROM S3",
+    ]);
+  });
+  it("lists the same findings in the checklist the person sees", () => {
+    const list = buildChecklist([ENGINE.g3_probed_with_signed_column]);
+    const [row] = list.groups.find((g) => g.id === "blocking")!.rows;
+    assert.equal(row.findings.reduce((n, f) => n + f.count, 0), 2);
+    assert.deepEqual(row.findings.flatMap((f) => f.objects), ["qty", "code"]);
   });
   it("names every object, cutting a long list behind 'and N more'", () => {
     const [group] = groupFindingsByCause(["a", "b", "c", "d", "e", "f"].map((c) => ({ cause: "Value too long", object: c })));

@@ -75,43 +75,110 @@ function text(v: unknown): string {
   return typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : "";
 }
 
-/** A finding from one structured entry ({column, message} and the engine's aliases). */
+/** True when the engine marked an entry as not blocking: warn-level, or signed off by a Risk Contract. */
+function notBlocking(e: Record<string, unknown>): boolean {
+  const severity = text(e.severity).toLowerCase();
+  if (severity && severity !== "block" && severity !== "error") return true;
+  return e.risk_acknowledged === true || e.acknowledged === true || e.contracted_holdout === true;
+}
+
+/**
+ * The cause of a structured entry that carries no message, from its own
+ * fields (G3 entries name types and counts, not a sentence). Empty when the
+ * entry says nothing a person could act on: it is then left out, never shown
+ * as a bare "needs a look".
+ */
+function causeFromFields(e: Record<string, unknown>): string {
+  const from = text(e.source_type);
+  const to = text(e.target_type);
+  const failed = Number(e.failed) || 0;
+  const sampled = Number(e.sampled) || 0;
+  if (e.not_null_contract === true) {
+    const n = Number(e.null_samples) || 0;
+    return n ? `${plural(n, "empty sample value")} for a column that refuses empty values` : "Empty values for a column that refuses empty values";
+  }
+  if (e.nested_document_collapse === true) return "Nested documents into a flat column";
+  if (!from || !to) return "";
+  if (e.probe_unproven === true) return `${from} to ${to} not checked on sample values`;
+  if (failed > 0 && sampled > 0) return `${failed} of ${sampled} sample values do not convert from ${from} to ${to}`;
+  return `${from} to ${to} can lose data`;
+}
+
+/** A finding from one structured entry ({column, message} and the engine's aliases); null when it is not a blocker. */
 function fromEntry(entry: unknown): Finding | null {
   if (typeof entry === "string") return entry.trim() ? { cause: entry.trim() } : null;
   if (!entry || typeof entry !== "object") return null;
   const e = entry as Record<string, unknown>;
+  if (notBlocking(e)) return null;
   const object = text(e.column) || text(e.source) || text(e.field) || text(e.table) || undefined;
-  const cause = text(e.message) || text(e.error) || text(e.reason) || text(e.issue) || text(e.detail);
-  if (!cause) return object ? { cause: "Needs a look", object } : null;
+  const cause = text(e.message) || text(e.error) || text(e.reason) || text(e.issue) || text(e.detail) || causeFromFields(e);
+  if (!cause) return null;
   return object ? { cause, object } : { cause };
+}
+
+function findingsOfList(list: unknown): Finding[] {
+  if (!Array.isArray(list)) return [];
+  const out: Finding[] = [];
+  for (const item of list.slice(0, 200)) {
+    const f = fromEntry(item);
+    if (f) out.push(f);
+  }
+  return out;
+}
+
+/** The engine's line lists, in the order they are preferred when a gate sends more than one (`issue_texts` is the plain-words copy). */
+const LINE_LISTS = ["issue_texts", "errors", "issues"] as const;
+/** Lists that are not a restatement of the line lists (G4 / G6 / G9 extras), read only when no line list is sent. */
+const EXTRA_LISTS = ["low_confidence", "ambiguous_mappings", "unmapped", "sample_duplicates", "encoding_issues"] as const;
+
+/** G2's privilege and COPY-staging probes, as the engine reported them. */
+function probeFindings(details: Record<string, unknown>): Finding[] {
+  const out: Finding[] = [];
+  const probe = details.privilege_probe;
+  if (probe && typeof probe === "object") {
+    const p = probe as Record<string, unknown>;
+    if (text(p.method)) out.push({ cause: `Probe: ${text(p.method)}` });
+    if (text(p.status)) out.push({ cause: `Privilege status: ${text(p.status)}` });
+    if (text(p.engine)) out.push({ cause: `Engine: ${text(p.engine)}` });
+    if (text(p.detail) && text(p.status) !== "ok") out.push({ cause: text(p.detail) });
+  }
+  const staging = details.redshift_staging_probe;
+  if (staging && typeof staging === "object") {
+    const s = staging as Record<string, unknown>;
+    if (text(s.status)) out.push({ cause: `COPY staging: ${text(s.status)}` });
+    if (text(s.detail) && text(s.status) !== "ok") out.push({ cause: text(s.detail) });
+  }
+  return out;
 }
 
 /**
  * A gate's findings from its structured fields only (re-review G): objects
  * come from fields such as `column` / `source`, never parsed out of message
  * text; a plain string finding is shown exactly as the engine wrote it.
+ *
+ * One list per gate (review round 3): G3 sends the same problems twice, as
+ * `issues` lines and as `issues_detail` entries, and the entries also carry
+ * warn-level and Risk-Contract-signed columns. The entries are used when
+ * their blocking ones match the lines one for one (they name the column);
+ * otherwise the gate's own lines are, so no blocker is dropped and none is
+ * counted twice. Warn-level and acknowledged entries are never findings.
  */
 export function findingsFromDetails(details: Record<string, unknown> | null | undefined): Finding[] {
   if (!details) return [];
-  const out: Finding[] = [];
-  const take = (list: unknown) => {
-    if (!Array.isArray(list)) return;
-    for (const item of list.slice(0, 200)) {
-      const f = fromEntry(item);
-      if (f) out.push(f);
-    }
-  };
-  for (const key of ["issues_detail", "errors", "issues", "issue_texts", "low_confidence", "ambiguous_mappings", "unmapped",
-    "sample_duplicates", "encoding_issues"]) {
-    take(details[key]);
-  }
+  const lineKey = LINE_LISTS.find((k) => Array.isArray(details[k]) && (details[k] as unknown[]).length > 0);
+  const lines = lineKey ? findingsOfList(details[lineKey]) : [];
+  const entries = findingsOfList(details.issues_detail);
+  let out: Finding[];
+  if (entries.length > 0 && (!lineKey || entries.length === lines.length)) out = entries;
+  else if (lineKey) out = lines;
+  else out = EXTRA_LISTS.flatMap((k) => findingsOfList(details[k]));
   if (Array.isArray(details.unmeasured_columns)) {
     for (const col of details.unmeasured_columns) {
       const c = text(col);
       if (c) out.push({ cause: "Required-column coverage not measured", object: c });
     }
   }
-  return out;
+  return [...out, ...probeFindings(details)];
 }
 
 /** Group findings that share the same cause text; order follows first occurrence. */
