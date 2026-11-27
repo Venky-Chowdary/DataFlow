@@ -203,7 +203,7 @@ class MySQLSide(SqlSide):
         else:
             cur.execute("SET SESSION max_execution_time = %s", (max(1, int(seconds * 1000)),))
 
-    def pin(self) -> dict[str, Any]:
+    def pin(self, max_hold_s: float | None = None) -> dict[str, Any]:
         """``START TRANSACTION WITH CONSISTENT SNAPSHOT``: one InnoDB snapshot for the rest of the scan.
 
         Only InnoDB keeps a consistent read view; any other storage engine is

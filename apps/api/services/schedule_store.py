@@ -248,6 +248,11 @@ class PipelineSchedule:
     #: Parity at Scale (owner decision 2): the next tick waits while the previous
     #: tick's verification is still running. Set False to let ticks overlap it.
     wait_for_verification: bool = True
+    #: Parity at Scale: hold one snapshot per side while verifying (None = the workspace setting).
+    verification_snapshot: bool | None = None
+    verification_snapshot_max_minutes: int | None = None
+    #: How long the next run waits for a verification that is only queued (minutes).
+    verification_queue_wait_minutes: int = 30
     workspace_id: str = ""
     # Data contract — when set, scheduled runs enforce the signed contract.
     contract_id: str = ""
@@ -444,6 +449,11 @@ class PipelineSchedule:
             else {},
             cursor_value=str(data.get("cursor_value") or ""),
             wait_for_verification=data.get("wait_for_verification") is not False,
+            verification_snapshot=(None if data.get("verification_snapshot") is None
+                                   else bool(data.get("verification_snapshot"))),
+            verification_snapshot_max_minutes=(int(data["verification_snapshot_max_minutes"])
+                                               if data.get("verification_snapshot_max_minutes") else None),
+            verification_queue_wait_minutes=int(data.get("verification_queue_wait_minutes") or 30),
             workspace_id=(data.get("workspace_id") or "").strip(),
             contract_id=(data.get("contract_id") or "").strip(),
             require_signed_contract=bool(

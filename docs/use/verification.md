@@ -128,6 +128,24 @@ comparing every row inside both databases (see
   type reads the same way. Only a proven result becomes a full population
   proof in the signed proof pack, and only where Gate-8 itself passed with
   no fidelity veto.
+- **What a held snapshot costs.** The setting "Consistent snapshot during
+  verification" (Settings, on by default; a schedule can override it) keeps
+  one read-only transaction open on each database for the whole comparison,
+  for at most "Longest snapshot hold" (default 30 minutes). While it is open:
+  - PostgreSQL cannot vacuum rows deleted or updated after the snapshot (the
+    xmin horizon is held back), so tables with heavy writes grow until it
+    ends;
+  - MySQL / MariaDB InnoDB keeps undo history for the snapshot, so the undo
+    log grows on a busy server;
+  - on a PostgreSQL hot standby, replication can cancel a long snapshot
+    (a recovery conflict), so a standby is never pinned.
+  Past the longest hold the comparison lets the snapshot go and continues
+  statement by statement; a server whose `idle_in_transaction_session_timeout`
+  (or `transaction_timeout`) is shorter than the hold is not pinned at all.
+  Either way the result reads **no difference found**, with the reason. The
+  Trust Report shows, per table, whether each side was read from one snapshot
+  and for how long. The two snapshots (source and destination) are taken a
+  few milliseconds apart; the report states the gap.
 - What Gate-8 explained stays explained: quarantined rows, rows skipped by
   the duplicate policy and rows that were in the destination before an
   append are not turned into differences.

@@ -9,7 +9,7 @@
 
 import { API_BASE } from "./types";
 import { apiErrorFrom, apiFetch } from "./api";
-import type { ParityReport, ParityTone, ParityVerification, ParityVerificationTable } from "./parity";
+import type { ParityConsistency, ParityReport, ParityTone, ParityVerification, ParityVerificationTable } from "./parity";
 
 export interface ExplorerCause {
   code: string;
@@ -251,4 +251,25 @@ export function repairSummary(repair: RepairSql): string {
     s.update ? plural(s.update, "update") : "",
   ].filter(Boolean);
   return parts.length ? parts.join(", ") : "No statements";
+}
+
+/** "12 s", "3 min": how long a snapshot was held. */
+export function heldFor(seconds: number | null | undefined): string {
+  const s = Math.max(0, Number(seconds ?? 0));
+  if (s < 1) return "under 1 s";
+  if (s < 90) return `${Math.round(s)} s`;
+  return `${Math.round(s / 60)} min`;
+}
+
+/** One sentence: was each side read from one snapshot, for how long, and if not, why. */
+export function consistencyLine(c: ParityConsistency | null | undefined): string {
+  if (!c) return "";
+  if (c.kind === "pinned") {
+    const apart = c.snapshots_ms_apart != null ? `; taken ${c.snapshots_ms_apart.toLocaleString("en-US")} ms apart` : "";
+    return `Each side read from one snapshot (source held ${heldFor(c.source.held_s)}, destination held ${heldFor(
+      c.destination.held_s,
+    )}${apart}).`;
+  }
+  const reason = c.reasons[0] || c.source.reason || c.destination.reason || "read statement by statement";
+  return `Not read from one snapshot: ${reason}.`;
 }

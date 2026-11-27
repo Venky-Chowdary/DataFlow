@@ -31,6 +31,7 @@ import {
 } from "../../lib/parity.js";
 import {
   cellAccessibleName,
+  consistencyLine,
   cellText,
   differingPct,
   explorableTables,
@@ -105,6 +106,28 @@ describe("Parity at Scale words", () => {
     assert.equal(cellText("", false), "(blank)");
     assert.equal(cellText("123-45", true), "Protected");
     assert.equal(repairSummary({ table: "t", available: true, sql: "", statements: { insert: 1, delete: 0, update: 2 } }), "1 insert, 2 updates");
+  });
+
+  it("says whether each side was read from one snapshot, for how long, or why not (review 2, N2)", () => {
+    const side = (held: number) => ({ pinned: true, held_s: held, reason: "" });
+    assert.equal(
+      consistencyLine({ kind: "pinned", snapshots_ms_apart: 18, reasons: [], source: side(4.2), destination: side(3) }),
+      "Each side read from one snapshot (source held 4 s, destination held 3 s; taken 18 ms apart).",
+    );
+    assert.equal(
+      consistencyLine({
+        kind: "not_established",
+        reasons: ["the server is a hot standby"],
+        source: { pinned: false, reason: "" },
+        destination: { pinned: false, reason: "" },
+      }),
+      "Not read from one snapshot: the server is a hot standby.",
+    );
+    const report = verifiedWithDifferencesReport();
+    report.verification!.tables[0].consistency = {
+      kind: "pinned", snapshots_ms_apart: 18, reasons: [], source: side(4), destination: side(3),
+    };
+    assert.match(text(view(report)), /Each side read from one snapshot \(source held 4 s/);
   });
 
   it("only finished tables can be explored", () => {

@@ -261,7 +261,7 @@ class PostgresSide(SqlSide):
     def held_predicate(self) -> str:
         return fit_held_predicate(self, decimal_fit_classes)
 
-    def pin(self) -> dict[str, Any]:
+    def pin(self, max_hold_s: float | None = None) -> dict[str, Any]:
         """One REPEATABLE READ, READ ONLY transaction for the rest of the scan (one snapshot).
 
         Each statement then runs under a savepoint, so a statement that times
@@ -270,6 +270,9 @@ class PostgresSide(SqlSide):
         # pg_current_snapshot() is PostgreSQL 13+; txid_current_snapshot() serves 10 to 12.
         function = "pg_current_snapshot" if int(getattr(self, "server_version_num", 0) or 0) >= 130000 \
             else "txid_current_snapshot"
+        refusal = self._pin_refusal(max_hold_s)
+        if refusal:
+            return {"kind": "not_established", "reason": refusal}
         try:
             self.conn.rollback()
             self.conn.set_session(isolation_level="REPEATABLE READ", readonly=True)
@@ -282,6 +285,29 @@ class PostgresSide(SqlSide):
         self.pinned = True
         return {"kind": "pinned", "method": "repeatable_read_transaction", "function": function,
                 "snapshot": str(snapshot), "at": str(at)}
+
+    def _pin_refusal(self, max_hold_s: float | None) -> str:
+        """Why a held snapshot would be unsafe or cut short on this server, or ``""``."""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT pg_is_in_recovery()")
+                standby = bool(cur.fetchone()[0])
+                cur.execute("SELECT name, setting FROM pg_settings WHERE name IN "
+                            "('idle_in_transaction_session_timeout', 'transaction_timeout')")
+                limits = {str(n): int(v or 0) for n, v in cur.fetchall()}
+            self.conn.rollback()
+        except Exception as exc:  # noqa: BLE001 — cannot tell: do not hold a snapshot
+            self.unpin()
+            return f"the server's settings could not be read ({type(exc).__name__})"
+        if standby:
+            return ("the server is a hot standby: a snapshot held there can be cancelled by replication "
+                    "(a recovery conflict)")
+        hold_ms = int((max_hold_s or 0) * 1000)
+        for name, limit_ms in sorted(limits.items()):
+            if limit_ms > 0 and (not hold_ms or limit_ms < hold_ms):
+                return (f"the server's {name} ({limit_ms // 1000} s) is shorter than the longest hold; "
+                        "the snapshot would be cut off")
+        return ""
 
     def unpin(self) -> None:
         """Back to one transaction per statement (default isolation), whatever state the connection is in."""

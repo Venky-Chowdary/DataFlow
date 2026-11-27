@@ -107,6 +107,22 @@ export interface ParityVerificationTable {
   outcome?: string | null;
   mode?: string | null;
   check_kind?: string | null;
+  /** Whether each side was read from one snapshot, and how long it was held. */
+  consistency?: ParityConsistency | null;
+}
+
+export interface ParitySnapshotSide {
+  pinned: boolean;
+  held_s?: number | null;
+  reason?: string;
+}
+
+export interface ParityConsistency {
+  kind: "pinned" | "not_established" | string;
+  snapshots_ms_apart?: number | null;
+  reasons: string[];
+  source: ParitySnapshotSide;
+  destination: ParitySnapshotSide;
 }
 
 /** The verification phase: its own state after the write, never the write's status. */

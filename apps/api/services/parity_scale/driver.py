@@ -81,6 +81,11 @@ class ScanConfig:
     #: Read each side from one snapshot for the whole scan (verification after
     #: the write sets it): only then can "every row matched" be a proof.
     pin_snapshot: bool = False
+    #: The longest a pinned side's snapshot is held; past it the side lets go and
+    #: reads statement by statement (the result is then not pinned, and says why).
+    pin_max_hold_s: float | None = None
+    #: Why the scan is not pinned at all (a setting), for the evidence.
+    pin_off_reason: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ScanConfig":
@@ -159,6 +164,7 @@ class ParityScan:
         self.config = ScanConfig.from_dict(state["config"])
         self._open_side = open_side
         self._sides: dict[str, Side] = {}
+        self._pinned_at: dict[str, float] = {}
         self._pool: Any = None
         #: Test hook: called before each statement with ``(op, item)``; it may
         #: raise :class:`UnitTimeout` to simulate a slow statement.
@@ -245,13 +251,43 @@ class ParityScan:
                 f"the {role} was read again after the scan resumed, from a later snapshot"
             )
         try:
-            consistency[role] = side.pin()
+            consistency[role] = side.pin(max_hold_s=self.config.pin_max_hold_s)
         except Exception as exc:  # noqa: BLE001 — an engine that cannot pin is recorded, not fatal
             # Roll back whatever the attempt left (an aborted transaction): never an errored scan.
             side.unpin()
             consistency[role] = {"kind": "not_established", "reason": f"pinning failed ({type(exc).__name__})"}
+        if consistency[role].get("kind") == "pinned":
+            self._pinned_at[role] = time.monotonic()
+
+    def _held_for(self, role: str) -> float:
+        return round(time.monotonic() - self._pinned_at[role], 3) if role in self._pinned_at else 0.0
+
+    def _release_overdue_pins(self) -> None:
+        """A snapshot held past its maximum is let go: the side reads statement by statement after."""
+        cap = self.config.pin_max_hold_s
+        if cap is None:
+            return
+        consistency = self.state.setdefault("consistency", {})
+        for role, side in list(self._sides.items()):
+            if role in self._pinned_at and self._held_for(role) >= cap:
+                held = self._held_for(role)
+                side.unpin()
+                del self._pinned_at[role]
+                consistency[role] = {
+                    **(consistency.get(role) or {}), "kind": "not_established", "held_s": held,
+                    "reason": (f"the snapshot was held for its maximum ({int(cap // 60)} minutes) and let go; "
+                               "the rest of the scan read the table statement by statement"),
+                }
+
+    def _record_holds(self) -> None:
+        consistency = self.state.setdefault("consistency", {})
+        for role in list(self._pinned_at):
+            if isinstance(consistency.get(role), dict):
+                consistency[role]["held_s"] = self._held_for(role)
 
     def close(self) -> None:
+        self._record_holds()
+        self._pinned_at.clear()
         if self._pool is not None:
             self._pool.shutdown(wait=True)
             self._pool = None
@@ -305,6 +341,7 @@ class ParityScan:
                     self._abandon_queue("scan wall-clock budget exhausted")
                     continue
                 t0 = time.monotonic()
+                self._release_overdue_pins()
                 item = self.state["queue"].pop(0) if self.state["queue"] else None
                 if item is None:
                     self._finish()
@@ -376,6 +413,9 @@ class ParityScan:
         self._finish()
 
     def _finish(self) -> None:
+        self._record_holds()
+        if not self.config.pin_snapshot and self.config.pin_off_reason:
+            self.state.setdefault("consistency", {})["off"] = self.config.pin_off_reason
         self.state["status"] = "done"
         self.state["phase"] = "done"
         self.state["finished_at"] = utc_now()

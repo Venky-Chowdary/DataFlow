@@ -84,7 +84,7 @@ class Side(ABC):
         #: Set by :meth:`pin`: every later statement reads one snapshot of the table.
         self.pinned = False
 
-    def pin(self) -> dict[str, Any]:
+    def pin(self, max_hold_s: float | None = None) -> dict[str, Any]:
         """Read every later statement from one snapshot; what was established, in words.
 
         ``{"kind": "pinned", ...}`` only when the engine guarantees it; any

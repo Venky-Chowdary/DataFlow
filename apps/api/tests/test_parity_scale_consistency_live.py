@@ -253,3 +253,98 @@ def test_a_pin_that_fails_falls_back_and_never_errors_the_scan(tables, monkeypat
     consistency = _svc().get_job(job_id)["reconciliation"]["parity_at_scale"]["consistency"]
     assert consistency["kind"] == "not_established"
     assert _report(job_id)["verdict"] == "no_difference_found"
+
+
+@pg
+def test_a_hold_past_its_maximum_lets_go_and_says_why(tables, monkeypatch) -> None:
+    """Review 2, N2: the hold is capped; past it the scan goes on unpinned and the verdict says why."""
+    from services.parity_scale import verification
+
+    monkeypatch.setattr(verification, "snapshot_policy",
+                        lambda job: {"enabled": True, "max_hold_s": 0.0, "source": "workspace"})
+    job_id = _job(*tables)
+    assert verification.start_for_job(job_id, background=False)["state"] == "passed"
+    report = _report(job_id)
+    assert report["verdict"] == "no_difference_found"
+    assert "held for its maximum" in report["verdict_reason"]
+    seen = report["verification"]["tables"][0]["consistency"]
+    assert seen["kind"] == "not_established" and seen["source"]["held_s"] is not None
+
+
+@pg
+def test_the_snapshot_setting_turns_pinning_off_and_a_schedule_overrides_it(tables, monkeypatch) -> None:
+    """Review 2, N2: "Consistent snapshot during verification" is a workspace and schedule option."""
+    import services.workspace_store as workspace_store
+
+    from services.parity_scale import verification
+
+    monkeypatch.setattr(workspace_store, "get_workspace_settings",
+                        lambda: {"verification_snapshot": False, "verification_snapshot_max_minutes": 30})
+    job_id = _job(*tables)
+    assert verification.snapshot_policy(_svc().get_job(job_id)) == {
+        "enabled": False, "max_hold_s": 1800.0, "source": "workspace"}
+    assert verification.start_for_job(job_id, background=False)["state"] == "passed"
+    report = _report(job_id)
+    assert report["verdict"] == "no_difference_found"
+    assert "turned off (workspace setting)" in report["verdict_reason"]
+
+    class Sched:
+        verification_snapshot = True
+        verification_snapshot_max_minutes = 5
+
+    monkeypatch.setattr(verification, "_schedule_of", lambda job: Sched())
+    assert verification.snapshot_policy({}) == {"enabled": True, "max_hold_s": 300.0, "source": "schedule"}
+
+
+@pg
+def test_a_session_timeout_shorter_than_the_hold_is_not_pinned(tables) -> None:
+    """Review 2, N2: idle_in_transaction_session_timeout below the hold would kill it: fall back, say why."""
+    from services.parity_scale import verification
+
+    job_id = _job(*tables)
+    spec, _why = verification.table_spec(_svc().get_job(job_id))
+    side = verification.side_opener(spec)("source", verification.plan_for(spec))
+    try:
+        side.conn.autocommit = True
+        with side.conn.cursor() as cur:
+            cur.execute("SET idle_in_transaction_session_timeout = '10s'")
+        side.conn.autocommit = False
+        info = side.pin(max_hold_s=1800)
+        assert info["kind"] == "not_established"
+        assert "idle_in_transaction_session_timeout" in info["reason"]
+        assert side.execute("SELECT 1", [])[0][0] == 1  # still usable, statement by statement
+    finally:
+        side.close()
+
+
+def test_a_hot_standby_is_never_pinned() -> None:
+    """Review 2, N2: pg_is_in_recovery() true → not pinned (recovery conflicts cancel held snapshots)."""
+    from services.parity_scale.dialects.postgresql import PostgresSide
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            return None
+
+        def execute(self, sql: str, *args: Any) -> None:
+            return None
+
+        def fetchone(self):
+            return (True,)
+
+        def fetchall(self):
+            return []
+
+    class Conn:
+        def cursor(self):
+            return Cursor()
+
+        def rollback(self) -> None:
+            return None
+
+    side = object.__new__(PostgresSide)
+    side.conn = Conn()
+    side.pinned = False
+    assert "hot standby" in side._pin_refusal(1800)

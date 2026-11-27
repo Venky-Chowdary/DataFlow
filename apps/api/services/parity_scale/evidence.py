@@ -58,6 +58,9 @@ def consistency_of(state: dict[str, Any]) -> dict[str, Any]:
     """
     recorded = state.get("consistency") or {}
     sides = {role: recorded.get(role) or {} for role in ("source", "destination")}
+    if recorded.get("off"):
+        return {"kind": "not_established", "reasons": [str(recorded["off"])], "note": NOT_ESTABLISHED_NOTE,
+                "source": {}, "destination": {}}
     reasons = [str(recorded["broken"])] if recorded.get("broken") else []
     for role, info in sides.items():
         if info.get("kind") != "pinned":
@@ -68,7 +71,8 @@ def consistency_of(state: dict[str, Any]) -> dict[str, Any]:
         if apart is not None:
             out["snapshots_ms_apart"] = apart
         return out
-    return {"kind": "not_established", "reasons": reasons, "note": NOT_ESTABLISHED_NOTE}
+    return {"kind": "not_established", "reasons": reasons, "note": NOT_ESTABLISHED_NOTE,
+            "source": sides["source"], "destination": sides["destination"]}
 
 
 def build_evidence(state: dict[str, Any]) -> dict[str, Any]:

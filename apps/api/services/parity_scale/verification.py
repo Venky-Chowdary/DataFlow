@@ -191,6 +191,7 @@ def table_spec(job: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
         "error_policy": str(request_of(job).get("error_policy") or "quarantine"),
         # Values of these never reach the job document (examples, causes, keys of a protected key).
         "protected": sorted(str(c).lower() for c in protected_targets(job)),
+        "snapshot": snapshot_policy(job),
         "key_protected": any(str(k).lower() in {str(c).lower() for c in protected_targets(job)}
                              for k in key_targets),
     }, ""
@@ -200,6 +201,45 @@ def needs_scale_verification(job: dict[str, Any]) -> bool:
     """Gate-8 could not compare every row (above the ladder limit)."""
     recon = job.get("reconciliation") if isinstance(job.get("reconciliation"), dict) else {}
     return bool(recon.get("coverage_limit")) or recon.get("verification_verdict_qualifier") == "coverage_limited"
+
+
+def _schedule_of(job: dict[str, Any]) -> Any:
+    from services.parity_evidence import request_of
+
+    req = request_of(job)
+    sid = str(job.get("schedule_id") or ((req.get("source") or {}).get("extra") or {}).get("schedule_id") or "")
+    if not sid:
+        return None
+    try:
+        from services.schedule_store import get_schedule
+
+        return get_schedule(sid)
+    except Exception:  # noqa: BLE001 — no schedule store: the workspace setting decides
+        return None
+
+
+def snapshot_policy(job: dict[str, Any]) -> dict[str, Any]:
+    """Whether to hold one snapshot per side while verifying, and for how long at most.
+
+    The schedule's own option wins; otherwise the workspace setting
+    "Consistent snapshot during verification" (default on, 30 minutes).
+    """
+    enabled, minutes, source = True, 30, "default"
+    try:
+        from services.workspace_store import get_workspace_settings
+
+        settings = get_workspace_settings()
+        enabled = settings.get("verification_snapshot") is not False
+        minutes = int(settings.get("verification_snapshot_max_minutes") or 30)
+        source = "workspace"
+    except Exception:  # noqa: BLE001 — settings unavailable: the defaults
+        logger.warning("Workspace settings unavailable; verification uses the default snapshot policy")
+    sched = _schedule_of(job)
+    if sched is not None and getattr(sched, "verification_snapshot", None) is not None:
+        enabled, source = bool(sched.verification_snapshot), "schedule"
+    if sched is not None and getattr(sched, "verification_snapshot_max_minutes", None):
+        minutes = int(sched.verification_snapshot_max_minutes)
+    return {"enabled": enabled, "max_hold_s": float(minutes) * 60.0, "source": source}
 
 
 # ── connections and catalog types ────────────────────────────────────────────
@@ -499,7 +539,11 @@ def _run(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, resume: b
     plan = plan_for(spec)
     opener = side_opener(spec)
     cfg = config or ScanConfig(keys_stored_cap=2000, max_wall_seconds=WALL_SECONDS)
-    cfg = replace(cfg, protected=tuple(spec.get("protected") or ()), pin_snapshot=True)
+    policy = spec.get("snapshot") or {"enabled": True, "max_hold_s": 1800.0, "source": "default"}
+    cfg = replace(cfg, protected=tuple(spec.get("protected") or ()), pin_snapshot=bool(policy["enabled"]),
+                  pin_max_hold_s=float(policy["max_hold_s"]),
+                  pin_off_reason="" if policy["enabled"] else (
+                      f"consistent snapshot during verification is turned off ({policy['source']} setting)"))
     if spec.get("key_protected"):
         # The key itself is protected: no key value is stored; rows are counted, not named.
         # Hash buckets (mode H) keep no key value in the queue either, unlike key-range bounds.

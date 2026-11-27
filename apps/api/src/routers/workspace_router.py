@@ -51,6 +51,9 @@ class WorkspaceSettingsBody(BaseModel):
     cdc_orphan_auto_drop: bool | None = None
     studio_schema_browser: bool | None = None
     studio_canvas: bool | None = None
+    # Parity at Scale: hold one snapshot per side while verifying, for at most N minutes.
+    verification_snapshot: bool | None = None
+    verification_snapshot_max_minutes: int | None = Field(default=None, ge=1, le=1440)
 
 
 class _TenantFieldChecks(BaseModel):
@@ -365,7 +368,7 @@ def _retention_enforcement() -> dict[str, Any]:
 #: its own event, cdc.capture.auto_drop.changed).
 _AUDITED_SETTINGS = (
     "org_name", "timezone", "retention_days", "retention_auto_purge",
-    "studio_schema_browser", "studio_canvas",
+    "studio_schema_browser", "studio_canvas", "verification_snapshot", "verification_snapshot_max_minutes",
 )
 
 
@@ -393,6 +396,8 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             studio_canvas=body.studio_canvas,
             actor=actor,
             retention_auto_purge=body.retention_auto_purge,
+            verification_snapshot=body.verification_snapshot,
+            verification_snapshot_max_minutes=body.verification_snapshot_max_minutes,
         )
     except InvalidTimezone as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

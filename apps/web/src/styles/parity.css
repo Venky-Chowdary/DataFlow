@@ -1293,3 +1293,7 @@
   gap: var(--df-space-1);
   justify-items: start;
 }
+
+.df2-pscale-consistency {
+  flex-basis: 100%;
+}

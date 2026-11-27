@@ -3894,6 +3894,8 @@ export async function fetchWorkspaceSettings(): Promise<PlatformEditability & {
   retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
+  verification_snapshot?: boolean;
+  verification_snapshot_max_minutes?: number;
   updated_at?: string | null;
   updated_by?: string | null;
 }> {
@@ -3914,6 +3916,8 @@ export async function updateWorkspaceSettings(body: {
   retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
+  verification_snapshot?: boolean;
+  verification_snapshot_max_minutes?: number;
 }): Promise<{
   org_name: string;
   timezone: string;
@@ -3921,6 +3925,8 @@ export async function updateWorkspaceSettings(body: {
   retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
+  verification_snapshot?: boolean;
+  verification_snapshot_max_minutes?: number;
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/settings`, {
     method: "PATCH",

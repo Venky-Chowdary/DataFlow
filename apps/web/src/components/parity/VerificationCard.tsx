@@ -10,6 +10,7 @@ import { useId } from "react";
 import { Button } from "../ui/Button";
 import { badgeClass, formatDateTime, type ParityVerification } from "../../lib/parity";
 import {
+  consistencyLine,
   plural,
   verificationHeadline,
   verificationProgress,
@@ -95,6 +96,9 @@ export function VerificationCard({
                 <span className="df2-parity-muted">Starting…</span>
               ) : (
                 table.error && <span className="df2-parity-muted">{table.error}</span>
+              )}
+              {table.consistency && (
+                <span className="df2-parity-muted df2-pscale-consistency">{consistencyLine(table.consistency)}</span>
               )}
               {onReverify && REVERIFY_HERE.has(table.status) && (
                 <Button

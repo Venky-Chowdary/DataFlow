@@ -1064,11 +1064,27 @@ def _verification_block(job: dict[str, Any]) -> dict[str, Any] | None:
                 "outcome": (t.get("evidence") or {}).get("outcome"),
                 "mode": (t.get("evidence") or {}).get("mode"),
                 "check_kind": (t.get("evidence") or {}).get("check_kind"),
+                "consistency": _consistency_view((t.get("evidence") or {}).get("consistency")),
             }
             for t in block.get("tables") or []
             if isinstance(t, dict)
         ],
     }
+
+
+def _consistency_view(consistency: Any) -> dict[str, Any] | None:
+    """Whether each side was read from one snapshot, and for how long it was held (no positions)."""
+    if not isinstance(consistency, dict):
+        return None
+
+    def side(info: Any) -> dict[str, Any]:
+        info = info if isinstance(info, dict) else {}
+        return {"pinned": info.get("kind") == "pinned", "held_s": info.get("held_s"),
+                "reason": info.get("reason") or ""}
+
+    return {"kind": consistency.get("kind"), "snapshots_ms_apart": consistency.get("snapshots_ms_apart"),
+            "reasons": list(consistency.get("reasons") or []),
+            "source": side(consistency.get("source")), "destination": side(consistency.get("destination"))}
 
 
 def summary_stamp(job: dict[str, Any]) -> dict[str, str]:

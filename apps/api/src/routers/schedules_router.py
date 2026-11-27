@@ -192,6 +192,11 @@ class ScheduleCreate(PolicyFieldsModel):
     notify_on_success: bool = False
     #: Parity at Scale: the next run waits while the previous run is verified after the write.
     wait_for_verification: bool = True
+    #: Hold one snapshot per side while verifying (None: the workspace setting), for at most N minutes.
+    verification_snapshot: Optional[bool] = None
+    verification_snapshot_max_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    #: How long the next run waits for a verification that is only queued.
+    verification_queue_wait_minutes: int = Field(default=30, ge=0, le=1440)
     enabled: bool = True
     file_wait_seconds: int = Field(default=0, ge=0, le=86400)
     duplicate_policy: str = ""
@@ -278,6 +283,9 @@ class ScheduleUpdate(PolicyFieldsModel):
     notify_on_failure: Optional[bool] = None
     notify_on_success: Optional[bool] = None
     wait_for_verification: Optional[bool] = None
+    verification_snapshot: Optional[bool] = None
+    verification_snapshot_max_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    verification_queue_wait_minutes: Optional[int] = Field(default=None, ge=0, le=1440)
     enabled: Optional[bool] = None
     file_wait_seconds: Optional[int] = Field(default=None, ge=0, le=86400)
     duplicate_policy: Optional[str] = None
@@ -346,6 +354,9 @@ class ScheduleResponse(BaseModel):
     notify_on_failure: bool = True
     notify_on_success: bool = False
     wait_for_verification: bool = True
+    verification_snapshot: Optional[bool] = None
+    verification_snapshot_max_minutes: Optional[int] = None
+    verification_queue_wait_minutes: int = 30
     enabled: bool
     file_wait_seconds: int = 0
     duplicate_policy: str = ""
