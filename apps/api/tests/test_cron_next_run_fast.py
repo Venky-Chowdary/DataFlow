@@ -19,7 +19,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from services.cron_schedule import CronError, CronExpression, CronNeverFiresError, next_run, resolve_timezone
+from services.cron_schedule import (
+    CronError,
+    CronExpression,
+    CronNeverFiresError,
+    count_matches,
+    next_run,
+    resolve_timezone,
+)
 
 NOW = datetime(2026, 11, 21, 10, 0, tzinfo=timezone.utc)
 
@@ -59,11 +66,13 @@ def test_an_impossible_date_is_a_clear_refusal_fast():
 
 
 ZONES = ["UTC", "America/New_York", "Europe/London", "Australia/Lord_Howe", "Asia/Kolkata",
-         "Africa/Casablanca", "America/Santiago", "Pacific/Chatham"]
+         "Africa/Casablanca", "America/Santiago", "Pacific/Chatham", "Europe/Amsterdam", "Asia/Kathmandu"]
 # DST changes in those zones, and ordinary instants.
 ANCHORS = ["2026-11-01T04:30:00", "2026-11-01T05:40:00", "2026-03-08T06:10:00", "2026-03-29T00:20:00",
            "2026-10-25T00:05:00", "2026-04-05T14:30:00", "2026-10-03T15:10:00", "2026-04-04T14:40:00",
-           "2026-09-26T13:30:00", "2026-04-04T23:10:00", "2026-12-31T23:30:00", "2026-06-15T09:07:00"]
+           "2026-09-26T13:30:00", "2026-04-04T23:10:00", "2026-12-31T23:30:00", "2026-06-15T09:07:00",
+           # Amsterdam's offset had seconds (+00:19:32) until 1937: never a whole-minute day.
+           "1930-06-01T10:00:00"]
 
 
 def _corpus(seed: int = 20261127, size: int = 500) -> list[tuple[str, str, datetime]]:
@@ -105,3 +114,33 @@ def test_agrees_with_the_minute_by_minute_definition():
         else:
             assert got is None or got >= after + timedelta(minutes=horizon), (expr, zone, after.isoformat(), got)
     assert checked > 300, "the corpus exercises the matching path"
+
+
+def _oracle_count(expr: str, after: datetime, until: datetime, tz: str) -> int:
+    """The old count: every minute in (after, until] that matches."""
+    cron = CronExpression(expr)
+    zone = resolve_timezone(tz)
+    t = (after + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    n = 0
+    while t <= until:
+        n += cron.matches(t.astimezone(zone))
+        t += timedelta(minutes=1)
+    return n
+
+
+def test_counts_agree_with_the_minute_by_minute_definition():
+    for expr, zone, after in _corpus(size=200):
+        until = after + timedelta(hours=40, minutes=17)
+        assert count_matches(expr, after, until, zone, limit=10_000) == _oracle_count(expr, after, until, zone), (
+            expr, zone, after.isoformat())
+
+
+@pytest.mark.parametrize("zone", ["UTC", "America/New_York", "Australia/Lord_Howe", "Asia/Kathmandu"])
+@pytest.mark.parametrize("expr", ["* * * * *", "*/5 * * * *", "*/7 9-17 * * 1-5"])
+def test_dense_expressions_resolve_in_under_a_millisecond(expr, zone):
+    """Review round 4 #1: the day expansion cost ~28 ms per call on "* * * * *", inside the claim lock."""
+    next_run(expr, NOW, zone)
+    start = time.perf_counter()
+    for i in range(200):
+        next_run(expr, NOW + timedelta(minutes=13 * i), zone)
+    assert (time.perf_counter() - start) / 200 < 0.001, expr

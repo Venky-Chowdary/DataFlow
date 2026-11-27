@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Sequence
 from services.atomic_file import write_json_atomic
 from services.brand_env import getenv_brand
 from services.cron_schedule import CronError, resolve_timezone, validate_cron
+from services.cron_schedule import count_matches as _cron_count_matches
 from services.cron_schedule import next_run as _cron_next_run
 from services.ops_events import emit_event
 from services.platform_config import data_dir
@@ -727,16 +728,18 @@ def count_missed_windows(
     if due > current:
         return 0
     cron = (cron or "").strip()
+    if cron:
+        # Counted a local day at a time: this runs inside the claim lock, and
+        # one next_run per missed instant took 28 s for "* * * * *" overdue
+        # three days (review round 4).
+        try:
+            return _cron_count_matches(cron, due, current, tz or "UTC", limit=MISSED_WINDOW_SCAN_LIMIT)
+        except CronError:
+            return 0
     missed = 0
     cursor = due
     for _ in range(MISSED_WINDOW_SCAN_LIMIT):
-        if cron:
-            try:
-                cursor = _cron_next_run(cron, cursor, tz or "UTC")
-            except CronError:
-                return missed
-        else:
-            cursor = cursor + interval_delta(interval)
+        cursor = cursor + interval_delta(interval)
         if cursor > current:
             return missed
         missed += 1
