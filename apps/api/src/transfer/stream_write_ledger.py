@@ -92,6 +92,7 @@ def _arm_strict_keyed_backup(
     dest_cfg: dict[str, Any],
     dest_table: str,
     job_id: str,
+    sync_mode: str = "",
 ) -> dict[str, Any]:
     """D111 — row-copy a populated PG destination before a strict keyed write.
 
@@ -129,6 +130,9 @@ def _arm_strict_keyed_backup(
         logger.warning("Strict-run destination backup of %s failed: %s", dest_table, exc)
         return backups
     if pair:
+        # The stream's own mode rides the backup: a cancel restores only an
+        # overwrite's (D302), a resumable write's stays discarded (D134).
+        pair = {**pair, "sync_mode": str(sync_mode or "")}
         backups[str(pair.get("table") or dest_table)] = pair
         extra["route_backups"] = backups
         destination.extra = extra

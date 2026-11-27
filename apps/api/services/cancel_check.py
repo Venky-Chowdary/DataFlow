@@ -13,6 +13,8 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
+import threading
+import weakref
 from typing import Any, Callable, Iterator
 
 from services.error_handling import TransferCancelled
@@ -143,15 +145,55 @@ _last_written: contextvars.ContextVar[int] = contextvars.ContextVar(
 )
 
 
-class _CancelKeepingFile:
-    """File proxy for a COPY callback that remembers a cancel raised inside it."""
+#: Per-connection gate around psycopg2's lock-free COPY loop (D302).
+_LIBPQ_GATES: "weakref.WeakKeyDictionary[Any, threading.Lock]" = weakref.WeakKeyDictionary()
+_LIBPQ_GATES_LOCK = threading.Lock()
 
-    def __init__(self, inner: Any, poll: bool) -> None:
+
+def libpq_gate(conn: Any) -> threading.Lock | None:
+    """The lock a COPY holds on ``conn`` whenever its thread may be inside libpq.
+
+    psycopg2 2.9 releases the connection's own lock before the COPY data loop
+    (``_pq_copy_out_v3`` / ``_pq_copy_in_v3`` call ``PQgetCopyData`` /
+    ``PQputCopyData`` without it), so ``conn.close()`` from another thread can
+    ``PQfinish`` the connection while the COPY thread is still using it: a
+    use-after-free in the API process. :func:`copy_expert_keeping_cancel`
+    holds this gate for the whole COPY and lets go only while its thread runs
+    the Python file callback, outside libpq. Whoever closes the connection
+    from another thread (the D302 cancel watch) takes the gate first.
+    ``None`` for objects that cannot be weakly referenced (test doubles).
+    """
+    if conn is None:
+        return None
+    try:
+        with _LIBPQ_GATES_LOCK:
+            gate = _LIBPQ_GATES.get(conn)
+            if gate is None:
+                gate = threading.Lock()
+                _LIBPQ_GATES[conn] = gate
+            return gate
+    except TypeError:
+        return None
+
+
+class _CancelKeepingFile:
+    """File proxy for a COPY callback that remembers a cancel raised inside it.
+
+    With a ``gate`` it is released for the duration of each callback: the COPY
+    thread is then in Python, not libpq, and another thread may close the
+    connection (see :func:`libpq_gate`).
+    """
+
+    def __init__(self, inner: Any, poll: bool, gate: threading.Lock | None = None) -> None:
         self._inner = inner
         self._poll = poll
+        self._gate = gate
         self.cancelled: TransferCancelled | None = None
 
     def _call(self, name: str, *args: Any) -> Any:
+        gate = self._gate
+        if gate is not None:
+            gate.release()
         try:
             if self._poll:
                 cancel_checkpoint()
@@ -159,6 +201,9 @@ class _CancelKeepingFile:
         except TransferCancelled as exc:
             self.cancelled = exc
             raise
+        finally:
+            if gate is not None:
+                gate.acquire()
 
     def read(self, *args: Any) -> Any:
         return self._call("read", *args)
@@ -184,7 +229,10 @@ def copy_expert_keeping_cancel(cur: Any, sql: str, file: Any, *, poll: bool = Fa
     that had rolled back (QA C16). ``poll`` also polls the probe on every
     callback (the reader/writer does not poll itself).
     """
-    proxy = _CancelKeepingFile(file, poll)
+    gate = libpq_gate(getattr(cur, "connection", None))
+    proxy = _CancelKeepingFile(file, poll, gate)
+    if gate is not None:
+        gate.acquire()
     try:
         cur.copy_expert(sql, proxy)
     except TransferCancelled:
@@ -193,6 +241,9 @@ def copy_expert_keeping_cancel(cur: Any, sql: str, file: Any, *, poll: bool = Fa
         if proxy.cancelled is not None:
             raise proxy.cancelled from exc
         raise
+    finally:
+        if gate is not None:
+            gate.release()
 
 
 class ProgressMeter:
@@ -404,6 +455,32 @@ def active_job_store() -> tuple[Any, str] | None:
     if meter is None or not meter._job_id:
         return None
     return meter._mongo, meter._job_id
+
+
+def note_on_job(fields: dict[str, Any], *, append: dict[str, Any] | None = None) -> bool:
+    """Best effort: record operator-facing facts on this run's job record.
+
+    ``append`` adds values to list fields (kept unique). Returns whether the
+    record was written; never raises (a note must not fail the run).
+    """
+    bound = active_job_store()
+    if bound is None:
+        return False
+    mongo, job_id = bound
+    try:
+        update = dict(fields)
+        if append:
+            job = _read_job(mongo, job_id) or {}
+            for key, value in append.items():
+                current = list(job.get(key) or [])
+                if value not in current:
+                    current.append(value)
+                update[key] = current
+        mongo.update_job_fields(job_id, update)
+        return True
+    except Exception as exc:  # noqa: BLE001 - a note must never fail the run
+        logger.warning("could not record %s on job %s: %s", sorted(fields) or sorted(append or {}), job_id, exc)
+        return False
 
 
 def set_progress_meter(meter: "ProgressMeter | None") -> None:

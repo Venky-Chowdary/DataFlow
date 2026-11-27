@@ -47,6 +47,8 @@ import logging
 import os
 import re
 import tempfile
+import threading
+import time
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
@@ -743,8 +745,14 @@ def stream_between_cursors(
     producer: Callable[[str], None],
     consumer: Callable[[str], None],
     join_timeout: float = 120.0,
+    abort_producer: Callable[[], None] | None = None,
+    failure_wait: float = 15.0,
 ) -> str:
     """Move a COPY payload from ``producer`` to ``consumer`` through a path.
+
+    When the consumer fails, ``abort_producer`` (e.g. the source session's
+    thread-safe ``cancel``) stops a producer still waiting on its source, and
+    the whole wait for the producer is bounded by ``failure_wait`` seconds.
 
     The two engines never speak to each other: one writes a TSV/binary stream,
     the other reads it, and the only thing they share is a filesystem path.
@@ -787,20 +795,58 @@ def stream_between_cursors(
     # (ContextVars): it must run in the job's context (D168).
     pump = thread_in_context(_pump, name=f"{prefix}fifo")
     pump.start()
+    consumer_failed = False
     try:
         consumer(path)
     except BaseException:
-        # Opening a FIFO blocks until the other end appears: a producer that
-        # never got there would hold this join forever, so the failing path
-        # waits briefly and lets the real exception out.
-        pump.join(timeout=30)
+        consumer_failed = True
+        # The producer may be waiting on its source (a silent scan: inside
+        # the driver, polling nothing) — stop it there first.
+        if abort_producer is not None:
+            try:
+                abort_producer()
+            except Exception:  # noqa: BLE001 - the consumer's error is the outcome
+                logger.warning("stopping the COPY producer failed", exc_info=True)
+        # Opening a FIFO for writing blocks until a reader opens it. A consumer
+        # that failed before opening it (a cancel caught before the LOAD, a
+        # refused session) left the producer parked in open() for good: the
+        # joins ran out (30 s + 120 s) and the thread leaked. Open the read end
+        # ourselves and drop it: the producer's open() returns and its next
+        # write fails on the closed pipe, so it stops at once.
+        _release_fifo_writer(path, pump, budget=failure_wait)
         raise
     finally:
-        pump.join(timeout=join_timeout)
+        # A failed handoff waits only what _release_fifo_writer already spent.
+        pump.join(timeout=0 if consumer_failed else join_timeout)
+        if pump.is_alive():
+            logger.warning("COPY producer %s still running after the handoff ended", pump.name)
         _discard_stream_path(path, tmp)
     if failure:
         raise failure[0]
     return "fifo"
+
+
+def _release_fifo_writer(path: str, pump: threading.Thread, budget: float = 30.0) -> None:
+    """Let ``pump``, a writer on the FIFO at ``path`` with no reader, stop.
+
+    Opens the read end (non-blocking) and closes it again, repeatedly, while
+    the writer lives: a writer parked in ``open()`` returns, and its next
+    write fails with a broken pipe. Repeated because the writer may reach
+    ``open()`` only after a first release.
+    """
+    deadline = time.monotonic() + budget
+    while pump.is_alive() and time.monotonic() < deadline:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            logger.debug("copy stream reader release skipped", exc_info=True)
+            pump.join(timeout=max(0.0, deadline - time.monotonic()))
+            return
+        try:
+            pump.join(timeout=0.05)
+        finally:
+            os.close(fd)
+        pump.join(timeout=0.05)
 
 
 def _discard_stream_path(path: str, directory: str) -> None:

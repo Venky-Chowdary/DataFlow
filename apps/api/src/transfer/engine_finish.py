@@ -270,18 +270,30 @@ OVERWRITE_RESTORED_NOTE = (
 )
 
 
-def _settle_backup_after_error(destination: EndpointConfig, exc: BaseException) -> bool:
+def _settle_backup_after_error(
+    destination: EndpointConfig, exc: BaseException, *, request: Any = None
+) -> bool:
     """Settle the pre-run backup after a run ended on ``exc``.
 
     D134 — a cancel is not a failed batch (D102): the committed prefix stays,
     the job reports it, and the checkpoint and route watermark already point
     past it. Restoring the pre-run backup removed those rows behind the
     resume, which then skipped them as landed and still verified.
+
+    An overwrite never resumes past a checkpoint (it restarts from the first
+    row), so a cancelled overwrite puts its pre-run rows back instead of
+    leaving the destination empty (:mod:`src.transfer.cancel_restore`).
     """
     from src.transfer.engine import (  # lazy: honours monkeypatches on the original module
         TransferCancelled,
         _settle_overwrite_backup,
     )
+    if isinstance(exc, TransferCancelled):
+        from .cancel_restore import restorable_on_cancel, restore_on_cancel
+
+        held = restorable_on_cancel(destination, request)
+        if held:
+            return restore_on_cancel(destination, exc, held, request)
     restore = not isinstance(exc, TransferCancelled)
     restored = _settle_overwrite_backup(destination, restore=restore)
     from .overwrite_outcome import carry_onto_exception

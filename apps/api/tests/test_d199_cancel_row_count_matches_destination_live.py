@@ -21,6 +21,10 @@ import uuid
 import pytest
 
 
+#: Seconds a destination COUNT may take before the test fails instead of hanging.
+_COUNT_TIMEOUT_S = 30
+
+
 def _run_and_cancel(
     monkeypatch, *, source: str, rows: int, prefill: int = 0, operator_cancel: bool = True,
     sync: str = "", row_path: bool = True,
@@ -50,6 +54,9 @@ def _run_and_cancel(
     my = pymysql.connect(
         host=c["host"], port=int(c["port"]), user=c["username"],
         password=c["password"], database=c["database"], autocommit=True,
+        # A COUNT that does not answer must fail the test, not hang the shard
+        # (see dest_count).
+        read_timeout=_COUNT_TIMEOUT_S,
     )
     seed = [(i, f"a{i}" if i % 5 else ("" if i % 2 else None), i % 97) for i in range(1, rows + 1)]
     pg = None
@@ -96,6 +103,18 @@ def _run_and_cancel(
             with my.cursor() as cur:
                 cur.execute(f"SELECT COUNT(*) FROM `{dst_t}`")  # nosec B608
                 return int(cur.fetchone()[0])
+        except pymysql.err.OperationalError as exc:
+            if exc.args and exc.args[0] == 2013:
+                # MariaDB 10.6+: a LOAD DATA into an empty table with
+                # unique_checks=0 / foreign_key_checks=0 runs as a bulk insert,
+                # and a concurrent COUNT(*) on that table can deadlock inside
+                # InnoDB for good (the LOAD hangs too, KILL does not end it).
+                pytest.fail(
+                    f"destination COUNT(*) gave no answer within {_COUNT_TIMEOUT_S}s "
+                    "while the job was loading (MariaDB empty-table bulk-insert "
+                    f"deadlock?): {exc}"
+                )
+            return None
         except Exception:  # noqa: BLE001 - table not created yet
             return None
 
@@ -118,7 +137,9 @@ def _run_and_cancel(
     worker = threading.Thread(
         target=lambda: result.setdefault(
             "r", UniversalTransferEngine().execute_tracked(request, job_id)
-        )
+        ),
+        # A job stuck on a frozen destination must not keep the run alive.
+        daemon=True,
     )
     try:
         worker.start()
@@ -132,6 +153,11 @@ def _run_and_cancel(
             store.request_job_cancel(job_id)
             store.update_job_status(job_id, "cancelled", operator_command=True)
         worker.join(120)
+        if worker.is_alive() and (store.get_job(job_id) or {}).get("cancel_note"):
+            # The cancel came after the load had committed: the job said so at
+            # once and is finishing verification of the rows it wrote, which
+            # the cancel does not cut short (the result reports them exactly).
+            worker.join(600)
         assert not worker.is_alive(), "the cancelled job is still running"
         time.sleep(1)
         settled = dest_count()
@@ -218,14 +244,22 @@ def test_pooled_writer_mid_commit_is_counted(monkeypatch):
     assert int(outcome.get("committed_batches_tally") or 0) < settled, outcome
 
 
-def test_overwrite_of_an_existing_table_counts_the_replacement(monkeypatch):
+def test_overwrite_of_an_existing_table_puts_the_pre_run_rows_back(monkeypatch):
     settled, job, _ = _run_and_cancel(
         monkeypatch, source="mysql", rows=60000, prefill=500, sync="full_refresh_overwrite"
     )
     outcome = job.get("cancel_outcome") or {}
-    # The overwrite cleared the 500 old rows; every row now there is this run's.
-    assert outcome.get("rows_committed") == settled, (outcome, settled)
-    assert _stated(str(job.get("message") or "")) == settled
+    # The overwrite cleared the 500 old rows into its pre-run backup. Owner
+    # decision (D302 follow-up): a cancelled overwrite puts them back instead
+    # of keeping a partial replacement, and the record counts exactly that.
+    assert settled == 500, settled
+    assert outcome.get("pre_run_rows_restored") is True, outcome
+    assert outcome.get("rows_committed") == 0, outcome
+    assert outcome.get("destination_rows_now") == 500, outcome
+    assert outcome.get("destination_rows_before") == 500, outcome
+    assert job.get("message") == (
+        "Cancelled. The destination holds the rows it had before this run (500 rows)."
+    ), job.get("message")
 
 
 def test_copy_route_cancel_shows_the_destination_count(monkeypatch):

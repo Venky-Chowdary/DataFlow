@@ -82,6 +82,14 @@ class TableDropError(RuntimeError):
         )
 
 
+class TableRestoreRefused(TableDropError):
+    """An automatic restore would not reproduce the pre-run table; the backup stays."""
+
+    def __init__(self, table_name: str, reason: str) -> None:
+        super().__init__(table_name, RuntimeError(reason))
+        self.reason = reason
+
+
 class DestinationDeleteError(RuntimeError):
     """A destination DELETE by primary key was attempted and failed.
 
@@ -547,6 +555,16 @@ def restore_generic_sql_overwrite(
         if _is_clickhouse(dialect, engine):
             _restore_clickhouse_overwrite(engine, table_name, live_ref, bak_ref)
             return
+        from connectors.overwrite_restore_steps import generic_catalog, generic_restore_refusal
+
+        # Only an exact restore runs automatically (D302 review): triggers,
+        # identity counters or an unreadable catalog keep the backup.
+        with engine.connect() as conn:
+            catalog = generic_catalog(conn, dialect, schema or gcfg.get("schema"), table_name)
+        refusal = generic_restore_refusal(dialect, catalog)
+        if refusal:
+            raise TableRestoreRefused(table_name, f"{table_name}: {refusal}")
+        generated = {c.casefold() for c in catalog.get("generated") or []}
         if dialect in {"sqlserver", "mssql"}:
             from services.dest_overwrite_swap import sqlserver_swap_staged_dest
 
@@ -576,7 +594,12 @@ def restore_generic_sql_overwrite(
                 str(c).casefold(): str(c)
                 for c in conn.execute(sa.text(f"SELECT * FROM {bak_ref} WHERE 1=0")).keys()  # nosec B608
             }
-            pairs = [(bak_cols[c.casefold()], c) for c in live_cols if c.casefold() in bak_cols]
+            # Generated columns compute themselves; inserting them fails.
+            pairs = [
+                (bak_cols[c.casefold()], c)
+                for c in live_cols
+                if c.casefold() in bak_cols and c.casefold() not in generated
+            ]
             quote = _generic_column_quoter(dialect)
             try:
                 conn.execute(sa.text(f"DELETE FROM {live_ref}"))  # nosec B608
@@ -1056,6 +1079,10 @@ def retire_mysql_overwrite(
             cur.execute(f"CREATE TABLE {bak_q} LIKE {src_q}")
             cur.execute(f"ALTER TABLE {bak_q} COMMENT = %s", (MYSQL_ROW_BACKUP_MARK,))
             cur.execute(f"INSERT INTO {bak_q} ({cols}) SELECT {cols} FROM {src_q}")  # nosec B608
+            from connectors.overwrite_restore_steps import carry_mysql_auto_increment
+
+            # Read before the empty statements reset it: a restore puts it back.
+            carry_mysql_auto_increment(cur, table_name, backup)
 
             def _run(sql: str) -> None:
                 cur.execute(sql)
@@ -1096,12 +1123,25 @@ def restore_mysql_overwrite(cfg: dict[str, Any], table_name: str, backup: str) -
                 table_name in present
                 and _mysql_table_comment(cur, backup) == MYSQL_ROW_BACKUP_MARK
             ):
+                from connectors.overwrite_restore_steps import (
+                    mysql_restore_refusal,
+                    restore_mysql_auto_increment,
+                )
+
+                # Only an exact restore runs automatically: the backup stays
+                # (and the operator gets the steps) when it would not be.
+                refusal = mysql_restore_refusal(cur, table_name)
+                if refusal:
+                    raise TableRestoreRefused(table_name, refusal)
                 _mysql_copy_rows_back(cur, table_name, backup)
+                restore_mysql_auto_increment(cur, table_name, backup)
                 cur.execute(f"DROP TABLE {bak_q}")
                 return
             if table_name in present:
                 cur.execute(f"DROP TABLE {src_q}")
             cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
+    except TableRestoreRefused:
+        raise
     except Exception as exc:  # noqa: BLE001 - restore must surface every DDL failure
         raise TableDropError(table_name, exc) from exc
     finally:
@@ -1312,11 +1352,10 @@ def restore_mongodb_overwrite(cfg: dict[str, Any], table_name: str, backup: str)
     """Drop a partial replacement and rename the backup back to the live name."""
     try:
         db = _mongo_db(cfg)
-        names = set(db.list_collection_names())
-        if table_name in names:
-            db.drop_collection(table_name)
-        if backup in names:
-            db[backup].rename(table_name)
+        if backup in set(db.list_collection_names()):
+            # One step: dropping the partial replacement first left a window
+            # with no collection at all, and a missing backup dropped it anyway.
+            db[backup].rename(table_name, dropTarget=True)
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc
 

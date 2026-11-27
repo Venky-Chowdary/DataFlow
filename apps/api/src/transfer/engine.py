@@ -3127,7 +3127,7 @@ class UniversalTransferEngine:
                     dest_summary=dest_summary,
                     recon=recon,
                 )
-            _settle_backup_after_error(request.destination, e)
+            _settle_backup_after_error(request.destination, e, request=request)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
                 mongo, job_id, e, lineage=lineage, request=request
@@ -4356,7 +4356,7 @@ class UniversalTransferEngine:
                     dest_summary=dest_summary,
                     recon=recon,
                 )
-            _settle_backup_after_error(request.destination, e)
+            _settle_backup_after_error(request.destination, e, request=request)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
                 mongo, job_id, e, lineage=lineage, request=request
@@ -5192,7 +5192,7 @@ class UniversalTransferEngine:
                     dest_summary=dest_summary,
                     recon=recon,
                 )
-            _settle_backup_after_error(request.destination, e)
+            _settle_backup_after_error(request.destination, e, request=request)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
                 mongo, job_id, e, lineage=lineage, request=request
