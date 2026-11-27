@@ -486,6 +486,32 @@ def _isolate_process_env(monkeypatch, request):
             )
 
 
+#: Background threads whose crash must fail the test that started them, not
+#: only warn: a dead reconcile heartbeat stops a job's liveness stamps.
+_FAIL_ON_THREAD_CRASH = ("reconcile-heartbeat-",)
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_heartbeat_thread_crash():
+    import threading
+
+    crashed: list[str] = []
+    previous = threading.excepthook
+
+    def _hook(args):
+        name = getattr(args.thread, "name", "") or ""
+        if name.startswith(_FAIL_ON_THREAD_CRASH):
+            crashed.append(f"{name}: {args.exc_type.__name__}: {args.exc_value}")
+        previous(args)
+
+    threading.excepthook = _hook
+    try:
+        yield
+    finally:
+        threading.excepthook = previous
+    assert not crashed, "background thread crashed: " + "; ".join(crashed)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_parked_snowflake_logins():
     """A Snowflake plan login parked by one test is never taken by another (D187)."""
