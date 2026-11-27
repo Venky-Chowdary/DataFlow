@@ -122,6 +122,19 @@ def _jobs_by_id(store: Any, ids: list[str]) -> dict[str, dict[str, Any]]:
     return {i: j for i in ids if (j := store.get_job(i))}
 
 
+def _summary_or_none(job: dict[str, Any], job_id: str) -> dict[str, Any] | None:
+    """The job's verdict summary, or None when its stored evidence cannot be read.
+
+    A read for display only (no write, no row moves): one unreadable job must
+    not blank a page of verdicts. The failure is logged with its type.
+    """
+    try:
+        return _job_summary(job, job_id)
+    except Exception as exc:  # noqa: BLE001 - display read; logged, the row shows "Not loaded"
+        logger.warning("parity verdict unavailable for %s (%s)", job_id, type(exc).__name__)
+        return None
+
+
 def job_verdicts(ids: list[str], visible: Any) -> dict[str, dict[str, Any]]:
     """``{job_id: {verdict, unexplained, method}}`` for the finished jobs ``visible`` allows.
 
@@ -139,11 +152,9 @@ def job_verdicts(ids: list[str], visible: Any) -> dict[str, dict[str, Any]]:
         job = full.get(job_id)
         if not job or not visible(job) or not job_is_terminal(job):
             continue
-        try:
-            summary = _job_summary(job, job_id)
-        except Exception as exc:  # noqa: BLE001 - one unreadable job must not blank the page
-            logger.info("parity verdict unavailable for %s (%s)", job_id, type(exc).__name__)
-            continue
+        summary = _summary_or_none(job, job_id)
+        if summary is None:
+            continue  # left out: the grid shows "Not loaded" and asks again; nothing is written
         from services.job_list_view import parity_stamp
 
         out[job_id] = {
