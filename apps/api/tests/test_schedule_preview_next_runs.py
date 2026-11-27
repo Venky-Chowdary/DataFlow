@@ -101,31 +101,131 @@ def test_a_list_cut_by_the_time_budget_says_so(monkeypatch):
     assert overdue["truncated"] is True and overdue["runs"] == [NOW.isoformat()]
 
 
-def _request(email: str | None, host: str = "10.0.0.7"):
+def _request(email: str | None = None, *, host: str = "10.0.0.7", forwarded: str = "", api_key: str = ""):
     from starlette.requests import Request
 
-    req = Request({"type": "http", "method": "POST", "path": "/api/v1/schedules/preview", "headers": [],
+    headers = [(b"x-forwarded-for", forwarded.encode())] if forwarded else []
+    req = Request({"type": "http", "method": "POST", "path": "/api/v1/schedules/preview", "headers": headers,
                    "client": (host, 5000)})
-    if email:
+    if api_key:
         req.state.user_email = email
+        req.state.user = {"email": email, "role": "viewer", "auth_kind": "api_key", "api_key_id": api_key}
+        req.state.api_key_id = api_key
+        req.state.api_key_auth = True
+    elif email:
+        req.state.user_email = email
+        req.state.user = {"email": email, "role": "member"}
     return req
 
 
-def test_each_caller_gets_ten_previews_per_ten_seconds():
-    """Review round 4 #2: the preview is CPU on the worker pool; a loop must not monopolise it."""
+def _exhaust(body, make_request) -> None:
     import pytest
     from fastapi import HTTPException
 
-    from src.routers.schedules_router import NextRunsPreviewBody, _preview_rate_store, preview_schedule_next_runs
+    from src.routers.schedules_router import preview_schedule_next_runs
 
-    _preview_rate_store().clear()
+    for _ in range(10):
+        assert preview_schedule_next_runs(body, make_request())["kind"] == "clock"
+    with pytest.raises(HTTPException) as refused:
+        preview_schedule_next_runs(body, make_request())
+    assert refused.value.status_code == 429 and int(refused.value.headers["Retry-After"]) >= 1
+
+
+def test_each_caller_gets_ten_previews_per_ten_seconds_across_workers(monkeypatch):
+    """Review round 4/5 #2: the limit is shared (services.auth_state: Redis when configured), per principal."""
+    import uuid
+
+    import services.auth_state as auth_state
+    from src.routers.schedules_router import NextRunsPreviewBody, _preview_caller_key, preview_schedule_next_runs
+
+    auth_state.reset_auth_state()
+    body = NextRunsPreviewBody(interval="daily", cron="0 9 * * *", timezone="UTC")
+    tag = uuid.uuid4().hex[:8]
+    ana = f"ana-{tag}@example.com"
+    _exhaust(body, lambda: _request(ana))
+    # The same account from another address is the same caller; its key is not its email.
+    assert _preview_caller_key(_request(ana, host="10.9.9.9")) == _preview_caller_key(_request(ana))
+    assert ana not in _preview_caller_key(_request(ana))
+    # An API key the account minted is its own caller, not the account's.
+    assert preview_schedule_next_runs(body, _request(ana, api_key=f"key-{tag}"))["kind"] == "clock"
+    assert preview_schedule_next_runs(body, _request(f"bo-{tag}@example.com"))["kind"] == "clock"
+
+
+class _SharedRedis:
+    """The few Redis calls the shared limiter makes, on one store every client sees."""
+
+    def __init__(self) -> None:
+        self.counts: dict[str, int] = {}
+
+    def client(self):
+        server = self
+
+        class _Pipe:
+            def __init__(self) -> None:
+                self.ops: list[tuple[str, str]] = []
+
+            def incr(self, key):
+                self.ops.append(("incr", key))
+
+            def expire(self, key, ttl, nx=False):
+                self.ops.append(("expire", key))
+
+            def execute(self):
+                out = []
+                for op, key in self.ops:
+                    if op == "incr":
+                        server.counts[key] = server.counts.get(key, 0) + 1
+                        out.append(server.counts[key])
+                    else:
+                        out.append(True)
+                return out
+
+        class _Client:
+            def pipeline(self):
+                return _Pipe()
+
+        return _Client()
+
+
+def test_two_workers_share_one_preview_allowance(monkeypatch):
+    """Review round 5: an in-process bucket gave N workers x 10. Two workers on one Redis share the 10."""
+    import itertools
+
+    import pytest
+    from fastapi import HTTPException
+
+    import services.auth_state as auth_state
+    from src.routers.schedules_router import NextRunsPreviewBody, preview_schedule_next_runs
+
+    redis = _SharedRedis()
+    workers = [auth_state.SharedAuthState(auth_state._RedisBackend(redis.client())) for _ in range(2)]
+    turn = itertools.cycle(workers)
+    monkeypatch.setattr(auth_state, "get_auth_state", lambda: next(turn))
     body = NextRunsPreviewBody(interval="daily", cron="0 9 * * *", timezone="UTC")
     for _ in range(10):
-        assert preview_schedule_next_runs(body, _request("ana@example.com"))["kind"] == "clock"
+        assert preview_schedule_next_runs(body, _request("cy@example.com"))["kind"] == "clock"
     with pytest.raises(HTTPException) as refused:
-        preview_schedule_next_runs(body, _request("ana@example.com"))
-    assert refused.value.status_code == 429 and int(refused.value.headers["Retry-After"]) >= 1
-    # Another account, and an anonymous caller by address, have their own allowance.
-    assert preview_schedule_next_runs(body, _request("bo@example.com"))["kind"] == "clock"
-    assert preview_schedule_next_runs(body, _request(None))["kind"] == "clock"
-    _preview_rate_store().clear()
+        preview_schedule_next_runs(body, _request("cy@example.com"))
+    assert refused.value.status_code == 429
+    # Every call was counted on the shared store, alternating between the workers.
+    assert list(redis.counts.values()) == [11]
+
+
+def test_anonymous_callers_are_counted_by_the_trusted_client_address(monkeypatch):
+    import uuid
+
+    import services.auth_state as auth_state
+    from src.routers.schedules_router import NextRunsPreviewBody, _preview_caller_key
+
+    auth_state.reset_auth_state()
+    body = NextRunsPreviewBody(interval="daily", cron="0 9 * * *", timezone="UTC")
+    n = int(uuid.uuid4().hex[:4], 16) % 250 + 1
+    # No proxy trusted: X-Forwarded-For is the caller's own claim and is ignored.
+    monkeypatch.setenv("TRUSTED_PROXY_COUNT", "0")
+    for name in ("DATAWRAP_TRUSTED_PROXY_COUNT", "DATAFLOW_TRUSTED_PROXY_COUNT"):
+        monkeypatch.delenv(name, raising=False)
+    assert _preview_caller_key(_request(host=f"10.1.{n}.1", forwarded="203.0.113.5")) == f"schedule-preview:ip:10.1.{n}.1"
+    _exhaust(body, lambda: _request(host=f"10.1.{n}.1", forwarded=f"198.51.100.{uuid.uuid4().int % 250}"))
+    # One trusted proxy: the address it saw is the caller, whatever the client put first.
+    monkeypatch.setenv("TRUSTED_PROXY_COUNT", "1")
+    assert _preview_caller_key(_request(host="10.0.0.1", forwarded=f"6.6.6.6, 192.0.2.{n}")) == f"schedule-preview:ip:192.0.2.{n}"

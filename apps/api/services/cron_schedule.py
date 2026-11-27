@@ -25,6 +25,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from services import schedule_clock
+
 _MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
 _DOW = {d: i for i, d in enumerate(
@@ -140,7 +142,7 @@ class CronExpression:
         fields can make an expression unsatisfiable. One pass over the horizon's
         days, independent of the timezone (a zone only shifts the wall clock).
         """
-        start = today or datetime.now(timezone.utc).date()
+        start = today or schedule_clock.utc_now().date()
         for offset in range(FIRE_HORIZON_DAYS):
             if self.matches_day(start + timedelta(days=offset)):
                 return
