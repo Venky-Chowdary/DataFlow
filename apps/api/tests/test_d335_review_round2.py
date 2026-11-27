@@ -274,10 +274,12 @@ def test_held_back_boundary_rows_keep_the_cursor_and_land_once_next_run(tmp_path
 
         monkeypatch.setattr(sbk, "read_candidates", _boom)
         held = _run(isolated, req())
-        assert not held.success
-        assert "boundary row(s) held back; the next run will retry them" in str(held.error or ""), held.error
-        # Balanced: completed with warnings, never "completed" (green).
+        # Balanced: completed with warnings, never "completed" (green); the API
+        # result and the job record say the same thing.
         assert isolated.jobs[held.job_id]["status"] == "completed_with_warnings", isolated.jobs[held.job_id]
+        assert held.success and held.records_transferred == 0
+        assert "boundary row(s) held back; the next run will retry them" in str(held.explanation or ""), held
+        assert "held back" in str(isolated.jobs[held.job_id].get("message") or "")
         assert sorted(r[0] for r in _pg(f'SELECT id FROM public."{dst}"', fetch=True)) == list(range(1, 11))
         assert sc.get_watermark_record(key)[0] == mark_before, "the cursor moved past held-back rows"
 

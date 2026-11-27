@@ -422,5 +422,6 @@ describe("D335: an unmeasured watermark boundary is never 'Append delta verified
   it("an unmeasured boundary check or a failed report is not", () => {
     assert.equal(isGate8AppendDeltaVerified({ ...base, boundary_check: { status: "unmeasured" } } as never), false);
     assert.equal(isGate8AppendDeltaVerified({ ...base, passed: false }), false);
+    assert.equal(isGate8AppendDeltaVerified({ ...base, boundary_check: { status: "accepted" } } as never), false);
   });
 });

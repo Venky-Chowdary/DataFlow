@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import uuid
@@ -148,8 +149,18 @@ def test_a_structural_boundary_failure_names_the_remedy_instead_of_retrying(tmp_
         acked.extra = {"accept_boundary_duplicates": {"actor": "ops-lead", "reason": "append log, dupes ok"}}
         accepted = _run(isolated, _req(src, acked, mode=mode))
         assert accepted.success, accepted.error
-        msg = str((accepted.reconciliation or {}).get("message") or "")
-        assert "accepted for this route by ops-lead" in msg, msg
+        recon = accepted.reconciliation or {}
+        msg = str(recon.get("message") or "")
+        # Never green: explained, completed with warnings, the count named, every run.
+        assert "Boundary duplicates accepted by ops-lead: 1 this run" in msg, msg
+        assert "Append delta verified" not in msg, msg
+        assert recon.get("verification_verdict") == "explained", recon.get("verification_verdict")
+        job = isolated.jobs[accepted.job_id]
+        assert job["status"] == "completed_with_warnings", job["status"]
+        from services.job_trust import compute_job_trust
+
+        trust = json.dumps(compute_job_trust(job))
+        assert "boundary duplicates accepted by ops-lead: 1 this run" in trust, trust[:2000]
     finally:
         _pg(f'DROP TABLE IF EXISTS public."{dst}"')
 

@@ -195,14 +195,17 @@ export function presentMultiStreamGate8<T extends Gate8Reconciliation>(
 }
 
 /**
- * May the append delta be called verified? Not when Gate-8 failed, and not when
- * the watermark boundary check (D335) could not be measured — the API message
- * says "Append row count matched (not a verdict)" then, and the UI must agree.
+ * May the append delta be called verified? Not when Gate-8 failed, not when the
+ * watermark boundary check (D335) could not be measured, and not when the route
+ * accepted possible boundary duplicates — the API message says "Append row count
+ * matched (not a verdict)" then, and the UI must agree.
  */
 export function isGate8AppendDeltaVerified(report: Gate8Reconciliation | null | undefined): boolean {
   if (!report || !isGate8AppendDelta(report) || report.passed === false) return false;
   const boundary = (report as { boundary_check?: { status?: unknown } }).boundary_check;
-  return String(boundary?.status ?? "").toLowerCase() !== "unmeasured";
+  const status = String(boundary?.status ?? "").toLowerCase();
+  // Unmeasured, or possible duplicates accepted for the route: never "verified".
+  return status !== "unmeasured" && status !== "accepted";
 }
 
 /** Dest-before identity for Full Append / keyed extra dest. Display-only — never recompute conservation. */

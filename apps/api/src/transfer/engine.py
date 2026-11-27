@@ -3129,19 +3129,10 @@ class UniversalTransferEngine:
                 )
             _settle_backup_after_error(request.destination, e)
             finalize_contract(contract_id, success=False)
-            display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage, request=request
-            )
-            _undo_note = getattr(e, "failed_batch_undo_note", "")
-            if _undo_note and _undo_note not in display:
-                display = f"{display} {_undo_note}"
-            return TransferResult(
-                success=False,
-                job_id=job_id,
-                error=display,
-                error_details=error_details,
-                row_accounting=error_details.get("row_accounting") or {},
-                operation=request.operation,
+            from .engine_runtime_failure import runtime_failure_result
+
+            return runtime_failure_result(
+                _fail_runtime_job, mongo, job_id, e, lineage=lineage, request=request,
                 contract_id=contract_id,
             )
 
@@ -4358,19 +4349,10 @@ class UniversalTransferEngine:
                 )
             _settle_backup_after_error(request.destination, e)
             finalize_contract(contract_id, success=False)
-            display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage, request=request
-            )
-            _undo_note = getattr(e, "failed_batch_undo_note", "")
-            if _undo_note and _undo_note not in display:
-                display = f"{display} {_undo_note}"
-            return TransferResult(
-                success=False,
-                job_id=job_id,
-                error=display,
-                error_details=error_details,
-                row_accounting=error_details.get("row_accounting") or {},
-                operation=request.operation,
+            from .engine_runtime_failure import runtime_failure_result
+
+            return runtime_failure_result(
+                _fail_runtime_job, mongo, job_id, e, lineage=lineage, request=request,
                 contract_id=contract_id,
             )
         finally:
@@ -5194,19 +5176,10 @@ class UniversalTransferEngine:
                 )
             _settle_backup_after_error(request.destination, e)
             finalize_contract(contract_id, success=False)
-            display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage, request=request
-            )
-            _undo_note = getattr(e, "failed_batch_undo_note", "")
-            if _undo_note and _undo_note not in display:
-                display = f"{display} {_undo_note}"
-            return TransferResult(
-                success=False,
-                job_id=job_id,
-                error=display,
-                error_details=error_details,
-                row_accounting=error_details.get("row_accounting") or {},
-                operation=request.operation,
+            from .engine_runtime_failure import runtime_failure_result
+
+            return runtime_failure_result(
+                _fail_runtime_job, mongo, job_id, e, lineage=lineage, request=request,
                 contract_id=contract_id,
             )
         finally:

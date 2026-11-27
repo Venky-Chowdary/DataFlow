@@ -859,6 +859,7 @@ def _fail_runtime_job(
             # past the watermark and kept its cursor: a warning, never green.
             status = "completed_with_warnings"
             status_kwargs.update(phase="completed", progress_pct=100, failed_at_phase="")
+            setattr(exc, "completes_with_warnings", True)  # the API result agrees
     if already_complete:
         status = "completed"
         display = already_complete

@@ -361,15 +361,7 @@ def apply_boundary_duplicate_gate(recon: Any, *, validation_mode: str = "strict"
         return recon
     tie = (kwargs.get("dest_summary") or {}).get(BOUNDARY_TIE_KEY) or {}
     if tie.get("accepted"):
-        ack = tie["accepted"]
-        recon["boundary_check"] = {"status": "accepted", **ack}
-        note = (
-            f"Possible boundary duplicates accepted for this route by {ack.get('actor')} "
-            f"({ack.get('reason')}): {ack.get('why')}."
-        )
-        recon["migration_proven"] = False
-        recon["message"] = f"{str(recon.get('message') or '').strip()} {note}".strip()
-        return recon
+        return _accepted_verdict(recon, tie, kwargs)
     try:
         dups = boundary_duplicates(**kwargs)
     except Exception as exc:  # noqa: BLE001 - unmeasured is said, and never green
@@ -401,6 +393,40 @@ def apply_boundary_duplicate_gate(recon: Any, *, validation_mode: str = "strict"
         recon["error"] = sentence
         recon["message"] = f"{sentence} {str(recon.get('message') or '').strip()}".strip()
     return _no_green_count_sentence(recon)
+
+
+def _accepted_verdict(recon: dict[str, Any], tie: dict[str, Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+    """An acknowledged route: never green - at most "explained", with the count.
+
+    The duplicates are still measured (from the window check, else a key-free
+    re-read of the watermark) so the job says how many this run added.
+    """
+    ack = tie["accepted"]
+    count: int | None = None
+    window = recon.get("window_duplicates")
+    if isinstance(window, dict) and window.get("accepted"):
+        count = int(window.get("rows") or 0)
+    else:
+        try:
+            count = sum(int(d["copies"]) - int(d["expected"]) for d in boundary_duplicates(**kwargs))
+        except Exception:  # noqa: BLE001 - an unmeasured count is said as such
+            count = None
+    shown = "not measured" if count is None else str(count)
+    ack["duplicates"] = count
+    recon["boundary_check"] = {"status": "accepted", **ack}
+    recon["migration_proven"] = False
+    if recon.get("passed") is not False and recon.get("verification_verdict") not in ("failed",):
+        recon["verification_verdict"] = "explained"
+    note = (
+        f"Boundary duplicates accepted by {ack.get('actor')}: {shown} this run "
+        f"({ack.get('reason')}; {ack.get('why')})."
+    )
+    recon["message"] = f"{str(recon.get('message') or '').strip()} {note}".strip()
+    if "Append delta verified" in recon["message"]:
+        recon["message"] = recon["message"].replace(
+            "Append delta verified", "Append row count matched (not a verdict)"
+        )
+    return recon
 
 
 def _unmeasured(recon: dict[str, Any], reason: str, validation_mode: str) -> None:
