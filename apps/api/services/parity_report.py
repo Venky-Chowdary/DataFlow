@@ -710,6 +710,13 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
     if not isinstance(job.get("reconciliation"), dict) or not job.get("reconciliation"):
         return "unverifiable", "Gate-8 recorded no reconciliation for this job, so nothing was compared."
     verifying = [t["name"] for t in tables if t["status"] == "verifying"]
+    from services.parity_scale.verification import is_queued
+
+    if verifying and is_queued(job):
+        return "verifying", (
+            f"Verification of {', '.join(verifying[:5])} is queued: it starts when capacity frees up. "
+            "Sign-off and cutover wait until every row has been compared."
+        )
     if verifying:
         # Its own state, not a verdict (owner decision 2): the write finished,
         # the comparison of every row is still running.
@@ -1060,6 +1067,7 @@ def _verification_block(job: dict[str, Any]) -> dict[str, Any] | None:
                 # running, passed, failed, incomplete or error (the block's own words).
                 "status": table_state(t),
                 "progress": t.get("progress") or {},
+                "queue_position": t.get("queue_position"),
                 "error": t.get("error"),
                 "outcome": (t.get("evidence") or {}).get("outcome"),
                 "mode": (t.get("evidence") or {}).get("mode"),

@@ -103,6 +103,8 @@ export interface ParityVerificationTable {
   /** running, passed, failed, incomplete or error. */
   status: string;
   progress: { items_done?: number; items_queued?: number; items_total?: number; rows_compared?: number };
+  /** Place in the capacity queue while the table is "queued". */
+  queue_position?: number | null;
   error?: string | null;
   outcome?: string | null;
   mode?: string | null;
@@ -344,6 +346,7 @@ function plural(n: number, one: string, many = `${one}s`): string {
 export function verdictPresentation(
   report: Pick<ParityReport, "verdict" | "parity"> & {
     confidence?: Pick<ParityReport["confidence"], "bound_valid"> & Partial<Pick<ParityReport["confidence"], "method">>;
+    verification?: Pick<ParityVerification, "state"> | null;
   },
 ): { label: string; tone: ParityTone } {
   switch (report.verdict) {
@@ -374,8 +377,8 @@ export function verdictPresentation(
       return { label: `${plural(n, "difference")} unexplained`, tone: "warn" };
     }
     case "verifying":
-      // Not a verdict: the write finished and the comparison of every row is still running.
-      return { label: "Verification running", tone: "muted" };
+      // Not a verdict: the write finished and the comparison of every row is still running (or queued).
+      return { label: report.verification?.state === "queued" ? "Verification queued" : "Verification running", tone: "muted" };
     default:
       return { label: "Can't be verified", tone: "muted" };
   }

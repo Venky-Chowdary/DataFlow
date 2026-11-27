@@ -49,7 +49,8 @@ export function VerificationCard({
   reverifyError,
 }: VerificationCardProps) {
   const titleId = useId();
-  const running = verification.state === "running";
+  const queued = verification.state === "queued";
+  const running = verification.state === "running" || queued;
   const tone = running ? "is-info" : verification.state === "passed" ? "is-ok" : "is-warn";
   return (
     <section className="df2-parity-card df2-pscale-verify" aria-labelledby={titleId} aria-busy={running || undefined}>
@@ -57,7 +58,7 @@ export function VerificationCard({
         <StateIcon state={verification.state} />
         <div>
           <h3 id={titleId} className="df2-parity-h4">
-            {running ? "Verification running" : "Verification after the write"}
+            {queued ? "Verification queued" : running ? "Verification running" : "Verification after the write"}
           </h3>
           <p className="df2-pscale-banner-body">
             {verificationHeadline(verification)}
@@ -67,7 +68,7 @@ export function VerificationCard({
       </div>
       <ul className="df2-pscale-verify-list">
         {verification.tables.map((table) => {
-          const state = verificationTableState(table.status);
+          const state = verificationTableState(table.status, table.queue_position);
           const progress = table.status === "running" ? verificationProgress(table) : null;
           const found = Number((table.progress as { differences_so_far?: number })?.differences_so_far ?? 0);
           return (
@@ -92,7 +93,7 @@ export function VerificationCard({
                     {found > 0 && ` · ${plural(found, "difference")} so far`}
                   </span>
                 </span>
-              ) : table.status === "running" ? (
+              ) : table.status === "queued" ? null : table.status === "running" ? (
                 <span className="df2-parity-muted">Starting…</span>
               ) : (
                 table.error && <span className="df2-parity-muted">{table.error}</span>

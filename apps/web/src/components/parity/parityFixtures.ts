@@ -334,3 +334,17 @@ export function verificationStoppedReport(over: Partial<ParityReport> = {}): Par
     ...over,
   });
 }
+
+/** Parity at Scale: the verification waits for capacity (review 2, N4). */
+export function verificationQueuedReport(over: Partial<ParityReport> = {}): ParityReport {
+  const base = verifyingReport();
+  return verifyingReport({
+    verdict_reason: "Verification of orders is queued: it starts when capacity frees up.",
+    verification: {
+      ...base.verification!,
+      state: "queued",
+      tables: [{ name: "orders", status: "queued", progress: {}, queue_position: 2, outcome: null, mode: null, check_kind: null }],
+    },
+    ...over,
+  });
+}

@@ -113,6 +113,32 @@ def schedule_waits_for_verification(sched: Any) -> str:
     last = str(getattr(sched, "last_job_id", "") or "")
     if not last:
         return ""
-    if not is_running(_service().get_job(last) or {}):
+    job = _service().get_job(last) or {}
+    if not is_running(job):
         return ""
+    from services.parity_scale.verification import effective_block, is_queued
+
+    if is_queued(job):
+        # A verification that is only queued holds the schedule up to its own limit, not forever.
+        limit_min = int(getattr(sched, "verification_queue_wait_minutes", 30) or 0)
+        since = _parse(effective_block(job).get("queued_since"))
+        if since is None or (_utcnow() - since).total_seconds() >= limit_min * 60:
+            return ""
+        return "Waiting for the previous run's verification (queued) before the next run starts."
     return "Waiting for the previous run's verification to finish before the next run starts."
+
+
+def _parse(value: Any) -> Any:
+    from datetime import datetime, timezone
+
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _utcnow() -> Any:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)

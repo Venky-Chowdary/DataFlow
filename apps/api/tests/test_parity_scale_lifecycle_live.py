@@ -111,7 +111,7 @@ def test_the_background_thread_runs_finishes_and_lets_go(tables) -> None:
 
     job_id = _job(*tables)
     block = verification.start_for_job(job_id)
-    assert block["state"] in {"running", "passed"}
+    assert block["state"] in {"queued", "running", "passed"}
     deadline = time.monotonic() + 120
     while verification.is_running(_svc().get_job(job_id)) and time.monotonic() < deadline:
         time.sleep(0.2)
@@ -216,20 +216,23 @@ def test_the_catalog_read_closes_the_first_connection_when_the_second_fails(monk
     assert opened and all(c.closed for c in opened)
 
 
-def test_a_slot_wait_keeps_the_lease_alive(monkeypatch) -> None:
-    from services.parity_scale import lease, verification
+def test_a_capacity_wait_keeps_the_lease_alive_and_reports_its_place(monkeypatch) -> None:
+    from services.parity_scale import capacity
 
-    answers = iter([False, False, True])
-    renewed: list[str] = []
+    monkeypatch.setattr(capacity, "_RUNNING", {"busy-1": "ws-a", "busy-2": "ws-b"})
+    monkeypatch.setattr(capacity, "_QUEUE", [])
+    beats: list[int] = []
+    places: list[int] = []
 
-    class Slots:
-        def acquire(self, timeout: float) -> bool:
-            return next(answers)
+    def keep_alive() -> None:
+        beats.append(1)
+        if len(beats) == 2:
+            capacity.done("busy-1")  # a slot frees up
 
-    monkeypatch.setattr(verification, "_SLOTS", Slots())
-    monkeypatch.setattr(lease, "renew", lambda job_id, token: renewed.append(token))
-    verification._take_slot("job-1", "tok")
-    assert renewed == ["tok", "tok"]
+    capacity.admit("job-1", "ws-c", keep_alive=keep_alive, on_position=places.append, beat_seconds=0.05)
+    assert beats and places == [1]
+    assert "job-1" in capacity.snapshot()["running"]
+    capacity.done("job-1")
 
 
 @live

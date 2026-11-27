@@ -143,7 +143,7 @@ export function plural(n: number, one: string, many = `${one}s`): string {
 
 /** True while the comparison of every row is still running for any table. */
 export function verificationRunning(report: Pick<ParityReport, "verdict" | "verification">): boolean {
-  return report.verdict === "verifying" || report.verification?.state === "running";
+  return report.verdict === "verifying" || report.verification?.state === "running" || report.verification?.state === "queued";
 }
 
 /** The tables the explorer can open: verified tables whose scan finished. */
@@ -161,6 +161,7 @@ export function verificationProgress(table: ParityVerificationTable): { done: nu
 }
 
 const TABLE_STATE: Record<string, { label: string; tone: ParityTone }> = {
+  queued: { label: "Queued", tone: "muted" },
   running: { label: "Comparing", tone: "muted" },
   passed: { label: "Every row matches", tone: "ok" },
   failed: { label: "Differences found", tone: "warn" },
@@ -168,14 +169,23 @@ const TABLE_STATE: Record<string, { label: string; tone: ParityTone }> = {
   error: { label: "Could not finish", tone: "danger" },
 };
 
-export function verificationTableState(status: string): { label: string; tone: ParityTone } {
+export function verificationTableState(status: string, queuePosition?: number | null): { label: string; tone: ParityTone } {
+  if (status === "queued" && queuePosition) return { label: `Queued (${ordinal(queuePosition)} in line)`, tone: "muted" };
   return TABLE_STATE[status] ?? { label: "Not compared", tone: "muted" };
+}
+
+export function ordinal(n: number): string {
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" } as Record<number, string>)[n % 10] ?? "th";
+  return `${n}${suffix}`;
 }
 
 /** One sentence for the verification card's heading line. */
 export function verificationHeadline(verification: ParityVerification): string {
   const n = verification.tables.length;
   switch (verification.state) {
+    case "queued":
+      return "Waiting for capacity: the comparison starts when a slot frees up.";
     case "running":
       return `Comparing every row of ${plural(n, "table")} in both databases.`;
     case "passed":

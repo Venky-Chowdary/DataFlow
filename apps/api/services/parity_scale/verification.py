@@ -39,19 +39,20 @@ from services.parity_scale import parity_scale_enabled
 logger = logging.getLogger(__name__)
 
 RUNNING = "running"
+#: Waiting for capacity (services.parity_scale.capacity): busy, but not running yet.
+QUEUED = "queued"
+ACTIVE = frozenset({RUNNING, QUEUED})
+CAPACITY_REASON = "Not started: verification capacity reached. Re-verify the table later."
 TERMINAL = frozenset({"passed", "failed", "incomplete", "not_eligible", "error"})
 CHECKPOINTS = "parity_scale_checkpoints"
 #: Keys per difference category kept on the job document (counts are never capped).
 JOB_KEYS_CAP = 200
 #: A scan stops comparing after this much work: what is left is "not compared" (incomplete).
 WALL_SECONDS = 6 * 3600
-#: Scans this process runs at once; more wait for a slot (renewing their lease).
-MAX_CONCURRENT = 2
 #: How long one slice of work runs between heartbeats.
 SLICE_SECONDS = 5
 _ACTIVE: dict[str, threading.Thread] = {}
 _ACTIVE_LOCK = threading.Lock()
-_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT)
 
 
 # ── job document access ──────────────────────────────────────────────────────
@@ -79,11 +80,11 @@ def effective_block(job: dict[str, Any] | None) -> dict[str, Any]:
     from services.parity_scale.lease import STOPPED_REASON, lease_live
 
     block = block_of(job)
-    if block.get("state") != RUNNING or lease_live(job):
+    if block.get("state") not in ACTIVE or lease_live(job):
         return block
     tables = []
     for table in block.get("tables") or []:
-        if isinstance(table, dict) and table.get("status") == RUNNING:
+        if isinstance(table, dict) and table.get("status") in ACTIVE:
             table = {**table, "status": "error", "error": STOPPED_REASON, "stopped": True}
         tables.append(table)
     out = {**block, "tables": tables}
@@ -97,7 +98,12 @@ def live_state(job: dict[str, Any] | None) -> str | None:
 
 
 def is_running(job: dict[str, Any] | None) -> bool:
-    return live_state(job) == RUNNING
+    """Busy: running, or queued for capacity, on a worker that holds the lease."""
+    return live_state(job) in ACTIVE
+
+
+def is_queued(job: dict[str, Any] | None) -> bool:
+    return live_state(job) == QUEUED
 
 
 def table_block(job: dict[str, Any] | None, name: str) -> dict[str, Any] | None:
@@ -372,6 +378,8 @@ def job_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
 def _overall(tables: list[dict[str, Any]]) -> str:
     if any(t.get("status") == RUNNING for t in tables):
         return RUNNING
+    if any(t.get("status") == QUEUED for t in tables):
+        return QUEUED
     outcomes = [str((t.get("evidence") or {}).get("outcome") or "") for t in tables]
     if any(t.get("status") == "error" for t in tables):
         return "error"
@@ -529,9 +537,10 @@ def start_for_job(
         scan_id = f"psd1-{uuid.uuid4().hex[:16]}"
         block = dict(block_of(job))
         tables = [t for t in block.get("tables") or [] if t.get("name") != spec["name"]]
-        tables.append({"name": spec["name"], "scan_id": scan_id, "status": RUNNING, "progress": {},
-                       "started_at": _now(), "evidence": None, "error": None})
-        block.update({"state": RUNNING, "started_at": _now(), "finished_at": None, "tables": tables, "reason": ""})
+        tables.append({"name": spec["name"], "scan_id": scan_id, "status": QUEUED, "progress": {},
+                       "queued_since": _now(), "evidence": None, "error": None})
+        block.update({"state": QUEUED, "started_at": _now(), "finished_at": None, "tables": tables, "reason": "",
+                      "queued_since": _now()})
         # One scan's checkpoints at a time: a restart drops the previous scan's. The
         # previous result is superseded now, so a re-verify that fails never leaves an
         # earlier match standing in the reconciliation the proof pack signs.
@@ -556,12 +565,17 @@ def start_for_job(
     return effective_block(_service().get_job(job_id))
 
 
-def _take_slot(job_id: str, token: str) -> None:
-    """Wait for one of :data:`MAX_CONCURRENT` slots, keeping the lease alive meanwhile."""
-    from services.parity_scale.lease import renew
+def _wait_for_capacity(job_id: str, name: str, token: str, workspace_id: str) -> None:
+    """Queue for a slot (per process and per workspace), reporting the position; then mark it running."""
+    from services.parity_scale import capacity, lease
 
-    while not _SLOTS.acquire(timeout=30):
-        renew(job_id, token)
+    capacity.admit(
+        job_id, workspace_id,
+        keep_alive=lambda: lease.renew(job_id, token),
+        on_position=lambda n: _update_table(job_id, name, token, status=QUEUED, queue_position=n),
+        beat_seconds=max(0.1, float(lease.LEASE_TTL_S) / 5.0),
+    )
+    _update_table(job_id, name, token, status=RUNNING, queue_position=None, started_at=_now())
 
 
 def _run_guarded(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, resume: bool,
@@ -569,13 +583,20 @@ def _run_guarded(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, r
     from services.egress_guard import egress_workspace
     from services.parity_scale.lease import LeaseLost, release
 
-    slot = False
+    from services.parity_scale import capacity
+
+    admitted = False
     try:
         # Connector dials are judged by the job's workspace allowlist, as the run's were.
         with egress_workspace(workspace_id):
-            _take_slot(job_id, token)
-            slot = True
+            _wait_for_capacity(job_id, spec["name"], token, workspace_id)
+            admitted = True
             _run(job_id, spec, scan_id, config, resume, token)
+    except capacity.CapacityReached:
+        try:
+            _finish_table(job_id, spec["name"], token, status="error", error=CAPACITY_REASON)
+        except LeaseLost:
+            pass
     except LeaseLost:
         logger.warning("Parity at Scale verification of job %s was taken over by another worker", job_id)
     except Exception as exc:  # noqa: BLE001 — a failed verification is recorded, never raised into the job
@@ -587,8 +608,8 @@ def _run_guarded(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, r
         except LeaseLost:
             pass
     finally:
-        if slot:
-            _SLOTS.release()
+        if admitted:
+            capacity.done(job_id)
         release(job_id, token)
         if worker is not None:
             _unregister(job_id, worker)
@@ -638,6 +659,8 @@ def _update_table(job_id: str, name: str, token: str, **fields: Any) -> None:
     for table in block.get("tables") or []:
         if table.get("name") == name:
             table.update(fields)
+    if block.get("state") in ACTIVE:
+        block["state"] = _overall(block.get("tables") or [])
     write_if_held(job_id, token, {"parity_scale": block})
 
 
@@ -721,7 +744,7 @@ def resume_job(job_id: str, *, background: bool = True) -> bool:
     from services.parity_scale.lease import claim
 
     job = _service().get_job(job_id) or {}
-    if block_of(job).get("state") != RUNNING or is_running(job):
+    if block_of(job).get("state") not in ACTIVE or is_running(job):
         return False  # finished, or a live worker holds it
     holder: dict[str, tuple[Any, ...]] = {}
     worker = threading.Thread(target=lambda: _run_guarded(*holder["work"]), name=f"parity-verify-{job_id}",
@@ -733,16 +756,19 @@ def resume_job(job_id: str, *, background: bool = True) -> bool:
         _unregister(job_id, worker)
         return False
     spec, why = table_spec(job)
-    table = next((t for t in block_of(job).get("tables") or [] if t.get("status") == RUNNING), None)
+    table = next((t for t in block_of(job).get("tables") or [] if t.get("status") in ACTIVE), None)
     checkpoint = (job.get(CHECKPOINTS) or {}).get(str((table or {}).get("scan_id") or ""))
-    if spec is None or table is None or table.get("name") != spec["name"] or not isinstance(checkpoint, dict):
+    # A scan that was only queued never started: it starts now from the beginning.
+    fresh = table is not None and table.get("status") == QUEUED
+    if spec is None or table is None or table.get("name") != spec["name"] or (
+            not fresh and not isinstance(checkpoint, dict)):
         name = str((table or {}).get("name") or (spec or {}).get("name") or "")
         _stop_for_good(job_id, token, name,
                        "Verification stopped before it finished and could not resume"
                        + (f" ({why})" if why else "") + ". Re-verify the table to compare every row.")
         _unregister(job_id, worker)
         return False
-    work = (job_id, spec, str(table["scan_id"]), None, True, token, _workspace_of(job), worker)
+    work = (job_id, spec, str(table["scan_id"]), None, not fresh, token, _workspace_of(job), worker)
     if background:
         holder["work"] = work
         worker.start()
@@ -759,7 +785,7 @@ def sweep_once(limit: int = 50, *, background: bool = True) -> int:
     if not parity_scale_enabled():
         return 0
     resumed = 0
-    for job_id in _service().list_job_ids_where({"parity_scale.state": RUNNING}, limit=limit):
+    for job_id in _service().list_job_ids_where({"parity_scale.state": (RUNNING, QUEUED)}, limit=limit):
         try:
             resumed += bool(resume_job(job_id, background=background))
         except Exception:  # noqa: BLE001 — one bad job must not stop the sweep

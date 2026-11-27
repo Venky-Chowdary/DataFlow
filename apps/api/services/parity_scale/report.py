@@ -42,13 +42,25 @@ def _key_texts(keys: list[Any]) -> list[str]:
     return out
 
 
+def _ordinal(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def apply_scale_evidence(ev: TableEvidence, job: dict[str, Any]) -> None:
-    from services.parity_scale.verification import RUNNING, table_block
+    from services.parity_scale.verification import QUEUED, RUNNING, table_block
 
     block = table_block(job, ev.name)
     if not block:
         return
     status = block.get("status")
+    if status == QUEUED:
+        ev.check = CHECK_VERIFYING
+        ev.observations, ev.gate8_unaccounted, ev.capped = [], False, False
+        place = int(block.get("queue_position") or 0)
+        ev.note = (f"Verification of {ev.name} is queued" + (f" ({_ordinal(place)} in line)" if place else "")
+                   + "; it starts when capacity frees up.")
+        return
     if status == RUNNING:
         progress = block.get("progress") or {}
         done, queued = int(progress.get("items_done") or 0), int(progress.get("items_queued") or 0)

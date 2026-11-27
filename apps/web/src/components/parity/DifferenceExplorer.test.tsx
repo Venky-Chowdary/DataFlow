@@ -16,6 +16,7 @@ import { DifferenceExplorer } from "./DifferenceExplorer.js";
 import {
   contentMatchReport,
   provenReport,
+  verificationQueuedReport,
   verificationStoppedReport,
   verifiedWithDifferencesReport,
   verifyingReport,
@@ -204,6 +205,16 @@ describe("Trust Report with verification after the write (static)", () => {
     const t = text(view(report));
     assert.doesNotMatch(t, /sample/i);
     assert.match(t, /writes during the scan were not ruled out/);
+  });
+
+  it("a verification waiting for capacity reads Queued with its place, not running (review 2, N4)", () => {
+    const report = verificationQueuedReport();
+    assert.equal(verdictPresentation(report).label, "Verification queued");
+    const t = text(view(report));
+    assert.match(t, /Verification queued/);
+    assert.match(t, /Queued \(2nd in line\)/);
+    assert.match(t, /Waiting for capacity/);
+    assert.doesNotMatch(t, /Comparing/);
   });
 
   it("mounts Track W's AI decisions section as given", () => {
