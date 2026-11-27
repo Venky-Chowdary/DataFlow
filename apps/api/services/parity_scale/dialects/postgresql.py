@@ -344,7 +344,7 @@ class PostgresSide(SqlSide):
                 raise timeout_error(exc) from exc
             raise
 
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         import psycopg2
 
         self.tick()
@@ -367,7 +367,32 @@ class PostgresSide(SqlSide):
             raise
 
     # Kept for callers (tests) of the phase-1 name.
-    _run = execute
+    def _run(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+        return self.execute(sql, params)
+
+    # the lock watch (a pinned snapshot yields to sessions waiting on its locks) ---------
+    def session_id(self) -> Any:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT pg_backend_pid()")
+            return int(cur.fetchone()[0])
+
+    def prepare_monitor(self, monitor: Any) -> None:
+        monitor.autocommit = True
+
+    def lock_waiters(self, monitor: Any, session: Any) -> list[str]:
+        """Sessions whose lock request waits on this side's session (pg_blocking_pids)."""
+        with monitor.cursor() as cur:
+            cur.execute(
+                "SELECT l.pid, l.mode, coalesce(c.relname, l.locktype) FROM pg_locks l "
+                "LEFT JOIN pg_class c ON c.oid = l.relation "
+                "WHERE NOT l.granted AND %s = ANY(pg_blocking_pids(l.pid)) ORDER BY l.pid",
+                (int(session),),
+            )
+            rows = cur.fetchall()
+        return [f"session {pid} (waiting for {mode} on {rel})" for pid, mode, rel in rows]
+
+    def cancel_running(self, monitor: Any, session: Any) -> None:
+        self.conn.cancel()
 
     def estimate_rows(self) -> int | None:
         rows = self.execute("SELECT reltuples::bigint FROM pg_class WHERE oid = %s::regclass", [self.table_ref])
@@ -407,11 +432,12 @@ class PostgresSide(SqlSide):
             failed = True
             raise
         finally:
+            with contextlib.suppress(Exception):
+                cur.close()
             if self.pinned:
-                with contextlib.suppress(Exception):
-                    cur.close()
                 with self.conn.cursor() as plain:
                     plain.execute("ROLLBACK TO SAVEPOINT psd1_stream" if failed else "RELEASE SAVEPOINT psd1_stream")
             else:
-                cur.close()
-                self.conn.rollback()
+                # Also after the lock watch let the snapshot go mid-read (the cursor is gone).
+                with contextlib.suppress(Exception):
+                    self.conn.rollback()

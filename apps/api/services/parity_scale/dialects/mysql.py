@@ -243,7 +243,7 @@ class MySQLSide(SqlSide):
         self.pinned = True
         return {"kind": "pinned", "method": "consistent_snapshot_transaction", "at": str(at)}
 
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         import pymysql
 
         self.tick()
@@ -268,6 +268,64 @@ class MySQLSide(SqlSide):
                 self.conn.rollback()
             raise
 
+    # the lock watch (a pinned snapshot yields to sessions waiting on its metadata locks) --
+    #: An unbuffered result is being read: the watch cancels the query (KILL QUERY) first.
+    release_idle_stream = False
+
+    def session_id(self) -> Any:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT CONNECTION_ID()")
+            return int(cur.fetchone()[0])
+
+    def prepare_monitor(self, monitor: Any) -> None:
+        monitor.autocommit(True)
+
+    def lock_waiters(self, monitor: Any, session: Any) -> list[str]:
+        """Sessions waiting for a metadata lock on this table.
+
+        MySQL 8 names the holder (performance_schema.metadata_locks); where that is
+        off (MariaDB's default) a session in the "Waiting for table metadata lock"
+        state whose statement names this table counts (its text is only matched,
+        never kept).
+        """
+        schema = self.schema or None
+        with monitor.cursor() as cur:
+            found = self._metadata_lock_waiters(cur, session) if self.server == "mysql" else None
+            if found is not None:
+                return found
+            cur.execute(
+                "SELECT ID, INFO FROM information_schema.PROCESSLIST "
+                "WHERE STATE LIKE 'Waiting for table metadata lock%%' AND ID <> %s "
+                "AND (DB = COALESCE(%s, DATABASE()) OR INFO IS NULL OR INFO LIKE %s)",
+                (int(session), schema, f"%{self.table}%"),
+            )
+            rows = cur.fetchall()
+        table = self.table.lower()
+        return [f"session {pid} (waiting for a metadata lock on {self.table})"
+                for pid, info in rows if info is None or table in str(info).lower()]
+
+    def _metadata_lock_waiters(self, cur: Any, session: Any) -> list[str] | None:
+        """MySQL 8: who waits on a metadata lock this session holds; None when performance_schema is off."""
+        try:
+            cur.execute(
+                "SELECT DISTINCT wt.PROCESSLIST_ID, w.LOCK_TYPE FROM performance_schema.metadata_locks w "
+                "JOIN performance_schema.metadata_locks g ON g.OBJECT_TYPE = w.OBJECT_TYPE "
+                "AND g.OBJECT_SCHEMA = w.OBJECT_SCHEMA AND g.OBJECT_NAME = w.OBJECT_NAME "
+                "JOIN performance_schema.threads gt ON gt.THREAD_ID = g.OWNER_THREAD_ID "
+                "JOIN performance_schema.threads wt ON wt.THREAD_ID = w.OWNER_THREAD_ID "
+                "WHERE g.LOCK_STATUS = 'GRANTED' AND w.LOCK_STATUS = 'PENDING' AND gt.PROCESSLIST_ID = %s",
+                (int(session),),
+            )
+            rows = cur.fetchall()
+        except Exception:  # noqa: BLE001 — performance_schema off: the caller reads the process list
+            return None
+        return [f"session {pid} (waiting for a {str(kind).lower()} metadata lock on {self.table})"
+                for pid, kind in rows]
+
+    def cancel_running(self, monitor: Any, session: Any) -> None:
+        with monitor.cursor() as cur:
+            cur.execute("KILL QUERY %s", (int(session),))
+
     def stream(self, sql: str, params: Sequence[Any], batch: int) -> Iterator[tuple[Any, ...]]:
         import pymysql
 
@@ -284,6 +342,10 @@ class MySQLSide(SqlSide):
                     break
                 yield from rows
         finally:
-            cur.close()
+            try:
+                cur.close()
+            except Exception:  # noqa: BLE001 — a cancelled read: let the snapshot go, roll back below
+                if self.pinned:
+                    self.unpin()
             if not self.pinned:  # a pinned scan keeps its transaction (and its snapshot)
                 self.conn.commit()

@@ -27,6 +27,11 @@ class UnitTimeout(Exception):
     """A statement exceeded its time limit; the driver halves or gives up the unit."""
 
 
+class SnapshotYielded(Exception):
+    """A pinned side let its snapshot go part way through a streamed read (a session was
+    waiting on a lock the snapshot held): the read is started again, statement by statement."""
+
+
 @dataclass(frozen=True)
 class LeafRow:
     """One row of a small differing unit.
@@ -107,6 +112,17 @@ class Side(ABC):
     def unpin(self) -> None:
         """Leave the pinned snapshot (or a failed attempt) and read statement by statement."""
         self.pinned = False
+
+    #: Why the pinned snapshot was given up early (a session waited on one of its locks).
+    yield_reason = ""
+
+    def watch_locks(self, interval_s: float) -> str:
+        """Watch for sessions waiting on a lock the pinned snapshot holds; ``""`` or why it cannot."""
+        return ""
+
+    def release_pin(self) -> None:
+        """Let the snapshot go now (safe to call from the scan's thread at any time)."""
+        self.unpin()
 
     # column lists in plan order -------------------------------------------------
     def column_name(self, col: ColumnPlan) -> str:

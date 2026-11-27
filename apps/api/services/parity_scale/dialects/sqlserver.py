@@ -259,7 +259,7 @@ class SqlServerSide(SqlSide):
             except (AttributeError, TypeError, ValueError):
                 pass
 
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         self.tick()
         inner = self._driver_conn()
         if self.timeout_seconds and inner is not None and hasattr(inner, "query_timeout"):

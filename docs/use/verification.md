@@ -138,7 +138,19 @@ comparing every row inside both databases (see
   - MySQL / MariaDB InnoDB keeps undo history for the snapshot, so the undo
     log grows on a busy server;
   - on a PostgreSQL hot standby, replication can cancel a long snapshot
-    (a recovery conflict), so a standby is never pinned.
+    (a recovery conflict), so a standby is never pinned;
+  - the snapshot holds a lock on the table it has read: PostgreSQL an
+    `AccessShareLock`, MySQL / MariaDB a shared metadata lock. A `TRUNCATE`,
+    a table swap or rename, or DDL needs an exclusive lock and would wait
+    for the snapshot (and everything queued behind it would wait too). So a
+    second connection watches for any session waiting on those locks
+    (`pg_blocking_pids`; MySQL `performance_schema.metadata_locks`, or on
+    MariaDB the process list's "Waiting for table metadata lock"), about
+    once a second, and the comparison lets its snapshot go as soon as one
+    waits: the waiting statement proceeds within about a second, the
+    comparison continues statement by statement, and the result reads
+    **no difference found** with "released the snapshot so session … could
+    proceed". Where no second connection can watch, nothing is pinned.
   Past the longest hold the comparison lets the snapshot go and continues
   statement by statement; a server whose `idle_in_transaction_session_timeout`
   (or `transaction_timeout`) is shorter than the hold is not pinned at all.

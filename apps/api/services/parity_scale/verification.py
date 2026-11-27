@@ -353,6 +353,9 @@ def side_opener(spec: dict[str, Any]) -> Callable[[str, Any], Any]:
         side = spec["source"] if role == "source" else spec["destination"]
         kwargs: dict[str, Any] = {"role": role, "plan": plan, "table": side["table"],
                                   "connection": connect(side["engine"], side["cfg"])}
+        if str(side["engine"]).lower() != "sqlite":
+            # A second connection for the lock watch of a pinned snapshot.
+            kwargs["connect"] = lambda: connect(side["engine"], side["cfg"])
         if side["schema"] or side["engine"] in {"postgresql", "sqlserver"}:
             kwargs["schema"] = side["schema"] or {"postgresql": "public", "sqlserver": "dbo"}[side["engine"]]
         return open_side(side["engine"], **kwargs)

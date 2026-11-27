@@ -34,7 +34,7 @@ from typing import Any
 
 from services.parity_scale import require_enabled
 from services.parity_scale.ce1 import ALGORITHM, CE_VERSION, HASH_SPEC
-from services.parity_scale.dialects.base import EMPTY, LeafRow, Side, UnitTimeout, add
+from services.parity_scale.dialects.base import EMPTY, LeafRow, Side, SnapshotYielded, UnitTimeout, add
 from services.parity_scale.plan import PlanError, TablePlan, require_pair
 from services.parity_scale.store import ScanStore, decode_key, encode_key, utc_now
 
@@ -90,6 +90,9 @@ class ScanConfig:
     pin_max_hold_s: float | None = None
     #: Why the scan is not pinned at all (a setting), for the evidence.
     pin_off_reason: str = ""
+    #: How often a pinned side looks for sessions waiting on its snapshot's locks (a
+    #: TRUNCATE, a table swap, DDL); it lets the snapshot go as soon as one waits.
+    lock_poll_s: float = 1.0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ScanConfig":
@@ -278,6 +281,13 @@ class ParityScan:
             side.unpin()
             consistency[role] = {"kind": "not_established", "reason": f"pinning failed ({type(exc).__name__})"}
         if consistency[role].get("kind") == "pinned":
+            # The snapshot holds locks (PostgreSQL AccessShareLock, MySQL metadata locks): it
+            # must yield to a TRUNCATE / swap / DDL, so it is held only while that is watched.
+            refusal = side.watch_locks(self.config.lock_poll_s)
+            if refusal:
+                side.release_pin()
+                consistency[role] = {"kind": "not_established", "reason": refusal}
+                return
             self._pinned_at[role] = time.monotonic()
 
     def _tick(self) -> None:
@@ -295,13 +305,26 @@ class ParityScan:
         for role, side in list(self._sides.items()):
             if role in self._pinned_at and self._held_for(role) >= cap:
                 held = self._held_for(role)
-                side.unpin()
+                side.release_pin()
                 del self._pinned_at[role]
                 consistency[role] = {
                     **(consistency.get(role) or {}), "kind": "not_established", "held_s": held,
                     "reason": (f"the snapshot was held for its maximum ({int(cap // 60)} minutes) and let go; "
                                "the rest of the scan read the table statement by statement"),
                 }
+
+    def _collect_yields(self) -> None:
+        """A side whose lock watch let its snapshot go (a session waited on it): say so."""
+        consistency = self.state.setdefault("consistency", {})
+        for role, side in list(self._sides.items()):
+            reason = str(getattr(side, "yield_reason", "") or "")
+            if not reason or role not in self._pinned_at:
+                continue
+            held = self._held_for(role)
+            side.release_pin()
+            del self._pinned_at[role]
+            consistency[role] = {**(consistency.get(role) or {}), "kind": "not_established",
+                                 "held_s": held, "reason": reason}
 
     def _record_holds(self) -> None:
         consistency = self.state.setdefault("consistency", {})
@@ -310,6 +333,7 @@ class ParityScan:
                 consistency[role]["held_s"] = self._held_for(role)
 
     def close(self) -> None:
+        self._collect_yields()
         self._record_holds()
         self._pinned_at.clear()
         if self._pool is not None:
@@ -376,6 +400,7 @@ class ParityScan:
                         self.state["inflight"] = {"t": item["t"], "since": utc_now()}
                         self.store.save(self.state["scan_id"], {**self.state, "queue": [item, *self.state["queue"]]})
                     self._process(item)
+                    self._collect_yields()
                     self.state.pop("inflight", None)
                     self.state["items_done"] += 1
                 self.state["elapsed_s"] = round(float(self.state["elapsed_s"]) + time.monotonic() - t0, 6)
@@ -445,6 +470,7 @@ class ParityScan:
         self._finish()
 
     def _finish(self) -> None:
+        self._collect_yields()
         self._record_holds()
         if not self.config.pin_snapshot and self.config.pin_off_reason:
             self.state.setdefault("consistency", {})["off"] = self.config.pin_off_reason
@@ -952,6 +978,11 @@ class ParityScan:
             )
         except UnitTimeout as exc:
             self._not_compared(item, f"streamed pass timed out: {exc}")
+            return
+        except SnapshotYielded:
+            # A session waited on the snapshot's locks mid-read: that side let it go; this part
+            # is read again, statement by statement (nothing of it was recorded).
+            self.state["queue"].insert(0, item)
             return
         diff = self.state["diff"]
         if item.get("nulls"):
