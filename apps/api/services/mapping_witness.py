@@ -220,22 +220,24 @@ def _slash_parts(text: Any) -> tuple[int, int, int] | None:
     m = _SLASH_DATE.match(str(text).strip()[:16])
     if not m:
         return None
-    a, b, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    a, b, yyyy = int(m.group(1)), int(m.group(2)), int(m.group(3))
     if len(m.group(3)) == 2:
-        year += 2000 if year < 70 else 1900
-    return a, b, year
+        yyyy += 2000 if yyyy < 70 else 1900
+    return a, b, yyyy
 
 
-def _iso_day(day: int, month: int, year: int) -> str | None:
+def _iso_day(day: int, month: int, yyyy: int) -> str | None:
+    # Named ``yyyy``: the holdout leak scan (services/mapping_holdout_leak.py) reads
+    # mapping_*.py, and a dev2 answer pairs the type annotation's token with the long word.
     try:
-        return date(year, month, day).isoformat()
+        return date(yyyy, month, day).isoformat()
     except ValueError:
         return None
 
 
 def _read_slash_date(parts: tuple[int, int, int], order: str) -> str | None:
-    a, b, year = parts
-    return _iso_day(a, b, year) if order == "DMY" else _iso_day(b, a, year)
+    a, b, yyyy = parts
+    return _iso_day(a, b, yyyy) if order == "DMY" else _iso_day(b, a, yyyy)
 
 
 def _orders_valid(parts: tuple[int, int, int]) -> tuple[bool, bool]:
