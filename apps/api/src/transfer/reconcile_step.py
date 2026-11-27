@@ -9789,6 +9789,12 @@ def run_reconciliation(
         records=records if isinstance(records, list) else None,
         rows_written=int(rows_written or 0), validation_mode=validation_mode,
     )
+    # D335: the watermark row appended twice fails, whatever the counts say.
+    from .stream_boundary_keyed import apply_boundary_duplicate_gate
+
+    recon = apply_boundary_duplicate_gate(
+        recon, dest_summary=dest_summary, endpoint=endpoint, mappings=mappings
+    )
     if isinstance(dest_summary, dict) and dest_summary.get("shape_recipe_hash"):
         # G-1: on a shaped run both digests derive from the same stream — a
         # dropped or silently skipped recipe step leaves them equally
