@@ -156,7 +156,58 @@ gate passes.
 ### Dropping fields on purpose
 
 A source column must be mapped or declared omitted; otherwise the run is
-refused. The field reduction ledger goes further and records why each dropped
+refused. That holds when the destination table already exists and lacks the
+column, in every sync mode: the column is added when the schema policy approves
+it (propagate columns, or backfill new fields) or the drift is acknowledged for
+the run, and otherwise the run stops before the first write and names the
+column. Under manual review the run never adds a column on its own to a table
+that existed before the run, including a field a document source first shows
+partway through the run: the run stops before that batch. A table the run
+created is the run's own: a field first seen later is added to it and reported
+as "added during the run" in the job summary and the Trust Report. A field you
+declared omitted is never written, even if it first appears late.
+
+In a job that moves several tables, each table is checked with the map it
+writes with, at Validate and before it is written, and the reports name each
+left-out column as `table.column`. A quarantine replay is checked the same way.
+
+### Resuming with a decision
+
+When a run stops on a field, the message ends with: "Nothing of that batch was
+written; the batches before it are committed. Resume the job with schema_policy
+set to propagate_columns (or backfill_new_fields true) to add the field, or with
+the field in omit_columns to leave it out, and a reason; the resume continues
+from that batch."
+
+That is `POST /api/v1/connectors/jobs/{job_id}/resume` with a body such as
+`{"schema_policy": "propagate_columns", "reason": "doc is a new product field"}`
+or `{"omit_columns": ["doc"], "reason": "not needed downstream"}`. It needs the
+job.manage permission (the one that approves destination changes). Who decided,
+the reason and the decision are recorded on the job (`resume_decision`) and in
+the audit log. `/rerun` takes the same decision as `schema_decision`.
+`omit_columns` may name only the columns the stop named (the job's
+`error_details.unaccounted_sources`); any other column is refused with 422,
+because leaving out a column the job already writes would write the remaining
+rows without its values. `/retry` runs the job as it was and refuses a
+`schema_decision` with 422. A field met mid-run is added without a decision
+only to a table this run created; a table whose existence could not be read
+before the run counts as existing, so the run stops. In a multi-table job,
+every SCD2, mirror and CDC table is judged with its own column map before the
+first table is written.
+A field flattened out of a document (for example `nested_city` from `nested`)
+counts as carried when its parent object is written whole, and the reports say
+"carried inside nested"; if the parent is transformed or not written, the field
+needs its own decision. A run started without Validate
+(quarantine replay, the SDK) gets the same check at Execute. In a job that moves
+several tables, a table with more columns than the first is written with its
+own columns.
+
+A run that leaves a column out says so. Gate-8 compares the columns the run
+wrote, so its message, the trust score's completeness note and the Trust
+Report's confidence statement name each source column that was not migrated
+and why (declared omitted, or left out under an acknowledged schema drift).
+
+The field reduction ledger goes further and records why each dropped
 field was dropped:
 
 - every source field gets one disposition: carried, folded into a target, or

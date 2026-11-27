@@ -323,6 +323,15 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
     else:
         outcome = 55.0
         outcome_note = "In progress — score is provisional."
+    # Gate-8 covers the columns the run wrote; name the ones it left out, and
+    # never score a column nobody decided on as full completeness (R9).
+    from services.column_coverage_report import column_coverage_of, undecided_columns
+
+    left_out = column_coverage_of(j) if status in {"completed", "success"} else None
+    if left_out:
+        outcome_note = f"{outcome_note} {left_out['statement']}"
+        if undecided_columns(left_out):
+            outcome = min(outcome, 78.0)
     factors.append({
         "id": "completeness",
         "label": "Completeness",

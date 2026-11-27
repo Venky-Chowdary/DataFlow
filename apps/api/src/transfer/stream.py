@@ -297,6 +297,7 @@ def stream_database_transfer(
     mappings_inherited: bool = False,
     initial_batch: Any = None,
     workspace_id: str = "",
+    per_stream_coverage: dict[str, Any] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -340,6 +341,7 @@ def stream_database_transfer(
             mappings_inherited=mappings_inherited,
             initial_batch=initial_batch,
             workspace_id=workspace_id,
+            per_stream_coverage=per_stream_coverage,
         )
         ok = True
         return result
@@ -395,6 +397,7 @@ def _stream_database_transfer_impl(
     mappings_inherited: bool = False,
     initial_batch: Any = None,
     workspace_id: str = "",
+    per_stream_coverage: dict[str, Any] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -792,6 +795,8 @@ def _stream_database_transfer_impl(
     try:
         from services.export_dialect import tsv_null_from
 
+        from .source_column_coverage import copy_declined_for_stream_map
+        from .stream_dest_procedure import copy_declined_for_borrowed_map
         from .stream_dest_procedure import decline_copy_for_destination_sql
 
         decline_copy_for_destination_sql(dest_proc_plan)
@@ -807,6 +812,9 @@ def _stream_database_transfer_impl(
                 or bool(risk_contract_columns)
                 or keyless_merge_target
                 or copy_declined_for_replay(run.cfg)
+                or copy_declined_for_borrowed_map(run.cfg, inherited=mappings_inherited)
+                or (per_stream_coverage is not None and not mappings_inherited
+                    and copy_declined_for_stream_map(run.cfg, per_stream_coverage.get("dest_types")))
                 # G7-F3: engine COPY routes write the default TSV codec only.
                 or tsv_null_from(run.cfg.dest_cfg) != "empty"
             ) else _try_copy_fast_path(
@@ -841,6 +849,8 @@ def _stream_database_transfer_impl(
         rows_copied, run.cfg.ddl_log, run.tally.dest_summary, run.cfg.columns = fast
         run.tally.dest_summary["copy_fast_path"] = "used"
         mark_write_complete(run.cfg.destination, str(run.cfg.dest_table or ""))  # D302: kept on a later cancel
+        if run.cfg.coverage_record:  # this table's verdict (multi-table run, own map)
+            run.tally.dest_summary["schema_propagation"] = run.cfg.coverage_record
         if run.cfg.pk_target_cols:
             run.tally.dest_summary.setdefault("conflict_columns", list(run.cfg.pk_target_cols))
             run.tally.dest_summary.setdefault("primary_key_columns", list(run.cfg.pk_target_cols))
@@ -1569,6 +1579,11 @@ def _stream_database_transfer_impl(
     from services.shape_contract import write_ready_mappings
 
     # Pending extras and intentional omits stay off INSERT/MERGE (name-addressed).
+    from .source_column_coverage import enforce_stream_coverage, omitted_source_names
+
+    if per_stream_coverage is not None:  # one table of a multi-table run: its own map
+        enforce_stream_coverage(run, probe, write_columns, per_stream_coverage)
+    run.cfg.omitted_sources = omitted_source_names(run.cfg.mappings)
     run.cfg.mappings = write_ready_mappings(run.cfg.mappings)
     # Schemaless sources: always allow ADD COLUMN when attrs appear mid-transfer.
     if run.cfg.src_type in ("dynamodb", "mongodb", "elasticsearch", "redis", "kafka"):
@@ -1684,6 +1699,8 @@ def _stream_database_transfer_impl(
     run.tally.dest_summary: dict[str, Any] = {"resumed_checkpoint_rows": run.tally.written} if resumed_pass else {}
     if run.cfg.resume_write_complete:
         _seed_write_complete_summary(run.tally.dest_summary, checkpoint)
+    if run.cfg.coverage_record:  # this table's verdict (multi-table run, own map)
+        run.tally.dest_summary["schema_propagation"] = run.cfg.coverage_record
     # Failed-Gate-8 restore guard: renamed-aside route tables (armed once,
     # inside the held txn) — stamped onto dest_summary at stream end.
     run.tally.route_backup_state: dict[str, Any] = {}

@@ -806,6 +806,18 @@ def test_salesforce_snowflake_fixture_preserves_declared_number_precision(
 
 ROUTES = sorted(LIVE_MATRIX)
 
+#: Source fields the matrix does not move. A run without Validate refuses a
+#: source column that is neither mapped nor declared omitted (G13), so they are
+#: declared here (the Stripe stub's customers carry ``object`` and ``email``).
+_UNMOVED_SOURCE_FIELDS = {"stripe": ("object", "email")}
+
+
+def _declared_omissions(src_fmt: str) -> list[dict[str, Any]]:
+    return [
+        {"source": c, "target": "", "intentional_omit": True}
+        for c in _UNMOVED_SOURCE_FIELDS.get(src_fmt, ())
+    ]
+
 
 @pytest.mark.parametrize(
     "route",
@@ -852,7 +864,7 @@ def test_live_transfer_route(
         sync_mode="full_refresh_overwrite",
         skip_preflight=True,
         validation_mode=validation_mode,
-        mappings=MAPPINGS,
+        mappings=[*MAPPINGS, *_declared_omissions(src_fmt)],
     )
 
     # Rely on snowflake_conn auto-patch for local accounts — nesting an outer

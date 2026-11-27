@@ -8,6 +8,7 @@ import type { ParityReport, ParitySummary } from "../../lib/parity";
 
 export const reportInitial: ParityReport = {
   "ai_decisions_attested_sha256": "d351240aa64c0d396b3638454aa0aa305f7eade05c03bec44c2eee24a9bb8791",
+  "column_coverage": null,
   "confidence": {
     "bound_valid": true,
     "differences_in_sample": 0,
@@ -230,6 +231,7 @@ export const reportInitial: ParityReport = {
 
 export const reportResynced: ParityReport = {
   "ai_decisions_attested_sha256": "b59f52c86550a46f490929047766f0695bfbf0b05ad245180418bc8ed602377e",
+  "column_coverage": null,
   "confidence": {
     "bound_valid": true,
     "differences_in_sample": 0,
@@ -416,6 +418,7 @@ export const reportResynced: ParityReport = {
 
 export const reportSigned: ParityReport = {
   "ai_decisions_attested_sha256": "b59f52c86550a46f490929047766f0695bfbf0b05ad245180418bc8ed602377e",
+  "column_coverage": null,
   "confidence": {
     "bound_valid": true,
     "differences_in_sample": 0,

@@ -178,9 +178,62 @@ def unmapped_sources(source_columns: list[str], mappings: list[dict]) -> list[st
     return classify_source_coverage(source_columns, mappings)["unaccounted"]
 
 
+#: Transforms that carry a value with every key intact: the identity set
+#: (``transform_engine._IDENTITY_TRANSFORMS``) and the JSON document carry.
+_WHOLE_VALUE_TRANSFORMS = frozenset({
+    "", "none", "identity", "passthrough", "string", "varchar", "text",
+    "json", "parse_json", "to_json",
+})
+
+
+def writes_value_whole(mapping: Mapping[str, Any] | None) -> bool:
+    """True when this mapping writes its source value whole, keys untouched.
+
+    A transform other than a pass-through or the JSON carry, a code crosswalk
+    or a pipeline can drop or rewrite what the value holds, so it is not whole.
+    """
+    if not mapping or is_intentional_omit(mapping) or not str(mapping.get("target") or "").strip():
+        return False
+    for key in ("transform", "engine_transform", "engineTransform"):
+        if str(mapping.get(key) or "").strip().lower() not in _WHOLE_VALUE_TRANSFORMS:
+            return False
+    return not any(mapping.get(key) for key in ("code_crosswalk", "pipeline", "column_pipeline", "steps"))
+
+
+def carried_by_parent(
+    column: str,
+    mappings: list[dict] | None,
+    lineage: Mapping[str, str] | None,
+) -> str:
+    """The source column whose whole value carries ``column``, or ``""``.
+
+    ``lineage`` is the flattener's ``{child: parent}`` (never a name-prefix
+    guess). Any ancestor written whole carries the child: its keys travel
+    inside that column. Lead decision on G13 (27 Nov).
+    """
+    if not lineage:
+        return ""
+    parents = {_norm(str(k)): str(v) for k, v in lineage.items() if str(k).strip() and str(v).strip()}
+    whole = {
+        _norm(str(m.get("source") or "")): str(m.get("source") or "")
+        for m in mappings or []
+        if isinstance(m, dict) and writes_value_whole(m)
+    }
+    seen: set[str] = set()
+    node = _norm(column)
+    while node in parents and node not in seen:
+        seen.add(node)
+        parent = parents[node]
+        if _norm(parent) in whole:
+            return whole[_norm(parent)]
+        node = _norm(parent)
+    return ""
+
+
 def classify_source_coverage(
     source_columns: list[str] | None,
     mappings: list[dict] | None,
+    lineage: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Account for every source column: written, declared omitted, or neither.
 
@@ -206,11 +259,21 @@ def classify_source_coverage(
             written.append(src)
     written_l = {_norm(s) for s in written}
     omitted_l = {_norm(s) for s in omitted}
-    unaccounted = [c for c in cols if _norm(c) not in written_l and _norm(c) not in omitted_l]
+    undecided = [c for c in cols if _norm(c) not in written_l and _norm(c) not in omitted_l]
+    # A flattened child whose parent object is written whole is carried inside
+    # it: its values reach the destination, so it is not an undecided column.
+    carried = [
+        {"column": c, "parent": parent}
+        for c in undecided
+        if (parent := carried_by_parent(c, mappings, lineage))
+    ]
+    carried_l = {_norm(e["column"]) for e in carried}
+    unaccounted = [c for c in undecided if _norm(c) not in carried_l]
     return {
         "source_count": len(cols),
         "written": written,
         "omitted": omitted,
+        "carried": carried,
         "unaccounted": unaccounted,
         "accounted": len(cols) - len(unaccounted),
         "complete": not unaccounted,

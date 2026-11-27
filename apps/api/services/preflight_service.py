@@ -2332,7 +2332,11 @@ def run_file_preflight(
 
     # Mapping contract — every source column accounted for (G13) and every
     # required destination column filled (G14).
+    from services.flatten_protection import coverage_lineage
+
+    lineage = coverage_lineage(source_format, source_config, sample_rows, mappings)
     src_coverage, contract_gates, contract_blockers = build_mapping_contract_gates(
+        lineage=lineage,
         source_columns=list(columns or []),
         mappings=list(mappings or []),
         destination_table_exists=destination_table_exists,
@@ -2359,6 +2363,7 @@ def run_file_preflight(
         source_column_types=dict(column_types or {}),
         target_column_types=dict(destination_column_types or {}),
         sample_rows=list(sample_rows or []),
+        lineage=lineage,
     )
     out["field_reduction_ledger"] = field_reduction
     contract_gates = [*contract_gates, reduction_gate]

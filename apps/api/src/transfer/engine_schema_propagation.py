@@ -38,15 +38,31 @@ def _record_schema_propagation(
     columns: list[str],
     mappings: list[dict[str, Any]],
     dest_schema_types: dict[str, str] | None,
+    request: Any = None,
+    sample_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     """Say on the job which source columns the run added, and which it left out.
 
     A column added to an existing destination is applied silently otherwise,
-    and a live source column no mapping covers (a run that skipped preflight)
-    simply never moves: the operator found out by reading the destination
-    (D165). Both are named here.
+    and a live source column no mapping covers simply never moves: the operator
+    found out by reading the destination (D165). Both are named here, with the
+    columns the operator declared omitted, so Gate-8 and the Trust Report can
+    say which source columns the verified rows do not carry.
+
+    A run that skips Validate never reaches G13, so the same predicate refuses
+    it here, before the first write (``source_column_coverage``).
     """
     from services.mapping_constraints import write_mappings
+
+    from .source_column_coverage import (
+        refuse_unaccounted_without_validate,
+        refuse_unapproved_add_without_validate,
+        source_column_coverage,
+        stamp_mid_run_column_policy,
+    )
+
+    if request is not None:
+        stamp_mid_run_column_policy(request, dest_schema_types)
 
     live = {str(c).lower() for c in (dest_schema_types or {})}
     added = (
@@ -58,13 +74,21 @@ def _record_schema_propagation(
         if live
         else []
     )
-    covered = {
-        str(m.get("source") or "").lower()
-        for m in mappings or []
-        if isinstance(m, dict)
-    }
-    skipped = [str(c) for c in columns or [] if str(c).lower() not in covered]
-    if not added and not skipped:
+    from services.flatten_protection import coverage_lineage
+
+    source = getattr(request, "source", None)
+    lineage = coverage_lineage(
+        str(getattr(source, "format", "") or ""), getattr(source, "extra", None),
+        sample_rows, mappings,
+    )
+    coverage = source_column_coverage(columns, mappings, lineage)
+    skipped = [str(c) for c in coverage["unaccounted"]]
+    present = {str(c).strip().lower() for c in columns or []}
+    omitted = list(
+        dict.fromkeys(str(c) for c in coverage["omitted"] if str(c).strip().lower() in present)
+    )
+    carried = list(coverage.get("carried") or [])
+    if not added and not skipped and not omitted and not carried:
         return
     if skipped:
         logger.warning(
@@ -76,8 +100,16 @@ def _record_schema_propagation(
     mongo.update_job_status(
         job_id,
         "running",
-        schema_propagation={"added_columns": added, "skipped_columns": skipped},
+        schema_propagation={
+            "added_columns": added,
+            "skipped_columns": skipped,
+            "omitted_columns": omitted,
+            "carried_columns": carried,
+            "source_column_count": len(columns or []),
+        },
     )
+    refuse_unaccounted_without_validate(request, columns, mappings, lineage)
+    refuse_unapproved_add_without_validate(request, columns, mappings, dest_schema_types)
 
 
 def _forget_cached_table_shapes(*endpoints: Any) -> None:

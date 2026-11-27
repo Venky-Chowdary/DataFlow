@@ -245,6 +245,7 @@ def build_mapping_contract_gates(
     dest_columns: list[str] | None = None,
     dest_recreated: bool = False,
     dest_emptied: bool = False,
+    lineage: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Source coverage (G13), dest requirements (G14), dest-exists shape (G15).
 
@@ -257,7 +258,7 @@ def build_mapping_contract_gates(
     Returns ``(source_coverage, gates, blockers)``. G15 does not add blockers.
     """
     coverage, cov_gate = build_source_coverage_gate(
-        source_columns=list(source_columns or []), mappings=list(mappings or [])
+        source_columns=list(source_columns or []), mappings=list(mappings or []), lineage=lineage
     )
     req_gate = build_destination_requirements_gate(
         destination_table_exists=destination_table_exists,
@@ -282,6 +283,7 @@ def build_mapping_contract_gates(
         generated_columns=generated_columns,
         dest_recreated=dest_recreated,
         dest_emptied=dest_emptied,
+        lineage=lineage,
     )
     coverage = {**coverage, "shape_contract": shape}
     shape_gate = build_shape_gate(shape)

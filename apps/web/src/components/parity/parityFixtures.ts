@@ -47,6 +47,7 @@ export function provenReport(over: Partial<ParityReport> = {}): ParityReport {
       transform_proof: null,
       reread: { orders: { status: "not_needed", keys: 0 } },
     },
+    column_coverage: null,
     ...over,
   };
 }
@@ -203,6 +204,7 @@ export function failedRunReport(over: Partial<ParityReport> = {}): ParityReport 
       transform_proof: null,
       reread: {},
     },
+    column_coverage: null,
     ...over,
   };
 }

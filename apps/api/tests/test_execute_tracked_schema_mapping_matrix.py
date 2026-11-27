@@ -149,6 +149,10 @@ def test_intelligent_cross_schema_mapping(dest_driver: str, tmp_path: Path) -> N
         sync_mode="upsert",
         skip_preflight=True,
         validation_mode="strict",
+        # The auto-mapper proposes a source column the target lacks (salary)
+        # as a new column. Under manual_review Execute never adds one (Validate
+        # refuses it too), so the run approves additive columns explicitly.
+        schema_policy="propagate_columns",
         stream_contracts=[{
             "name": "employees",
             "sync_mode": "upsert",

@@ -488,27 +488,28 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
     dest_error: str | None = None
     dest_meta: dict = {}
 
-    dest_meta = inspect_destination_for_preflight(
-        connector_id=body.connector_id,
-        dest_type=body.dest_type,
-        dest_host=body.dest_host,
-        dest_port=body.dest_port,
-        dest_database=body.dest_database,
-        dest_table=body.dest_table,
-        dest_collection=body.dest_collection,
-        dest_schema=body.dest_schema,
-        dest_username=body.dest_username,
-        dest_password=body.dest_password,
-        dest_connection_string=body.dest_connection_string,
-        dest_warehouse=body.dest_warehouse,
-        dest_auth_source=body.dest_auth_source,
-        dest_auth_mode=body.dest_auth_mode,
-        dest_auth_role=body.dest_auth_role,
-        dest_api_key=body.dest_api_key,
-        dest_service_account=body.dest_service_account,
-        dest_kind=body.dest_kind,
-        dest_extra=dict(body.dest_extra or {}),
-    )
+    dest_probe_kwargs: dict[str, Any] = {
+        "connector_id": body.connector_id,
+        "dest_type": body.dest_type,
+        "dest_host": body.dest_host,
+        "dest_port": body.dest_port,
+        "dest_database": body.dest_database,
+        "dest_table": body.dest_table,
+        "dest_collection": body.dest_collection,
+        "dest_schema": body.dest_schema,
+        "dest_username": body.dest_username,
+        "dest_password": body.dest_password,
+        "dest_connection_string": body.dest_connection_string,
+        "dest_warehouse": body.dest_warehouse,
+        "dest_auth_source": body.dest_auth_source,
+        "dest_auth_mode": body.dest_auth_mode,
+        "dest_auth_role": body.dest_auth_role,
+        "dest_api_key": body.dest_api_key,
+        "dest_service_account": body.dest_service_account,
+        "dest_kind": body.dest_kind,
+        "dest_extra": dict(body.dest_extra or {}),
+    }
+    dest_meta = inspect_destination_for_preflight(**dest_probe_kwargs)
 
     if body.dest_kind == "file_export" or dest_meta.get("connected"):
         destination_connected = True
@@ -738,6 +739,28 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             acknowledgment_actor=ack.actor,
             acknowledgment_reason=ack.reason,
         )
+    # Each table of a multi-table request is judged with the map it writes with
+    # (Execute applies the same verdict per table before writing it).
+    from services.stream_coverage_gates import apply_per_stream_coverage, per_stream_coverage_gates
+
+    def _stream_dest_types(table: str) -> dict[str, str]:
+        meta = inspect_destination_for_preflight(
+            **{**dest_probe_kwargs, "dest_table": table, "dest_collection": None}
+        )
+        return meta.get("column_types") or {}
+
+    apply_per_stream_coverage(result, per_stream_coverage_gates(
+        stream_contracts=list(body.stream_contracts or []),
+        request_mappings=list(preflight_mappings or []),
+        source_connector_id=body.source_connector_id or "",
+        source_type=body.source_type or body.source_kind or "",
+        source_config=body.source_config,
+        dest_type=(dest_meta.get("db_type") or body.dest_type or "").lower(),
+        dest_column_types=_stream_dest_types,
+        schema_policy=body.schema_policy,
+        backfill_new_fields=bool(body.backfill_new_fields),
+        acknowledged=bool(ack.schema_drift),
+    ))
     try:
         audit_acknowledgments(
             ack,

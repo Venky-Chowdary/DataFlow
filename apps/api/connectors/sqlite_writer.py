@@ -922,6 +922,20 @@ def _sqlite_table_exists(path: str, table: str) -> bool:
         conn.close()
 
 
+def _sqlite_live_columns(path: str, table: str) -> dict[str, str]:
+    """``{column: declared type}`` of an existing table; ``{}`` when it is absent."""
+    if not _sqlite_table_exists(path, table):
+        return {}
+    from connectors.sqlite_common import sqlite_readonly_uri
+
+    conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True, timeout=8)
+    try:
+        rows = conn.execute("SELECT name, type FROM pragma_table_info(?)", (table,)).fetchall()
+        return {str(row[0]): str(row[1] or "") for row in rows if row[0]}
+    finally:
+        conn.close()
+
+
 def _stage_is_empty(conn: Any, stage_quoted: str) -> bool:
     """True when the overwrite stage holds no row (a missing stage counts)."""
     try:
@@ -937,11 +951,19 @@ def _publish_sqlite_stage(
     stage_name: str,
     live_name: str,
     columns: list[str],
+    add_missing_columns: bool = False,
 ) -> None:
     """Swap the staged load onto the live name in one transaction.
 
     A reader sees the previous snapshot until this commits, then the full new
     snapshot. A failure leaves the live table untouched.
+
+    The live table is kept (its constraints and identity), so a column the
+    stage holds and the live table lacks is added to it first when the run's
+    schema evolution was approved (``add_missing_columns``), with the stage's
+    declared type, inside the same savepoint: a failed publish rolls the
+    ADD COLUMN back with the rows (R7). Unapproved, the INSERT still fails
+    closed on the missing column.
     """
     live_quoted = quote_sql_identifier(live_name)
     try:
@@ -956,8 +978,30 @@ def _publish_sqlite_stage(
                 cur.execute(f"ALTER TABLE {stage_quoted} RENAME TO {live_quoted}")
                 return
             col_sql = ", ".join(quote_sql_identifier(c) for c in columns)
+            additions: list[str] = []
+            if add_missing_columns:
+                live_cols = {
+                    str(row[0]).lower()
+                    for row in cur.execute("SELECT name FROM pragma_table_info(?)", (live_name,))
+                }
+                stage_types = {
+                    str(row[0]): str(row[1] or "")
+                    for row in cur.execute(
+                        "SELECT name, type FROM pragma_table_info(?)", (stage_name,)
+                    )
+                }
+                for col in columns:
+                    if col and col.lower() not in live_cols and col in stage_types:
+                        typ = require_safe_type_stamp(
+                            stage_types[col], context="sqlite ALTER TABLE ADD COLUMN"
+                        )
+                        additions.append(
+                            f"ALTER TABLE {live_quoted} ADD COLUMN {quote_sql_identifier(col)} {typ}"
+                        )
             try:
                 cur.execute("SAVEPOINT df_stage_pub")
+                for statement in additions:
+                    cur.execute(statement)
                 cur.execute(f"DELETE FROM {live_quoted}")
                 cur.execute(
                     f"INSERT INTO {live_quoted} ({col_sql}) "
@@ -1195,8 +1239,22 @@ def write_mapped_rows(
             table_existed = not create_table
             physical = {}
 
+        # An atomic overwrite writes a new stage table that replaces the live
+        # one. With approved evolution (propagate / backfill) a source column
+        # the live table lacks is an ADD COLUMN on that table, as on every
+        # other engine: judge the stage against the live table's columns, so
+        # the column takes the additive lane below (its Map type stamp, or a
+        # refusal naming it before any write) and not the create-new refusal.
+        if (
+            not table_existed
+            and studio_err
+            and backfill_new_fields
+            and atomic_overwrite
+            and table_name != live_table_name
+        ):
+            physical = _sqlite_live_columns(path, live_table_name)
         # Create-new: partial Studio must not soft-bind Map VARCHAR.
-        if not table_existed and studio_err:
+        if not table_existed and studio_err and not physical:
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -1871,6 +1929,7 @@ def write_mapped_rows(
                     stage_name=table_name,
                     live_name=live_table_name,
                     columns=target_cols,
+                    add_missing_columns=bool(backfill_new_fields),
                 )
                 table_name = live_table_name
             meta_out = write_acc.gate8_meta(conflict_columns=conflict_cols or None)

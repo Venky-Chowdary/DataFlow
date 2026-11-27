@@ -74,8 +74,14 @@ def _auto_map(
         for column in columns
     }
 
-    if request.mappings:
+    from services.mapping_constraints import is_intentional_omit
+
+    # Rows that only declare omissions (a resume decision "leave doc out") are a
+    # decision about those columns, not a map: the rest is still auto-mapped.
+    declared_omits = [m for m in request.mappings or [] if is_intentional_omit(m)]
+    if any(not is_intentional_omit(m) for m in request.mappings or []):
         mappings = request.mappings
+        declared_omits = []
     elif request.destination.kind != "database":
         mappings = default_mappings(columns)
     else:
@@ -277,6 +283,11 @@ def _auto_map(
 
     if mappings is None:
         mappings = default_mappings(columns)
+    if declared_omits:
+        omitted = {str(m.get("source") or "").strip().lower() for m in declared_omits}
+        mappings = [
+            m for m in mappings if str(m.get("source") or "").strip().lower() not in omitted
+        ] + [dict(m) for m in declared_omits]
 
     if zone:
         mappings = apply_declared_source_timezone(

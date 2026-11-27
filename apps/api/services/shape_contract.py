@@ -200,6 +200,7 @@ def classify_dest_exists_shape(
     generated_columns: list[str] | None = None,
     dest_recreated: bool = False,
     dest_emptied: bool = False,
+    lineage: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Single dest-exists shape + per-column verdicts.
 
@@ -219,7 +220,7 @@ def classify_dest_exists_shape(
     dests = [str(c) for c in (dest_columns or []) if str(c).strip()]
     maps = list(mappings or [])
     dest_l = {_norm(c) for c in dests}
-    coverage = classify_source_coverage(sources, maps)
+    coverage = classify_source_coverage(sources, maps, lineage)
 
     if destination_table_exists is False or dest_recreated:
         shape = SHAPE_CREATE_NEW

@@ -109,6 +109,10 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
     from services.reversibility_enforce import record_on_success
 
     record_before_success_status()
+    # Gate-8 compared the columns this run wrote: name the ones it left out.
+    from services.column_coverage_report import stamp_column_coverage
+
+    stamp_column_coverage(mongo, job_id, fields)
     # A reversible run: which conditional columns were checked on every row. One checked on fewer rows
     # than were written is never reported as enforced: the job fails with that reason (review 4, H-1).
     shortfall = record_on_success(job_id, fields)
