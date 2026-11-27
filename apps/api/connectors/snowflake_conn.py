@@ -149,8 +149,9 @@ SNOWFLAKE_TOKEN_EXPIRED_MSG = (
     "field), then test it again."
 )
 _SNOWFLAKE_TOKEN_EXPIRED = re.compile(
-    r"\b394401\b|\b390318\b|(?:programmatic|oauth) access token (?:is |has )?expired|"
-    r"token (?:is |has )?expired",
+    # Not "Authentication token has expired" (390112): that is the session's own
+    # token, renewed by reconnecting, not the credential saved on the connector.
+    r"\b394401\b|\b390318\b|(?:programmatic|oauth) access token (?:is |has )?expired",
     re.I,
 )
 
