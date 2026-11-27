@@ -504,10 +504,53 @@ def judge_tables_before_any_write(
             )
         judged[name] = {
             "record": verdict["record"],
+            # The map the table writes with: adopted when it has none, and with
+            # the ADD COLUMN the policy approves planned and typed, as the
+            # single-table flow plans it (staged merges type their spool from it).
+            "mappings": _with_approved_adds(dst, mappings, schema, dest_types, stamp),
             "dest_types": dest_types,
             "existed": table_existed_before(dst, name),
         }
     return judged
+
+
+def _with_approved_adds(
+    destination: Any,
+    mappings: list[dict[str, Any]],
+    source_types: dict[str, Any],
+    dest_types: dict[str, str],
+    stamp: dict[str, Any],
+) -> list[dict[str, Any]]:
+    from services.db_type_utils import dest_declares_column_ddl
+    from services.schema_drift import (
+        PROPAGATE_POLICIES,
+        destination_evolution_approved,
+        plan_destination_evolution,
+    )
+
+    policy = str(stamp.get("policy") or "manual_review")
+    dest_db = str(getattr(destination, "format", "") or "").lower()
+    if not (
+        dest_types
+        and dest_declares_column_ddl(dest_db)
+        and destination_evolution_approved(policy, acknowledged=bool(stamp.get("acknowledged")))
+    ):
+        return mappings
+    from types import SimpleNamespace
+
+    from .mapping_write_stamp import stamp_additive_mappings_for_write
+
+    schema = {str(k): str(v) for k, v in (source_types or {}).items()}
+    planned, _types, _applied = plan_destination_evolution(
+        mappings, source_columns=list(schema), source_schema=schema, dest_types=dest_types,
+        dest_db=dest_db, adopt_unmapped=policy in PROPAGATE_POLICIES,
+    )
+    request = SimpleNamespace(
+        destination=destination, sync_mode="", schema_policy=policy, backfill_new_fields=False,
+    )
+    return stamp_additive_mappings_for_write(
+        request, planned, column_types=schema, dest_types=dest_types, dest_table_exists=True
+    )
 
 
 def _run_stamp(cfg: Any) -> dict[str, Any] | None:

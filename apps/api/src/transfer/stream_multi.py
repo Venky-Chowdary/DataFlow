@@ -294,7 +294,8 @@ def run_non_cdc_multi_stream_sequential(
         if resolve_effective_sync_mode(sync_mode, contract.sync_mode or sync_mode).lower() in (
             "full_refresh_mirror", "mirror", "scd2"
         ):
-            staged_tables.append((name, (own if isinstance(own, list) and own else mappings) or None))
+            # No map of its own: the table's own columns, as the row path adopts them.
+            staged_tables.append((name, own if isinstance(own, list) and own else None))
     judged = judge_tables_before_any_write(
         source=source, destination=destination, streams=staged_tables,
         request_mappings=mappings,
@@ -366,6 +367,8 @@ def run_non_cdc_multi_stream_sequential(
             use_mappings = (
                 stream_maps if isinstance(stream_maps, list) and stream_maps else mappings
             )
+            if stream_name in judged and not (isinstance(stream_maps, list) and stream_maps):
+                use_mappings = judged[stream_name]["mappings"]  # SCD2 / mirror: the map judged
             # The FK planner translates key columns through this map; without it
             # a reference would be emitted against a destination column name
             # that the load never wrote.

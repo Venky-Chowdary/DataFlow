@@ -2045,3 +2045,52 @@ def test_a_multi_table_stream_creating_its_table_still_adds_a_late_field(
 
     assert _docs_state(dst)[0] == ["id", "name", "doc"]
     assert summary["columns_added_during_run"] == ["doc"]
+
+
+# A staged-merge table with no map of its own writes with its own columns (the
+# map the row path adopts), not the first table's map: propagate adds a new
+# column, manual_review refuses naming the table.
+
+
+@pytest.mark.parametrize("policy", ["propagate_columns", "manual_review"])
+@pytest.mark.parametrize("mode", ["scd2", "mirror"])
+def test_staged_merge_table_without_its_own_map_writes_its_own_columns(
+    tmp_path, isolated, mode, policy  # noqa: F811
+):
+    src = _multi_sqlite_source(tmp_path, second="name TEXT, doc TEXT")
+    conn = sqlite3.connect(src)  # the first load: m2 has no doc yet
+    conn.execute("CREATE TABLE m2_old AS SELECT id, name FROM m2")
+    conn.execute("DROP TABLE m2")
+    conn.execute("ALTER TABLE m2_old RENAME TO m2")
+    conn.commit()
+    conn.close()
+    dst = tmp_path / "dst.sqlite"
+    inherited = _m("id", "name")  # the primary table's auto-map
+    first, _job = _run(isolated, _staged_request(src, dst, mode, {}, mappings=inherited, skip_preflight=True))
+    assert first.success, first.error
+    conn = sqlite3.connect(src)  # m2 gains doc
+    conn.execute("ALTER TABLE m2 ADD COLUMN doc TEXT")
+    conn.executemany("UPDATE m2 SET doc = ? WHERE id = ?", [(f"d{i}", i) for i in range(1, ROWS + 1)])
+    conn.commit()
+    conn.close()
+
+    result, _job = _run(isolated, _staged_request(
+        src, dst, mode, {}, mappings=inherited, skip_preflight=True,
+        schema_policy=policy, schema_policy_declared=True,
+    ))
+
+    conn = sqlite3.connect(dst)
+    try:
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(m2)")]
+        if policy == "propagate_columns":
+            assert result.success, result.error
+            assert "doc" in columns
+            assert conn.execute("SELECT count(*) FROM m2 WHERE doc IS NOT NULL").fetchone()[0] > 0
+        else:
+            assert not result.success
+            assert "Table m2" in str(result.error) and "Review ADD COLUMN proposals for doc" in str(result.error)
+            assert "doc" not in columns
+            # The remedy the refusal names is the policy above, which now adds it.
+            assert "propagate" in str(result.error)
+    finally:
+        conn.close()
