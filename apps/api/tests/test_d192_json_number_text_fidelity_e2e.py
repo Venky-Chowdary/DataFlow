@@ -201,6 +201,9 @@ def test_gate8_fails_a_write_that_drops_json_numeric_scale(client, monkeypatch):
     def _old_redump(text: str) -> str:  # the pre-fix write: parse + dump
         return vs.json_dumps_exact_numbers(vs.json_loads_exact(text), separators=(",", ":"))
 
+    # A jsonb -> jsonb PostgreSQL route now takes the binary COPY, which never
+    # re-dumps the document. The lossy write under test is the row path's.
+    monkeypatch.setenv("DATAWRAP_PG_PG_COPY", "0")
     pg = r.pg_conn()
     token = uuid.uuid4().hex[:8]
     table, dest_table = f"d192_g8_{token}", f"d192_g8_{token}_out"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from connectors.column_widen_restore import (
     writer_restore_guard,
 )
 from connectors.schema_drift import widen_existing_columns_native
+from connectors.batch_salvage import salvage_in_order
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
     extract_column_from_sql_error,
@@ -729,6 +731,44 @@ def _settle_forced_primary_key(
         "excluded_from_parity": True,
     }]
     return plan, column_sql
+
+
+_SPLIT_SAFE_ENGINES = frozenset({"INNODB"})
+_ENGINE_CLAUSE = re.compile(r"\)\s*ENGINE\s*=\s*([A-Za-z0-9_]+)", re.I)
+
+
+def _split_salvage_safe(cur: Any, table_name: str, cache: dict[str, bool] | None = None) -> bool:
+    """True when a failed multi-row INSERT into ``table_name`` leaves nothing behind.
+
+    Only a transactional engine (InnoDB) rolls a failed statement back whole;
+    MyISAM / Aria / MEMORY keep the rows before the bad one. Read through the
+    session's own view (``SHOW CREATE TABLE``), so a temporary table shadowing
+    the permanent one is what is judged — and any temporary table counts as not
+    safe. Unknown → False. ``cache`` holds the answer per table for one
+    ``write_mapped_rows`` call (a later call probes again).
+    """
+    if cache is not None and table_name in cache:
+        return cache[table_name]
+    safe = False
+    try:
+        cur.execute("SHOW CREATE TABLE `" + str(table_name).replace("`", "``") + "`")
+        row = cur.fetchone()
+        if isinstance(row, dict):
+            ddl = str(row.get("Create Table") or "")
+        else:
+            ddl = str(row[1]) if row and len(row) > 1 else ""
+        engine = _ENGINE_CLAUSE.search(ddl)
+        safe = (
+            "CREATE TEMPORARY TABLE" not in ddl.upper()
+            and engine is not None
+            and engine.group(1).upper() in _SPLIT_SAFE_ENGINES
+        )
+    except Exception:  # noqa: BLE001 - an unknown engine salvages row by row
+        logger.debug("table engine probe failed", exc_info=True)
+        safe = False
+    if cache is not None:
+        cache[table_name] = safe
+    return safe
 
 
 @writer_restore_guard
@@ -1796,6 +1836,10 @@ def write_mapped_rows(
                 )
                 return ok
 
+            # Per write call (not per run): is a split salvage safe for this table
+            # (one engine probe per table per call).
+            split_safe_cache: dict[str, bool] = {}
+
             def _land_dense_chunk(batch, chunk_idx, row_numbers):
                 nonlocal written, rows_skipped, rejected_details, transform_errors
                 nonlocal load_data_chunks, load_data_fallbacks
@@ -1905,7 +1949,10 @@ def write_mapped_rows(
                         if is_sql_data_error(chunk_exc) and salvage_policy(
                             policy, mappings
                         ) in SALVAGE_POLICIES:
-                            for row_i, row in enumerate(write_batch):
+
+                            def _salvage_one(row_i: int) -> None:
+                                nonlocal chunk_written
+                                row = write_batch[row_i]
                                 # D299: a cancel stops before the next per-row
                                 # commit, counting the rows already committed.
                                 cancel_checkpoint(written + chunk_written)
@@ -1950,6 +1997,40 @@ def write_mapped_rows(
                                         mappings=mappings,
                                     )
                                     transform_errors.append(str(row_exc)[:200])
+
+                            def _salvage_range(lo: int, hi: int) -> bool:
+                                """Rows ``lo..hi-1`` as one committed batch, or nothing."""
+                                nonlocal chunk_written
+                                cancel_checkpoint(written + chunk_written)
+                                try:
+                                    cur.executemany(insert_sql, write_batch[lo:hi])
+                                    conn.commit()
+                                except Exception as range_exc:
+                                    try:
+                                        conn.rollback()
+                                    except Exception as exc:
+                                        logger.debug("Cleanup exception suppressed: %s", exc, exc_info=exc)
+                                    if is_connection_lost(range_exc):
+                                        raise
+                                    return False
+                                chunk_written += hi - lo
+                                return True
+
+                            if _split_salvage_safe(cur, table_name, split_safe_cache):
+                                # Split the failed chunk until the bad rows stand alone
+                                # (connectors.batch_salvage): good halves commit as
+                                # batches, bad rows take the per-row path above.
+                                salvage_in_order(
+                                    len(write_batch),
+                                    attempt_range=_salvage_range,
+                                    salvage_row=_salvage_one,
+                                )
+                            else:
+                                # A non-transactional table keeps the rows a failed
+                                # multi-row INSERT wrote before its bad row: a batch
+                                # retry would write them twice. Row by row there.
+                                for row_i in range(len(write_batch)):
+                                    _salvage_one(row_i)
                             if use_ledger and chunk_written:
                                 try:
                                     mark_raw_chunk_committed(

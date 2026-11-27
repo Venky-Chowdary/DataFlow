@@ -30,6 +30,7 @@ from connectors.column_widen_restore import (
     writer_restore_guard,
 )
 from connectors.schema_drift import widen_existing_columns_native
+from connectors.batch_salvage import salvage_in_order
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.salvage_cancel import SalvageCancelGuard
 from connectors.sql_temporal import (
@@ -2909,7 +2910,10 @@ def write_mapped_rows(
                             # per rejected cell (was the CDC/quarantine throughput cliff).
                             # D299: a cancel during the salvage discards the chunk.
                             salvage_cancel = SalvageCancelGuard(conn, cur)
-                            for row_i, row in enumerate(batch):
+
+                            def _salvage_one(row_i: int) -> None:
+                                nonlocal chunk_written
+                                row = batch[row_i]
                                 held_now = _held_overwrite()
                                 salvage_cancel.check(
                                     written, held_overwrite=bool(held_now and held_now.active)
@@ -2985,6 +2989,56 @@ def write_mapped_rows(
                                         mappings=mappings,
                                     )
                                     transform_errors.append(str(row_exc)[:200])
+
+                            def _salvage_range(lo: int, hi: int) -> bool:
+                                """Rows ``lo..hi-1`` as one batch under a savepoint."""
+                                nonlocal chunk_written
+                                held_now = _held_overwrite()
+                                salvage_cancel.check(
+                                    written, held_overwrite=bool(held_now and held_now.active)
+                                )
+                                cur.execute("SAVEPOINT df_rows_sp")
+                                try:
+                                    _execute_values_insert(
+                                        cur, insert, [tuple(r) for r in batch[lo:hi]]
+                                    )
+                                except Exception as range_exc:
+                                    try:
+                                        cur.execute("ROLLBACK TO SAVEPOINT df_rows_sp")
+                                    except Exception as exc:  # noqa: BLE001 - a lost savepoint stops the salvage below
+                                        if not (_held_overwrite() and _held_overwrite().active):
+                                            try:
+                                                conn.rollback()
+                                            except Exception as exc2:
+                                                logger.warning(
+                                                    "Exception suppressed: %s", exc2, exc_info=exc2
+                                                )
+                                        raise RuntimeError(
+                                            "PostgreSQL lost the salvage savepoint "
+                                            f"({exc}); the {chunk_written} row(s) salvaged in "
+                                            "this chunk were rolled back and are not counted. "
+                                            f"Batch error: {range_exc}"
+                                        ) from range_exc
+                                    if is_connection_lost(range_exc):
+                                        raise
+                                    return False
+                                cur.execute("RELEASE SAVEPOINT df_rows_sp")
+                                chunk_written += hi - lo
+                                return True
+
+                            if redshift_upsert_cols:
+                                # Redshift deletes by key row by row before each insert.
+                                for row_i in range(len(batch)):
+                                    _salvage_one(row_i)
+                            else:
+                                # Split the failed chunk until the bad rows stand
+                                # alone (connectors.batch_salvage); good halves land
+                                # as batches, bad rows take the per-row path above.
+                                salvage_in_order(
+                                    len(batch),
+                                    attempt_range=_salvage_range,
+                                    salvage_row=_salvage_one,
+                                )
                             try:
                                 if use_ledger and chunk_written:
                                     mark_raw_chunk_committed(

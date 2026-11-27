@@ -1474,6 +1474,119 @@ def pg_pg_copy_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+_PG_INT_RANK = {"smallint": 1, "integer": 2, "bigint": 3}
+_PG_VARCHAR_RE = re.compile(r"^character varying(?:\((\d+)\))?$")
+_PG_NUMERIC_RE = re.compile(r"^numeric(?:\((\d+),(\d+)\))?$")
+_PG_TEMPORAL_RE = re.compile(
+    r"^(timestamp|time)(?:\((\d)\))? (with|without) time zone$"
+)
+
+
+def pg_assignment_safe(source_type: str, live_type: str) -> bool:
+    """True when ``INSERT INTO live SELECT <source_type value>`` stores the same value.
+
+    Identical types, and only the widenings whose assignment cast cannot change
+    a value: int2 -> int4 -> int8; varchar(n) -> varchar(m >= n) / varchar /
+    text; numeric(p,s) -> numeric(p' >= p, s) / numeric; timestamp(p) /
+    time(p) -> the same with p' >= p (same zone kind). Everything else — json,
+    jsonb, arrays, domains, enums, char(n), text -> varchar, any scale change —
+    must match exactly (``format_type`` spelling).
+    """
+    src = str(source_type or "").strip().lower()
+    live = str(live_type or "").strip().lower()
+    if src == live:
+        return True
+    if src in _PG_INT_RANK and live in _PG_INT_RANK:
+        return _PG_INT_RANK[live] >= _PG_INT_RANK[src]
+    s_vc, l_vc = _PG_VARCHAR_RE.match(src), _PG_VARCHAR_RE.match(live)
+    if s_vc and (live == "text" or l_vc):
+        if live == "text" or l_vc.group(1) is None:
+            return True
+        return s_vc.group(1) is not None and int(l_vc.group(1)) >= int(s_vc.group(1))
+    s_num, l_num = _PG_NUMERIC_RE.match(src), _PG_NUMERIC_RE.match(live)
+    if s_num and l_num and s_num.group(1) is not None:
+        if l_num.group(1) is None:
+            return True
+        return int(l_num.group(2)) == int(s_num.group(2)) and int(l_num.group(1)) >= int(
+            s_num.group(1)
+        )
+    s_t, l_t = _PG_TEMPORAL_RE.match(src), _PG_TEMPORAL_RE.match(live)
+    if s_t and l_t and s_t.group(1) == l_t.group(1) and s_t.group(3) == l_t.group(3):
+        return int(l_t.group(2) or 6) >= int(s_t.group(2) or 6)
+    return False
+
+
+_PG_LOCK_SQL = {
+    "ROW EXCLUSIVE": "LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE",
+    "ACCESS EXCLUSIVE": "LOCK TABLE {}.{} IN ACCESS EXCLUSIVE MODE",
+}
+
+
+def pg_lock_ordinary_table(
+    cur: Any, dest_schema: str, dest_table: str, mode: str = "ROW EXCLUSIVE"
+) -> None:
+    """``LOCK TABLE ... IN <mode> MODE`` (default ROW EXCLUSIVE) on an ordinary or
+    partitioned table. Both modes conflict with ``ALTER TABLE``.
+
+    Any other relation (foreign table, view, materialized view) cannot be
+    locked that way — and is not a target this copy path proves — so the
+    route declines to the row path instead of failing the job.
+    """
+    from psycopg2 import sql
+
+    from connectors.sql_identifiers import pg_regclass_literal
+
+    cur.execute(
+        "SELECT relkind FROM pg_class WHERE oid = to_regclass(%s)",
+        (pg_regclass_literal(dest_schema or "public", dest_table),),
+    )
+    row = cur.fetchone()
+    kind = str(row[0]) if row else ""
+    if kind not in {"r", "p"}:
+        raise FastPathUnavailable(
+            f"destination relation kind {kind or 'missing'!r} is not an ordinary table; "
+            "the row path writes it"
+        )
+    cur.execute(
+        sql.SQL(_PG_LOCK_SQL[mode]).format(
+            sql.Identifier(dest_schema or "public"), sql.Identifier(dest_table)
+        )
+    )
+
+
+def pg_lock_and_check_live_types(
+    cur: Any, dest_schema: str, dest_table: str, column_types: dict[str, str]
+) -> None:
+    """Inside the merge transaction: lock the destination, then decline on type drift.
+
+    The route's pre-flight probe runs on another connection; an ALTER (or a
+    concurrent create) between it and the merge would change what the merge's
+    INSERT ... SELECT casts into. ``ROW EXCLUSIVE`` (what the INSERT takes
+    anyway) is taken first so no ALTER can land between this check and the
+    merge. Column names match exactly — ``"Doc"`` and ``"doc"`` are two columns.
+    The merge is an INSERT ... SELECT from a staging table of the source's types,
+    so a live column only has to accept them unchanged (``pg_assignment_safe``).
+    """
+    from connectors.sql_identifiers import pg_regclass_literal
+
+    pg_lock_ordinary_table(cur, dest_schema, dest_table)
+    cur.execute(
+        "SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute "
+        "WHERE attrelid = to_regclass(%s) AND attnum > 0 AND NOT attisdropped",
+        (pg_regclass_literal(dest_schema or "public", dest_table),),
+    )
+    live = {str(name): str(typ) for name, typ in cur.fetchall()}
+    differs = [
+        col for col, typ in column_types.items()
+        if live.get(col) is None or (typ and not pg_assignment_safe(typ, live[col]))
+    ]
+    if differs:
+        raise FastPathUnavailable(
+            f"live destination column(s) {', '.join(differs)} are absent or typed "
+            "differently from the source at merge time; the row path casts per cell"
+        )
+
+
 def _pair_source_types(pairs: Any, types: dict[str, str]) -> dict[str, str]:
     """Target column -> the source's declared type, matched by case."""
     return {
@@ -1600,6 +1713,10 @@ def copy_between_postgres(
                 )
                 create = dst_cur.fetchone()[0] is None
                 if not create:
+                    # Under the same lock as the merge paths: no ALTER can land
+                    # between this check and the COPY (a foreign table or view
+                    # declines to the row path).
+                    pg_lock_ordinary_table(dst_cur, dest_schema, dest_table)
                     pg_decline_live_type_drift(
                         dst_cur,
                         f"{_quote(dest_schema or 'public')}.{_quote(dest_table)}",

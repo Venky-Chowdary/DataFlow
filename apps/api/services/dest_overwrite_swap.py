@@ -230,10 +230,17 @@ def sqlserver_constraint_fingerprint(cur: Any, schema: str, table: str) -> froze
 # ---------------------------------------------------------------- publish
 
 
-def _pg_empty_in_transaction(cur: Any, live_ref: str, live_reg: str) -> None:
-    referenced = bool(_rows(
+def _pg_is_fk_referenced(cur: Any, live_reg: str) -> bool:
+    return bool(_rows(
         cur, f"SELECT 1 FROM pg_constraint WHERE contype = 'f' AND confrelid = {live_reg}"
     ))
+
+
+def _pg_empty_in_transaction(
+    cur: Any, live_ref: str, live_reg: str, referenced: bool | None = None
+) -> None:
+    if referenced is None:
+        referenced = _pg_is_fk_referenced(cur, live_reg)
     if referenced:
         cur.execute(f"DELETE FROM {live_ref}")  # nosec B608
         return
@@ -263,8 +270,20 @@ def pg_empty_live_for_overwrite(
     if not exists or exists[0][0] is None:
         return False
     live_reg = _literal(live_ref) + "::regclass"
+    from services.copy_fast_path import pg_lock_ordinary_table
+
+    # Lock first, then check, then empty — one transaction, so no ALTER can
+    # land between the type check and the binary COPY. The mode is the one the
+    # emptying statement takes anyway (TRUNCATE: ACCESS EXCLUSIVE; DELETE of a
+    # FK-referenced table: ROW EXCLUSIVE), so there is no lock upgrade. A
+    # mismatch raises FastPathUnavailable; the caller rolls back (releasing
+    # the lock) and the row path writes the table.
+    referenced = _pg_is_fk_referenced(cur, live_reg)
+    pg_lock_ordinary_table(
+        cur, schema, table, "ROW EXCLUSIVE" if referenced else "ACCESS EXCLUSIVE"
+    )
     pg_decline_live_type_drift(cur, live_ref, column_types, action="overwrite")
-    _pg_empty_in_transaction(cur, live_ref, live_reg)
+    _pg_empty_in_transaction(cur, live_ref, live_reg, referenced)
     return True
 
 
@@ -279,8 +298,9 @@ def pg_decline_live_type_drift(
     quarantines per cell instead.
     """
     live_reg = _literal(live_ref) + "::regclass"
+    # Exact names: "Doc" and "doc" are two columns of one table.
     live_types = {
-        str(name).casefold(): str(typ)
+        str(name): str(typ)
         for name, typ in _rows(
             cur,
             "SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute "
@@ -289,8 +309,8 @@ def pg_decline_live_type_drift(
     }
     differs = [
         col for col, typ in column_types.items()
-        if live_types.get(col.casefold()) is None
-        or (typ and live_types.get(col.casefold()) != typ)
+        if live_types.get(col) is None
+        or (typ and live_types.get(col) != typ)
     ]
     if differs:
         _decline(

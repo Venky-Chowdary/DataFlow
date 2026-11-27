@@ -371,6 +371,68 @@ jobs:
           path: ${{ runner.temp }}/live-engine/
           if-no-files-found: warn
 
+  # Throughput regression smoke (NF-6): mixed-type rows through the real
+  # engine and Gate-8 on the live PostgreSQL / MySQL services — 100k rows on
+  # the row path (PG->PG, PG->MySQL) and 20k on the PG->PG binary COPY that
+  # carries jsonb (load method checked) — with an independent cell-by-cell
+  # re-read of both tables. Fails when a route errs, a cell differs, or rows/s falls below the
+  # runner-calibrated floor in apps/api/benchmarks/throughput_floors.json.
+  # Report-only: not in the Required PR gate until it has five consecutive
+  # green runs. The full route matrix and 10M+ runs are the workflow_dispatch
+  # "Throughput benchmark" workflow.
+  throughput-smoke:
+    needs: changes
+    if: ${{ needs.changes.outputs.reuse != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start Postgres and MySQL (local_infile)
+        run: |
+          bash .github/scripts/start_ci_databases.sh postgres mysql
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements-dev.txt
+
+      - name: Throughput smoke (row path 100k, PG->PG COPY 20k)
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          DATAFLOW_EGRESS_ALLOWLIST: "127.0.0.0/8,::1/128"
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: dataflow
+          PGPASSWORD: dataflow
+          PGDATABASE: dataflow
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: "3306"
+          MYSQL_USER: dataflow
+          MYSQL_PASSWORD: dataflow
+          MYSQL_DATABASE: dataflow
+        run: |
+          mkdir -p "$RUNNER_TEMP/throughput"
+          python -m benchmarks.throughput_smoke --rows 100000 \
+            --routes pg-pg-pr,pg-pg-row,pg-mysql --out-dir "$RUNNER_TEMP/throughput"
+
+      - name: Upload throughput results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: throughput-smoke
+          path: ${{ runner.temp }}/throughput/
+          if-no-files-found: warn
+
   # Fast GitOps gate — no databases. Validates example manifest + CLI plan/apply proofs.
   gitops:
     needs: changes
