@@ -7,8 +7,10 @@ cross-workspace oracle. The scope is now resolved from where the key_id is
 found, and a named workspace always needs ``may_use_workspace``.
 
 T2: a pack HMAC'd with the login secret under ``platform_auth_secret``
-verified for anyone. The login secret now verifies only a pack the evidence
-chain recorded before evidence signing keys existed.
+verified for anyone. The login secret now verifies only a pack whose digest
+the legacy evidence register recorded at the cutover (review 2 item 4: the
+register replaced the evidence-chain lookup, which purge and the 20,000-record
+window defeated; see test_train1_r2_legacy_evidence_register).
 """
 
 from __future__ import annotations
@@ -20,11 +22,12 @@ import time
 
 import pytest
 
-from services import evidence_signing_keys as esk
+from services import audit_log, evidence_signing_keys as esk
+from services import legacy_evidence_register as register
 from services.signed_proof_pack import (
-    LEGACY_AFTER_CUTOVER,
-    LEGACY_ANCHORED,
-    LEGACY_UNANCHORED,
+    LEGACY_NOT_ON_RECORD,
+    LEGACY_NOT_ON_RECORD_REASON,
+    LEGACY_ON_RECORD,
     build_signed_proof_pack,
     canonical_json,
     pack_body_digest_excluding_anchor,
@@ -40,16 +43,16 @@ def _isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(esk, "_collection", lambda: None)
     monkeypatch.setattr("services.auth_service._token_secret", lambda: _LOGIN.decode())
-    chain: list[dict] = []
+    monkeypatch.setattr(register, "_collection", lambda: None)
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
+    monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit_events.jsonl")
 
     def _anchor(digest: str) -> None:
-        chain.append({"action": "evidence.anchor", "time": esk._now(),
-                      "details": {"evidence_sha256": digest}})
+        from services.evidence_chain import EVIDENCE_ACTION
 
-    def _find(digest: str, **_kw):
-        return next((e for e in reversed(chain) if e["details"]["evidence_sha256"] == digest), None)
+        audit_log.append_audit_event(action=EVIDENCE_ACTION, resource="job:legacy",
+                                     details={"evidence_sha256": digest})
 
-    monkeypatch.setattr("services.evidence_chain.find_anchor", _find)
     yield _anchor
 
 
@@ -101,7 +104,8 @@ def test_a_new_login_secret_pack_never_verifies(_isolated):
     forged = _legacy("job-new")
     out = verify_signed_proof_pack(forged)
     assert out["ok"] is False
-    assert out["legacy_status"] == LEGACY_UNANCHORED
+    assert out["legacy_status"] == LEGACY_NOT_ON_RECORD
+    assert LEGACY_NOT_ON_RECORD_REASON in out["errors"]
     assert out["signing_key"]["legacy_key"] is True
 
 
@@ -112,7 +116,7 @@ def test_a_legacy_pack_recorded_before_the_cutover_verifies(_isolated):
     _ws_pack()  # first evidence keyring: the cutover
     out = verify_signed_proof_pack(old)
     assert out["ok"] is True, out
-    assert out["legacy_status"] == LEGACY_ANCHORED
+    assert out["legacy_status"] == LEGACY_ON_RECORD
 
 
 def test_a_legacy_signature_on_a_pack_recorded_after_the_cutover_is_refused(_isolated):
@@ -122,4 +126,4 @@ def test_a_legacy_signature_on_a_pack_recorded_after_the_cutover_is_refused(_iso
     _isolated(pack_body_digest_excluding_anchor(late))
     out = verify_signed_proof_pack(late)
     assert out["ok"] is False
-    assert out["legacy_status"] == LEGACY_AFTER_CUTOVER
+    assert out["legacy_status"] == LEGACY_NOT_ON_RECORD

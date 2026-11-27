@@ -101,9 +101,9 @@ Apply the same retention and access rules to these as to the source data.
 
 | Priority | What | Why |
 |---|---|---|
-| 1 | The secrets: `AUTH_SECRET`, `SECRETS_KEY`, `AUDIT_HMAC_KEY` and any retired audit keys | Without `SECRETS_KEY`, stored connector credentials and the evidence signing keys cannot be decrypted, so signed packs can no longer be verified. Without the audit keys, old audit records cannot be verified. Packs signed before evidence keys existed (key id `platform_auth_secret`) verify only with the `AUTH_SECRET` they were signed under. Keep them in your secret manager, not only on the host. |
-| 2 | MongoDB, database `datatransfer` | Jobs, schedules, connectors, audit events, accounts, CDC and incremental positions. |
-| 3 | The data directory | Workspace settings, customer-managed keys, plans, ACLs, anchors. |
+| 1 | The secrets: `AUTH_SECRET`, `SECRETS_KEY`, `AUDIT_HMAC_KEY` and any retired audit keys | Without `SECRETS_KEY`, stored connector credentials and the evidence signing keys cannot be decrypted, so signed packs can no longer be verified. Without the audit keys, old audit records cannot be verified. Packs signed before evidence keys existed (key id `platform_auth_secret`) verify only with the `AUTH_SECRET` they were signed under, and only while the legacy evidence register (below) still holds their digest. Keep them in your secret manager, not only on the host. |
+| 2 | MongoDB, database `datatransfer` | Jobs, schedules, connectors, audit events, accounts, CDC and incremental positions, and the legacy evidence register (collection `legacy_evidence_register`). |
+| 3 | The data directory | Workspace settings, customer-managed keys, plans, ACLs, anchors, and the legacy evidence register when no MongoDB is connected (`legacy_evidence_register.json`). The register is written once, at the first evidence key; it cannot be rebuilt after the audit records it was taken from are purged. |
 | 4 | Upload and export locations | Only if you need to resume jobs from uploaded files or keep exports. |
 
 Take the MongoDB backup and the data directory backup as close together as you

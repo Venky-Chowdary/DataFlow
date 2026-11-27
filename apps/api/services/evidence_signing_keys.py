@@ -23,8 +23,10 @@ Now each workspace has its own evidence signing keyring:
 * Rotation adds a new active version and keeps every earlier one (marked
   retired), so packs signed before a rotation keep verifying.
 * Packs signed before this keyring existed carry ``key_id``
-  ``platform_auth_secret`` (or none); they still verify against the login
-  secret, reported as the legacy key. Nothing new is signed with it.
+  ``platform_auth_secret`` (or none); they verify against the login secret,
+  reported as the legacy key, only when :mod:`services.legacy_evidence_register`
+  recorded their digest at the cutover (the first keyring creation snapshots
+  it). Nothing new is signed with it.
 
 Key material never leaves this module except as the bytes an HMAC is computed
 with; status and verify answers carry key ids only, and nothing here logs a key.
@@ -174,6 +176,7 @@ def _decrypt(entry: dict[str, Any]) -> bytes | None:
 def _active_doc(scope: str) -> dict[str, Any]:
     doc = _load(scope)
     if doc is None:
+        _snapshot_legacy_evidence_before_first_keyring()
         with _LOCK:
             doc = _load(scope) or _insert_if_absent(
                 scope,
@@ -185,6 +188,21 @@ def _active_doc(scope: str) -> dict[str, Any]:
                 },
             )
     return doc
+
+
+def _snapshot_legacy_evidence_before_first_keyring() -> None:
+    """At the cutover, record what the login secret signed (legacy evidence register).
+
+    Runs before a keyring is created; once any keyring exists, the register's
+    own lazy snapshot (against that keyring's time) covers a deployment that
+    upgraded before the register existed. Never blocks signing.
+    """
+    try:
+        from services.legacy_evidence_register import ensure_snapshot
+
+        ensure_snapshot()
+    except Exception as exc:  # noqa: BLE001 - retried lazily at the next legacy verify
+        logger.error("legacy evidence snapshot failed: %s", type(exc).__name__)
 
 
 def signing_key(workspace_id: str | None) -> tuple[str, bytes, int, str]:

@@ -210,7 +210,9 @@ The playground (`/api/v1/query`) runs reads only. The guards, from
   With `SECRETS_KEY` set (production requires it), rotating `AUTH_SECRET` no
   longer invalidates evidence; packs signed before
   this change name the legacy key `platform_auth_secret` and verify only while
-  that `AUTH_SECRET` is kept. See
+  that `AUTH_SECRET` is kept, and only when the legacy evidence register
+  recorded their digest at the cutover (a login-secret signature the server
+  has no record of cannot be told apart from a forgery and is refused). See
   [../use/verification.md](../use/verification.md#how-evidence-is-signed-and-verified).
 - A workspace can bring its own key. Connector secrets are then wrapped with
   that key, and the platform key wraps the workspace key. The key records are

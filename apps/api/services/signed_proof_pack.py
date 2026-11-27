@@ -226,8 +226,9 @@ def _platform_secret() -> bytes:
     """The login token secret: the LEGACY evidence key, for verification only.
 
     Packs issued before evidence signing keys existed were HMAC-signed with the
-    login secret under ``key_id`` ``platform_auth_secret``. They still verify
-    here, reported as the legacy key. Nothing new is signed with it
+    login secret under ``key_id`` ``platform_auth_secret``. They verify here,
+    reported as the legacy key, when the legacy evidence register holds their
+    digest (:func:`_legacy_pack_status`). Nothing new is signed with it
     (:mod:`services.evidence_signing_keys`).
     """
     from services.platform_config import is_production
@@ -398,7 +399,7 @@ def verify_body_detail(
     if info["legacy_key"]:
         # T2: the login secret is not a signing key any more. It verifies only
         # a pack the evidence chain recorded before evidence keys existed.
-        legacy_status, legacy_error = _legacy_pack_status(payload)
+        legacy_status, legacy_error = _legacy_pack_status(payload, may_use_workspace)
         info["legacy_status"] = legacy_status
         if legacy_error:
             errors.append(legacy_error)
@@ -430,41 +431,37 @@ def verify_body_detail(
 
 
 #: ``signing_key.legacy_status`` values for a login-secret (legacy) signature.
-LEGACY_ANCHORED = "legacy_anchored_before_cutover"
-LEGACY_UNANCHORED = "legacy_not_in_evidence_chain"
-LEGACY_AFTER_CUTOVER = "legacy_anchored_after_cutover"
+LEGACY_ON_RECORD = "legacy_on_record_before_cutover"
+LEGACY_NOT_ON_RECORD = "legacy_not_on_record"
+LEGACY_NOT_ON_RECORD_REASON = (
+    "signed with the retired key and not on record before the cutover; it cannot "
+    "be told apart from a forgery"
+)
 
 
-def _legacy_pack_status(payload: dict[str, Any]) -> tuple[str, str]:
+def _legacy_pack_status(payload: dict[str, Any], may_use_workspace: Any = None) -> tuple[str, str]:
     """``(status, error)`` for a body signed with the legacy login secret.
 
-    Accepted only when the evidence chain holds a record for this body's
-    content digest filed before the first evidence keyring (the cutover):
-    the chain is append-only and HMAC-chained under its own key, so a body
-    made now and HMAC'd with the login secret has no such record.
+    Accepted only when the legacy evidence register recorded its content digest
+    before the cutover (:mod:`services.legacy_evidence_register`): anyone holding
+    the login secret can sign a new body, but cannot add a pre-cutover record.
     """
-    from services.evidence_chain import find_anchor
-    from services.evidence_signing_keys import _parse_time, legacy_cutover_at
+    from services.legacy_evidence_register import digest_of, ensure_snapshot, lookup
 
-    digest = pack_body_digest_excluding_anchor(payload)
     try:
-        record = find_anchor(digest)
-        cutover = legacy_cutover_at()
+        ensure_snapshot()
+        record = lookup(digest_of(payload)) or lookup(pack_body_digest_excluding_anchor(payload))
     except Exception:  # noqa: BLE001 - cannot establish it: not accepted
-        record, cutover = None, None
+        record = None
     if not record:
-        return LEGACY_UNANCHORED, (
-            "signed with the legacy login secret and not recorded in the evidence "
-            "chain: a login-secret signature is accepted only for a pack the chain "
-            "recorded before evidence signing keys existed"
+        return LEGACY_NOT_ON_RECORD, LEGACY_NOT_ON_RECORD_REASON
+    workspace = str(record.get("workspace_id") or "")
+    if workspace and may_use_workspace is not None and not may_use_workspace(workspace):
+        return LEGACY_NOT_ON_RECORD, (
+            "signed with another workspace's evidence key: it can be verified only "
+            "by someone with access to that workspace"
         )
-    filed = _parse_time(record.get("time"))
-    if cutover is not None and (filed is None or filed >= cutover):
-        return LEGACY_AFTER_CUTOVER, (
-            "signed with the legacy login secret, but the evidence chain recorded "
-            "this pack after evidence signing keys replaced it"
-        )
-    return LEGACY_ANCHORED, ""
+    return LEGACY_ON_RECORD, ""
 
 
 def verify_body(

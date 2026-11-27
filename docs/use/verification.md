@@ -220,9 +220,34 @@ Two engine facts that often cause explained differences:
   `POST /api/v1/workspace/evidence-signing-key/rotate`. Earlier keys are kept,
   so packs signed before a rotation keep verifying.
 - Packs signed before evidence keys existed carry the key id
-  `platform_auth_secret`: they were signed with the login secret. They still
-  verify, and the answer names them as the legacy key. Nothing new is signed
-  with it.
+  `platform_auth_secret`: they were signed with the login secret. Anyone who
+  holds that secret can still compute such a signature, so the signature
+  alone proves nothing. What proves a legacy pack is the **legacy evidence
+  register**: when the first evidence key is created (the cutover), the server
+  records the content digest of every login-secret-signed pack it holds: proof
+  packs and Migration Certificates from the audit log's export records and
+  chain anchors (the whole audit store, not the newest 20,000 records), signed
+  parity sign-off packs from the job store, and signed Exit Evidence Packs
+  from the exit store. Each record keeps the digest, the evidence type, when
+  it was made, the job or report id and the workspace. Records are only ever
+  added, and the audit retention purge does not touch the register. A
+  deployment that created its first evidence key on an earlier build takes
+  the snapshot the first time a legacy pack is verified, counting only audit
+  records filed before that key was created.
+- A legacy pack verifies only when its digest is in the register; the answer
+  names it as the legacy key. A legacy pack that is not on record returns
+  `ok: false` with "signed with the retired key and not on record before the
+  cutover; it cannot be told apart from a forgery". Nothing new is signed with
+  the login secret.
+- **What the register cannot recover.** It records what the server still
+  held at the cutover. A pre-cutover pack that was never exported and never
+  stored (for example a proof pack downloaded without an export record), or
+  whose export record the audit retention purge or the file store's size cap
+  (`DATAFLOW_AUDIT_MAX_EVENTS`, 5,000 records by default) had already removed
+  before the snapshot ran, is not on record and is refused like a forgery.
+  Back up the register (MongoDB collection `legacy_evidence_register`, or
+  `legacy_evidence_register.json` in the data directory) with the rest of the
+  evidence.
 - Verifying is a read. `POST /api/v1/transfer/proof-pack/verify`,
   `POST /api/v1/transfer/certificate/verify` and
   `POST /api/v1/exit/evidence/verify` need `job.read`;
