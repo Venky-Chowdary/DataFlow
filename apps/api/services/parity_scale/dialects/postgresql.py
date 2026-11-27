@@ -30,11 +30,10 @@ SESSION_SETTINGS: tuple[str, ...] = (
     "SET bytea_output = 'hex'",
 )
 
-#: The snapshot a pinned side reads, by function (PostgreSQL 13+ / 10 to 12).
-_SNAPSHOT_SQL = {
-    "pg_current_snapshot": "SELECT pg_current_snapshot()::text, now()::text",
-    "txid_current_snapshot": "SELECT txid_current_snapshot()::text, now()::text",
-}
+#: The snapshot a pinned side reads (every supported server, 14+, has pg_current_snapshot()).
+_SNAPSHOT_SQL = "SELECT pg_current_snapshot()::text, now()::text"
+#: The oldest server the comparison runs on: CE1 needs exact ``numeric`` from ``extract(epoch …)``.
+MIN_SERVER_VERSION_NUM = 140000
 
 
 def quote_ident(name: str) -> str:
@@ -215,8 +214,12 @@ class PostgresSide(SqlSide):
         self.conn.rollback()
         if encoding not in {"UTF8", "UNICODE"}:
             raise ValueError(f"Parity at Scale needs a UTF8 database (this one is {encoding})")
-        if version < 140000:
-            raise ValueError("Parity at Scale needs PostgreSQL 14 or later (exact extract(epoch))")
+        if version < MIN_SERVER_VERSION_NUM:
+            from services.parity_scale.plan import PairNotCertified
+
+            raise PairNotCertified(
+                f"the comparison inside the database needs PostgreSQL 14 or later; this server is "
+                f"PostgreSQL {version // 10000}")
         self.server_version_num = version
         self.server = "postgresql"
         self.conn.autocommit = True
@@ -274,9 +277,6 @@ class PostgresSide(SqlSide):
         Each statement then runs under a savepoint, so a statement that times
         out is rolled back to it and the snapshot is kept.
         """
-        # pg_current_snapshot() is PostgreSQL 13+; txid_current_snapshot() serves 10 to 12.
-        function = "pg_current_snapshot" if int(getattr(self, "server_version_num", 0) or 0) >= 130000 \
-            else "txid_current_snapshot"
         refusal = self._pin_refusal(max_hold_s)
         if refusal:
             return {"kind": "not_established", "reason": refusal}
@@ -284,13 +284,13 @@ class PostgresSide(SqlSide):
             self.conn.rollback()
             self.conn.set_session(isolation_level="REPEATABLE READ", readonly=True)
             with self.conn.cursor() as cur:
-                cur.execute(_SNAPSHOT_SQL[function])
+                cur.execute(_SNAPSHOT_SQL)
                 snapshot, at = cur.fetchone()
         except Exception as exc:  # noqa: BLE001 — an engine that cannot pin is read statement by statement
             self.unpin()
             return {"kind": "not_established", "reason": f"the snapshot could not be taken ({type(exc).__name__})"}
         self.pinned = True
-        return {"kind": "pinned", "method": "repeatable_read_transaction", "function": function,
+        return {"kind": "pinned", "method": "repeatable_read_transaction", "function": "pg_current_snapshot",
                 "snapshot": str(snapshot), "at": str(at)}
 
     def _pin_refusal(self, max_hold_s: float | None) -> str:

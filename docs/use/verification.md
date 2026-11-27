@@ -119,6 +119,10 @@ comparing every row inside both databases (see
   whose worker stopped (a restart, a lost replica) does not stay "running":
   it reads as stopped, is resumed from its checkpoint when the app starts or
   on its next sweep, and **Re-verify** takes it over.
+- The comparison inside the database runs on PostgreSQL 14 or later (it
+  needs exact `numeric` results from `extract(epoch …)`). On an older
+  server the table reads **Not verified at full scale**, with the server's
+  version, and Gate-8's own result stands.
 - **Proven** needs each side read from one snapshot for the whole comparison:
   PostgreSQL (one repeatable-read transaction) and MySQL / MariaDB on InnoDB
   (a consistent-snapshot transaction). Otherwise (SQL Server today, a

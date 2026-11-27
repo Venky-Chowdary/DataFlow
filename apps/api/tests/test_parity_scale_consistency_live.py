@@ -216,21 +216,54 @@ def test_a_hashed_key_is_not_eligible_and_never_errors(tables) -> None:
     assert "key is a protected column" in block["reason"]
 
 
-@pg
-def test_postgresql_before_13_pins_with_txid_current_snapshot(tables) -> None:
-    """Review 2, N3: pg_current_snapshot() is 13+; 10 to 12 use txid_current_snapshot()."""
-    from services.parity_scale import verification
+class _OldServer:
+    """A connection to a PostgreSQL 13 server (only what prepare_session reads)."""
 
+    def cursor(self):
+        rows = iter([("UTF8",), ("130011",)])
+
+        class _Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, sql, params=None):
+                return None
+
+            def fetchone(self):
+                return next(rows)
+
+        return _Cur()
+
+    def rollback(self):
+        return None
+
+
+def test_a_server_below_the_version_floor_is_not_verified_and_says_why(tables, monkeypatch) -> None:
+    """Review 3, item 9: the PostgreSQL 10-12 snapshot path was dead (the dialect refuses < 14); the
+    floor is stated instead, and a run on an older server reads "not verified at full scale"."""
+    from services.parity_scale import verification
+    from services.parity_scale.dialects.postgresql import PostgresSide
+    from services.parity_scale.plan import PairNotCertified
+
+    with pytest.raises(PairNotCertified, match="needs PostgreSQL 14 or later; this server is PostgreSQL 13"):
+        PostgresSide.prepare_session(type("S", (), {"conn": _OldServer()})())
+    real = PostgresSide.prepare_session
+
+    def old(self):
+        real(self)
+        self.conn = _OldServer()
+        real(self)
+
+    monkeypatch.setattr(PostgresSide, "prepare_session", old)
     job_id = _job(*tables)
-    spec, _why = verification.table_spec(_svc().get_job(job_id))
-    side = verification.side_opener(spec)("source", verification.plan_for(spec))
-    try:
-        side.server_version_num = 120000
-        info = side.pin()
-        assert info["kind"] == "pinned" and ":" in info["snapshot"]
-        assert info["function"] == "txid_current_snapshot"  # pg_current_snapshot() does not exist before 13
-    finally:
-        side.close()
+    block = verification.start_for_job(job_id, background=False)
+    assert block["state"] == "error"
+    error = block["tables"][0]["error"]
+    assert error.startswith("Not verified at full scale: the comparison inside the database needs PostgreSQL 14")
+    assert "Re-verify" not in error
 
 
 @pg

@@ -661,6 +661,7 @@ def _run_guarded(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, r
                  token: str, workspace_id: str, worker: threading.Thread | None = None) -> None:
     from services.egress_guard import egress_workspace
     from services.parity_scale.lease import LeaseLost, release
+    from services.parity_scale.plan import PlanError
 
     from services.parity_scale import capacity
 
@@ -674,6 +675,13 @@ def _run_guarded(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, r
     except capacity.CapacityReached:
         try:
             _finish_table(job_id, spec["name"], token, status="error", error=CAPACITY_REASON)
+        except LeaseLost:
+            pass
+    except PlanError as exc:
+        # Not a failure to retry: this table cannot be compared in the database (e.g. the server's
+        # version). The reason names a version or a type, never a host or SQL.
+        try:
+            _finish_table(job_id, spec["name"], token, status="error", error=f"Not verified at full scale: {exc}.")
         except LeaseLost:
             pass
     except LeaseLost:
