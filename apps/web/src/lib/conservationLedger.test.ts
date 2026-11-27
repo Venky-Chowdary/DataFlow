@@ -762,3 +762,21 @@ describe("the unmeasured destination chip reads in words (W6 round 2, item 3)", 
     assert.match(h.title ?? "", /did not count the destination's rows/);
   });
 });
+
+describe("mirror and SCD2 equations name the rows kept from earlier runs", () => {
+  it("adds the retained term when the active population includes earlier rows", () => {
+    // read 3 this run, 2 kept from earlier runs: read + retained = active + held + skipped.
+    const ledger = { ...mirrorLedger, rows_read: 3, active_count: 5, unaccounted: 0, balanced: true };
+    const eq = ledgerEquation(ledger);
+    assert.match(eq, /^read 3 \+ retained 2 = active 5 \+ held out 0 \+ skipped 0$/);
+  });
+
+  it("prints no retained term when nothing is kept", () => {
+    assert.doesNotMatch(ledgerEquation(mirrorLedger), /retained/);
+  });
+
+  it("applies the same identity to SCD2 current rows", () => {
+    const ledger = { ...mirrorLedger, conservation_kind: "scd2", rows_read: 4, dest_count: 7, unaccounted: 0 };
+    assert.match(ledgerEquation(ledger), /^read 4 \+ retained 3 = current 7 /);
+  });
+});

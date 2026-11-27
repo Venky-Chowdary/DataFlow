@@ -17,14 +17,15 @@ import { StructurePreview } from "../components/ui/StructurePreview";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
-import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState";
+import { LoadingBlock, Spinner } from "../components/LoadingState";
+import { isDevRuntime } from "../lib/runtimeEnv";
+import { presentRunVerification } from "../lib/runResult";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
 import { performOracleEmptyAction, STUDIO_ORACLE_EMPTY_KINDS } from "../lib/oracleEmptyActions";
 import { CONTINUITY_GATE_ID } from "../components/transfer/ContinuityRecoveryForm";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { MAPPING_TIMEOUT_MS, mappingErrorSummary, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
-import { countGateStatuses } from "../lib/preflightGates";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { PlanConflictDialog } from "../components/transfer/PlanConflictDialog";
 import {
@@ -67,6 +68,13 @@ import {
 import { useStudioFlags } from "../lib/useStudioFlags";
 import { StudioFlagBanner } from "../components/transfer/StudioFlagBanner";
 import { Button } from "../components/ui/Button";
+import { Callout } from "../components/ui/Callout";
+import {
+  StepBackButton,
+  StepFooterReason,
+  StepPrimaryButton,
+  useStepFooterToastClearance,
+} from "../components/transfer/StudioStepFooter";
 import { ButtonGroup } from "../components/ui/ButtonGroup";
 import { HiddenFileInput } from "../components/ui/HiddenFileInput";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
@@ -108,6 +116,7 @@ import {
   mapTransferPlan,
   preflightTransferPlan,
   isTransportFailure,
+  fetchParityReport,
   validateTransportMessage,
   previewQuarantineCells,
   resumeJob,
@@ -299,6 +308,7 @@ import { destHeadline } from "../lib/conservationLedger";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
 import {
   buildDisplayBlockers,
+  checksPassedLine,
   findDuplicateKeyRoot,
   isEncodingIntegritySignal,
   rankAndDedupeSuggestedActions,
@@ -403,6 +413,12 @@ function streamExtractToken(name: string, sql: string | undefined): string {
   return `${name}=`;
 }
 
+/** Browser-only Validate gates stand in only in development when the API never answered. */
+function localPreflightFallbackAllowed(err: unknown): boolean {
+  if (!isDevRuntime()) return false;
+  return isTransportFailure(err instanceof Error ? err.message : String(err ?? ""));
+}
+
 export function TransferPage({
   connectors,
   connectorsLoading = false,
@@ -483,7 +499,7 @@ export function TransferPage({
   } | null>(null);
   /**
    * The recipe composed on the Transform (pre-load) step, and the identity the engine
-   * gave it. The hash is what Execute is held to: if the recipe changes after
+   * gave it. The hash is what the run is held to: if the recipe changes after
    * Validate, the run is refused rather than quietly running a different one.
    */
   const [shapeSteps, setShapeSteps] = useState<ShapeStepWire[]>([]);
@@ -529,6 +545,8 @@ export function TransferPage({
   const [analyzing, setAnalyzing] = useState(false);
   /** Continue on Destination was pressed while the destination was being re-read. */
   const [destContinuePending, setDestContinuePending] = useState(false);
+  /** Destination Continue while the destination is re-read: spinner, same name, still pressable. */
+  const destReadingIcon = destContinuePending ? <Spinner size="sm" label="" /> : undefined;
   const [mappingProgress, setMappingProgress] = useState(0);
   const [mappingPhase, setMappingPhase] = useState("Preparing schema context…");
   const [mappingError, setMappingError] = useState<string | null>(null);
@@ -3148,7 +3166,7 @@ export function TransferPage({
           clearStudioRecovery();
           toast({
             title: "Job route not loaded",
-            message: "The saved identity could not be refetched. Open the job again. Execute stays locked until Validate.",
+            message: "The saved identity could not be refetched. Open the job again. Run stays locked until Validate.",
             tone: "warning",
           });
         });
@@ -3182,7 +3200,7 @@ export function TransferPage({
           clearStudioRecovery();
           toast({
             title: "Schedule route not loaded",
-            message: "The saved identity could not be refetched. Open the schedule again. Execute stays locked until Validate.",
+            message: "The saved identity could not be refetched. Open the schedule again. Run stays locked until Validate.",
             tone: "warning",
           });
         });
@@ -3255,6 +3273,8 @@ export function TransferPage({
 
   // Only while Transfer is the visible screen: it stays mounted behind others.
   useShellLayoutClass("is-transfer-studio-view", ".df2-page-transfer-studio");
+  // Notifications sit above the step footer, whatever its height at this width.
+  useStepFooterToastClearance();
 
   const loadTransferPlan = async () => {
     if (!currentSourceColumns.length && !(sourceKind === "file" && file)) {
@@ -3495,8 +3515,11 @@ export function TransferPage({
       } catch (uploadErr) {
         const ext = fileExtension(selected.name);
         // Browser parsing cannot honour a declared window — never profile a
-        // different population than the one that was asked for.
-        if ((ext === "csv" || ext === "tsv") && !windowDeclared) {
+        // different population than the one that was asked for. And a server
+        // answer (422: no delimiter…) is the profile's verdict: show it, never
+        // paper over it with a browser parse that types every column as text.
+        const uploadMessage = uploadErr instanceof Error ? uploadErr.message : String(uploadErr ?? "");
+        if ((ext === "csv" || ext === "tsv") && !windowDeclared && isTransportFailure(uploadMessage)) {
           const text = await selected.text();
           data = parseCsvTextForPreview(text);
           toast({
@@ -3557,11 +3580,8 @@ export function TransferPage({
         setParsed(null);
         setReadOptions({});
       }
-      toast({
-        title: windowDeclared ? "Read window refused" : "Upload failed",
-        message,
-        tone: "error",
-      });
+      // The failure is stated in place (the Callout above the dropzone); a
+      // toast saying the same sentence again is repetition, not information.
       console.error(e);
     }
     setUploading(false);
@@ -4328,11 +4348,8 @@ export function TransferPage({
   };
 
   const apiChecksPassedCopy = (pf: PreflightResult): string => {
-    const skipped = countGateStatuses(pf.gates).skipped;
-    const head = skipped > 0
-      ? `${pf.passed_count} of ${pf.total_gates} API checks passed (${skipped} skipped — not counted)`
-      : `All ${pf.total_gates} API checks passed`;
-    return `${head}. Review the gate cards, then Execute when ready.`;
+    // Same sentence as the Validate hero and its ring (passed of applicable).
+    return `${checksPassedLine(pf)}. Review the gates, then run the transfer.`;
   };
 
   const hintEgress = (msg: string): string =>
@@ -4796,7 +4813,7 @@ export function TransferPage({
           ? `Columns: ${changed.slice(0, 20).join(", ")}${changed.length > 20 ? ` (+${changed.length - 20} more)` : ""}.`
           : "No text mappings required strip_controls.",
         `Re-ran Validate in ${mode} mode.`,
-        "At Execute, cleaned values are written. Jobs quarantine only lists cells that still fail after Strip.",
+        "During the run, cleaned values are written. Jobs quarantine only lists cells that still fail after Strip.",
       ],
     };
   };
@@ -4854,7 +4871,7 @@ export function TransferPage({
         validationMode: "balanced",
         steps: [
           "Switched validation mode to balanced: rows naming no real calendar date are held out in quarantine with their reason.",
-          "Every other row loads; Inspect quarantine lists the held-out rows after Execute.",
+          "Every other row loads; Inspect quarantine lists the held-out rows after the run.",
         ],
       };
     }
@@ -5382,13 +5399,13 @@ export function TransferPage({
           ? {
             title: "PII approval recorded",
             message: pf?.proof_bundle?.transfer_decision?.decision === "approve"
-              ? "Governance approval accepted — Execute is unlocked."
-              : "Governance approval accepted. Remaining blockers still hold Execute.",
+              ? "Governance approval accepted — Run is unlocked."
+              : "Governance approval accepted. Remaining blockers still hold Run.",
             tone: pf?.proof_bundle?.transfer_decision?.decision === "approve" ? "success" : "warning",
           }
           : {
             title: "PII approval not recorded",
-            message: "The API did not return an acknowledged compliance record — Execute stays locked.",
+            message: "The API did not return an acknowledged compliance record — Run stays locked.",
             tone: "error",
           });
       }
@@ -5399,13 +5416,13 @@ export function TransferPage({
           ? {
             title: "Schema drift acknowledged",
             message: pf?.passed && pf.proof_bundle?.transfer_decision?.decision === "approve"
-              ? "Existing mappings kept for this run. Execute is unlocked."
-              : "The attestation is recorded. Remaining blockers still hold Execute.",
+              ? "Existing mappings kept for this run. Run is unlocked."
+              : "The attestation is recorded. Remaining blockers still hold Run.",
             tone: pf?.passed && pf.proof_bundle?.transfer_decision?.decision === "approve" ? "success" : "warning",
           }
           : {
             title: "Schema drift acknowledgment not recorded",
-            message: "Validate did not accept the attestation — Execute stays locked.",
+            message: "Validate did not accept the attestation — Run stays locked.",
             tone: "error",
           });
       }
@@ -5417,13 +5434,13 @@ export function TransferPage({
           ? {
             title: "Destination DDL approved",
             message: pf?.passed && pf.proof_bundle?.transfer_decision?.decision === "approve"
-              ? "Execute runs the disclosed statement before the first write."
-              : "The approval is recorded. Remaining blockers still hold Execute.",
+              ? "The run executes the disclosed statement before the first write."
+              : "The approval is recorded. Remaining blockers still hold Run.",
             tone: pf?.passed && pf.proof_bundle?.transfer_decision?.decision === "approve" ? "success" : "warning",
           }
           : {
             title: "DDL approval not recorded",
-            message: "Validate did not accept the approval — Execute stays locked.",
+            message: "Validate did not accept the approval — Run stays locked.",
             tone: "error",
           });
       }
@@ -5702,10 +5719,10 @@ export function TransferPage({
           } else {
             // Stay on Validate — never claim "Ready" on review-grade.
             toast({
-              title: decision === "approve" ? "Preflight passed" : "Review-grade preflight",
+              title: decision === "approve" ? "Validate passed" : "Validate needs review",
               message: decision === "approve"
                 ? apiChecksPassedCopy(pf)
-                : "Checks completed with review-grade decision — re-run or fix blockers before Execute unlocks.",
+                : "Checks completed with review-grade decision — re-run or fix blockers before Run unlocks.",
               tone: decision === "approve" ? "success" : "warning",
             });
           }
@@ -5869,7 +5886,10 @@ export function TransferPage({
           ...(parsed?.file_id ? { source_file_id: parsed.file_id } : {}),
         });
       } catch (apiErr) {
-        if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
+        // P1-16: a server answer (500, 422…) is a failure to show with Retry,
+        // never replaced by browser-only gates. The local preview runs only in
+        // development when no API answered at all (UI-only preview).
+        if (sourceKind === "file" && destKindMode === "file_export" && parsed && localPreflightFallbackAllowed(apiErr)) {
           pf = runLocalPreflight({
             columns,
             rowCount,
@@ -5895,7 +5915,7 @@ export function TransferPage({
       setPreflight(pf);
       commitAcknowledgments(isApiPreflight(pf) ? pf : null);
       // Echo Kernel stamps + signed Risk Contracts from Validate onto Map.
-      // Contract key MUST use post-hydrate mappings or Execute stays locked /
+      // Contract key MUST use post-hydrate mappings or Run stays locked /
       // invalidation clears a green preflight when destType stamps change.
       let hydrateMaps = activeMappings;
       if (
@@ -5921,22 +5941,22 @@ export function TransferPage({
         const decision = pf.proof_bundle?.transfer_decision?.decision;
         if (isLocal || decision === "review") {
           toast({
-            title: isLocal ? "Validated locally" : "Review-grade preflight",
+            title: isLocal ? "Validated locally" : "Validate needs review",
             message: isLocal
-              ? "Browser preview gates only — re-run Validate when the API responds. Execute stays locked until API approve."
-              : "API returned review-grade — fix blockers or acknowledge policy, then re-run before Execute.",
+              ? "Browser preview gates only — re-run Validate when the API responds. Run stays locked until API approve."
+              : "API returned review-grade — fix blockers or acknowledge policy, then re-run before Run.",
             tone: "warning",
           });
         } else {
           toast({
-            title: "Preflight passed",
+            title: "Validate passed",
             message: apiChecksPassedCopy(pf),
             tone: "success",
           });
         }
       }
     } catch (e) {
-      if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
+      if (sourceKind === "file" && destKindMode === "file_export" && parsed && localPreflightFallbackAllowed(e)) {
         const threshold = confidenceThresholdForMode(validationOverride ?? validationMode);
         const pf = runLocalPreflight({
           columns: parsed.columns,
@@ -5956,7 +5976,7 @@ export function TransferPage({
         if (pf.passed) {
           toast({
             title: "Validated locally",
-            message: "Server preflight timed out — browser preview gates passed. Re-run Validate when the API responds, then Execute. Data rules still apply before write.",
+            message: "Server preflight timed out — browser preview gates passed. Re-run Validate when the API responds. Data rules still apply before write.",
             tone: "warning",
           });
         } else {
@@ -5974,7 +5994,7 @@ export function TransferPage({
         );
         setPreflightError(message);
         toast({
-          title: isTransportFailure(raw) ? "Validate timed out" : "Preflight failed",
+          title: isTransportFailure(raw) ? "Validate timed out" : "Validate could not run",
           message,
           tone: "error",
         });
@@ -6241,7 +6261,7 @@ export function TransferPage({
       toast({
         title: localPf || decision === "review" ? "API Validate required" : "Preflight required",
         message: localPf || decision === "review"
-          ? "Browser/local or review-grade results cannot unlock Execute. Re-run Validate until API decision is approve."
+          ? "Browser/local or review-grade results cannot unlock Run. Re-run Validate until API decision is approve."
           : "Run and pass API preflight gates (decision: approve) before writing.",
         tone: "warning",
       });
@@ -6287,7 +6307,7 @@ export function TransferPage({
       toast({
         title: "Re-run Validate",
         message:
-          "Execute requires the Decision Artifact hash from Validate. "
+          "Run requires the Decision Artifact hash from Validate. "
           + "Run Validate again before starting the transfer.",
         tone: "warning",
       });
@@ -6313,7 +6333,7 @@ export function TransferPage({
         ? buildPreflightMappings(analysis.columns)
         : undefined;
     try {
-      // Belt-and-suspenders: sync Studio mappings onto the plan before Execute so
+      // Belt-and-suspenders: sync Studio mappings onto the plan before Run so
       // an empty draft (Map race) cannot block a green Validate with "no mappings".
       let runPlanId = persistedPlanId ?? undefined;
       // A sync that failed for another reason: the backend's merge_plan_into_run
@@ -6588,7 +6608,7 @@ export function TransferPage({
       setResult(data);
       setRunStartupProgress(100);
       setStep(STEP_RUN);
-      if (data.success) onTransferComplete();
+      if (data.success) announceTransferComplete(data.job_id, { status: "completed", reconciliation: data.reconciliation });
     } catch (transferErr) {
       if (isPlanVersionConflict(transferErr)) {
         // The plan changed since this page loaded it: nothing ran. The
@@ -6708,7 +6728,7 @@ export function TransferPage({
         ? { load_history_report: job.load_history_report }
         : undefined,
     });
-    if (success) onTransferComplete();
+    if (success) announceTransferComplete(job._id, job);
   };
 
   /** Explicit leave only — completed Gate-8 and fail/cancel recovery stay on Theater. */
@@ -7033,7 +7053,7 @@ export function TransferPage({
     exportFormat,
     destOutputPath,
   });
-  /** Map/sync/PK/dest/Advanced edits must invalidate a prior green Validate before Execute. */
+  /** Map/sync/PK/dest/Advanced edits must invalidate a prior green Validate before Run. */
   const buildValidateContractKey = useCallback(
     (maps: EditableMapping[], overrides?: { schemaDriftAcknowledged?: boolean }) =>
       composeValidateContractKey({
@@ -7405,7 +7425,7 @@ export function TransferPage({
 
   const handleSaveAsContract = async () => {
     if (!preflight) {
-      toast({ title: "Run preflight first", message: "Validate gates before saving a contract.", tone: "warning" });
+      toast({ title: "Run Validate first", message: "A contract saves validated mappings.", tone: "warning" });
       return;
     }
     setSavingContract(true);
@@ -7585,6 +7605,24 @@ export function TransferPage({
   // dropped by the browser, and Studio stayed on Destination. A press during the
   // read waits for it (the read is bounded by DEST_PROBE_TIMEOUT_MS), then
   // continues.
+  /**
+   * The completion toast says the Trust Report's verdict, as the run header
+   * does: green only for proven / explained, otherwise neutral (lead item 2).
+   */
+  const announceTransferComplete = (
+    jobId: string | null | undefined,
+    job: { status?: string | null; reconciliation?: unknown },
+  ) => {
+    if (!jobId) {
+      onTransferComplete(presentRunVerification({ kind: "error", message: "" }, job));
+      return;
+    }
+    void fetchParityReport(jobId)
+      .then((report) => presentRunVerification({ kind: "ready", report }, job))
+      .catch(() => presentRunVerification({ kind: "error", message: "" }, job))
+      .then((verification) => onTransferComplete(verification));
+  };
+
   const continueFromDestination = () => {
     if (destKindMode === "database" && destSchemaLoading) {
       setDestContinuePending(true);
@@ -7632,7 +7670,8 @@ export function TransferPage({
           // separators — the mandated Source→Destination→Transform→Map→
           // Validate→Run sequence is the product's contract, not a mode.
           steps={STEPS}
-          current={step}
+          // P1-21: the canvas Transform overlay is step 3 to the reader, whatever step it opened over.
+          current={studioFlags.canvas && transformOpen && step < STEP_SHAPE ? STEP_SHAPE : step}
           onStepClick={(n) => {
             if (n === STEP_VALIDATE && !mapForwardReady) {
               void goToPreflight();
@@ -7673,9 +7712,6 @@ export function TransferPage({
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
           live={routeBarLiveWhileWriting(transferring)}
         />
-        {/* D-BP-20: toasts dock into the header chrome as compact pills —
-            never over content, no permanent lane, no reflow. */}
-        <div className="df2-toast-dock" data-df2-toast-dock />
         </div>
       </header>
 
@@ -7839,7 +7875,7 @@ export function TransferPage({
       {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && !analyzing && columnMappings.length === 0 && (
         <div className="df2-transfer-step-panel">
           <EmptyState
-            icon={mappingError ? "warning" : "sparkle"}
+            icon={mappingError ? "warning" : "map"}
             title={mappingError ? "Couldn't load column mappings" : "Preparing column mappings"}
             description={mappingError
               ? mappingErrorSummary(mappingError)
@@ -7852,7 +7888,7 @@ export function TransferPage({
                 className="df2-btn df2-btn-primary"
                 onClick={() => (analysis?.columns.length ? void goToMapping() : setStep(STEP_DESTINATION))}
               >
-                {analysis?.columns.length ? "Retry mapping" : "← Back to destination"}
+                {analysis?.columns.length ? "Retry mapping" : "Back to Destination"}
               </button>
             }
           />
@@ -7918,16 +7954,17 @@ export function TransferPage({
                 onChange={handleFileSelect}
               />
               {uploadError && (
-                <div className="df2-alert df2-alert-error" role="alert">
-                  <DtIcon name="x" size={16} />
-                  <div>
-                    <strong>{readWindowRefused ? "Read window refused" : "Upload failed"}</strong>
-                    <p>{uploadError}</p>
-                    {readWindowRefused && (
-                      <p>The file and its previous read window are unchanged — correct the declaration and apply again.</p>
-                    )}
-                  </div>
-                </div>
+                <Callout
+                  tone="danger"
+                  variant="tint"
+                  role="alert"
+                  title={readWindowRefused ? "Read window refused" : "Couldn't read this file"}
+                >
+                  <p>{uploadError}</p>
+                  {readWindowRefused && (
+                    <p>The file and its previous read window are unchanged. Correct the declaration and apply again.</p>
+                  )}
+                </Callout>
               )}
               <label
                 className="df2-policy-toggle df2-source-ocr-toggle"
@@ -8046,7 +8083,7 @@ export function TransferPage({
                 <div className="df2-upload-sample-row">
                   <span className="df2-label-hint">New to Datawrap?</span>
                   <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => void loadSampleDataset()}>
-                    <DtIcon name="sparkle" size={14} /> Load sample orders CSV
+                    <DtIcon name="file" size={14} /> Load sample orders CSV
                   </button>
                 </div>
               )}
@@ -8292,7 +8329,7 @@ export function TransferPage({
               {!isCallableSourceMode(sourceReadMode) && (
               <div className="df2-source-multistream">
                 <div className="df2-source-multistream-head">
-                  <DtIcon name="activity" size={15} />
+                  <DtIcon name="table" size={15} />
                   <strong>
                     {isMultiStreamSource
                       ? `${multiStreamNames.length} streams`
@@ -8464,16 +8501,16 @@ export function TransferPage({
                 ? "Select connector and table/collection to continue"
                 : "Source selected — continue to pick a destination.");
           return (
-            <div className="df2-card-footer df2-wizard-footer">
+            <div className="df2-card-footer df2-wizard-footer df2-step-footer">
               <span className="df2-label-hint">{hint}</span>
-              <button
-                type="button"
-                className="df2-btn df2-btn-primary"
+              <StepPrimaryButton
                 disabled={disabled}
+                busy={sourceIntrospecting}
+                loadingLabel="Reading schema…"
                 onClick={() => void proceedToDestination()}
               >
-                {sourceIntrospecting ? <ButtonLoader label="Reading schema…" /> : "Continue to Destination →"}
-              </button>
+                Continue to Destination
+              </StepPrimaryButton>
             </div>
           );
         })()}
@@ -9019,7 +9056,7 @@ export function TransferPage({
                   </>
                 ) : destTableExists === false ? (
                   <>
-                    <DtIcon name="sparkle" size={14} />
+                    <DtIcon name="info" size={14} />
                     <p>
                       <strong>
                         {destDriverType === "mongodb" ? "Collection not found." : "Table not found."}
@@ -9116,19 +9153,23 @@ export function TransferPage({
                 <span aria-hidden> · </span>
                 {VALIDATION_MODES.find((m) => m.id === validationMode)?.label ?? validationMode} validation
               </p>
-              <p className="df2-label-hint">
-                {syncModeHonestyLine(syncMode, destTableExists, destType, destKindMode)}
-              </p>
-              {/* UX-39: table-schema rules (ADD COLUMN, CDC, drift) say nothing about a file export. */}
-              {destKindMode === "database" ? (
-                <>
+              {/* One line in view; what each setting means behind a disclosure. */}
+              <details className="df2-dest-sync-details">
+                <summary>What this means</summary>
+                <p className="df2-label-hint">
+                  {syncModeHonestyLine(syncMode, destTableExists, destType, destKindMode)}
+                </p>
+                {/* UX-39: table-schema rules (ADD COLUMN, CDC, drift) say nothing about a file export. */}
+                {destKindMode === "database" ? (
                   <p className="df2-label-hint">
                     {schemaPolicyHonestyLine(schemaPolicy)}
                   </p>
-                  <p className="df2-label-hint">
-                    Change overwrite, CDC, schema drift, and identity in Advanced.
-                  </p>
-                </>
+                ) : null}
+              </details>
+              {destKindMode === "database" ? (
+                <p className="df2-label-hint">
+                  Change overwrite, CDC, schema drift and identity in Advanced.
+                </p>
               ) : (
                 <p className="df2-label-hint">Change the file name and format options in Advanced.</p>
               )}
@@ -9194,38 +9235,37 @@ export function TransferPage({
             </div>
           </div>
         </div>
-        <div className="df2-card-footer df2-wizard-footer">
-          <button type="button" className="df2-btn" onClick={() => (studioFlags.canvas ? backWizard() : setStep(STEP_SOURCE))}>
-            <DtIcon name="arrow-left" size={14} /> Back to source
-          </button>
+        <div className="df2-card-footer df2-wizard-footer df2-step-footer">
+          <StepBackButton onClick={() => (studioFlags.canvas ? backWizard() : setStep(STEP_SOURCE))} />
           <div className="df2-btn-row">
           {!canRunPreflight && destContinueBlocker && (
-            <span className="df2-label-hint" role="status">{destContinueBlocker}</span>
+            <StepFooterReason>{destContinueBlocker}</StepFooterReason>
           )}
-          <button
-            type="button"
-            className="df2-btn df2-btn-ghost"
+          <Button
+            variant="ghost"
             onClick={() => void loadTransferPlan()}
+            loading={planLoading}
+            loadingLabel="Analyzing…"
             disabled={
               !canConfigureDest
               || planLoading
               || (destKindMode === "database" && (!destType || !targetCollection.trim()))
             }
           >
-            {planLoading ? "Analyzing…" : "Analyze Route"}
-          </button>
-          <button
-            type="button"
+            Analyze route
+          </Button>
+          {/* While the destination is re-read the button keeps its name and stays
+              pressable (a press during the read continues once it answers). */}
+          <StepPrimaryButton
+            busy={analyzing}
+            loadingLabel="Preparing mappings…"
             aria-busy={analyzing || destContinuePending || undefined}
-            aria-label={analyzing ? "Preparing mappings…" : undefined}
-            className="df2-btn df2-btn-primary"
+            leadingIcon={destReadingIcon}
             onClick={continueFromDestination}
             disabled={!destFieldsReady || analyzing}
           >
-            {analyzing ? <ButtonLoader label="Preparing mappings…" /> : (
-              <>{destContinuePending ? <ButtonLoader /> : <DtIcon name="layers" size={18} />} {studioFlags.canvas ? "Continue to Review" : "Continue to Transform"}</>
-            )}
-          </button>
+            {studioFlags.canvas ? "Continue to Review" : "Continue to Transform"}
+          </StepPrimaryButton>
           </div>
         </div>
       </div>
@@ -9308,7 +9348,7 @@ export function TransferPage({
             const primary = primarySourceStream || sourceTable || undefined;
             if (report.shape_steps.length) {
               // Several tables: keep every stamped step. Filtering to the
-              // primary table dropped orders' transforms before Execute.
+              // primary table dropped orders' transforms before Run.
               setShapeSteps((prev) => mergeCompiledShapeSteps(prev, report.shape_steps, {
                 sourceTable: multiStreamNames.length > 1 ? undefined : primary,
               }));
@@ -9349,6 +9389,7 @@ export function TransferPage({
             />
           )}
           <ValidateDashboard
+            fileExport={destKindMode === "file_export"}
             preflight={preflight}
             compactVerdict={studioFlags.canvas}
             onPrimaryFix={primaryFix.onPrimaryFix}
@@ -9510,15 +9551,22 @@ export function TransferPage({
               });
             }}
           />
-          <PlanReversibilityCard
-            planId={persistedPlanId}
-            preflightReport={reversibilityFromPreflight(preflight)}
-            requireReversibility={requireReversibility}
-            onRequireChange={setRequireReversibility}
-            onRevalidate={() => void executePreflight()}
-          />
+          {/* Reversibility reads the Validate result: not while it runs, failed or never ran.
+              Inset like the dashboard cards above it, so the column has one width. */}
+          {preflight && !preflighting && (
+            <div className="df2-vd-rev-slot">
+              <PlanReversibilityCard
+                planId={persistedPlanId}
+                preflightReport={reversibilityFromPreflight(preflight)}
+                requireReversibility={requireReversibility}
+                onRequireChange={setRequireReversibility}
+                onRevalidate={() => void executePreflight()}
+              />
+            </div>
+          )}
           </div>
           <ValidateActionsRail
+            fileExport={destKindMode === "file_export"}
             preflight={preflight}
             preflightError={preflightError}
             preflighting={preflighting}
@@ -9669,8 +9717,8 @@ export function TransferPage({
               </div>
               <p>
                 {isGovernedExecuteReady
-                  ? "Execute now to start governed transfer with live theater progress and reconciliation evidence."
-                  : "Re-open Validate to confirm API preflight (decision approve) before treating this run as cleared."}
+                  ? "Run the transfer to start the write. Progress and proof appear here."
+                  : "Open Validate: it must approve this route before the run."}
                 {writeViaStaging
                   ? " Staging is on — rows land in a staging table next to the destination first; only clean rows promote to primary."
                   : ""}
@@ -9678,28 +9726,22 @@ export function TransferPage({
             </div>
             <EmptyState
               icon="transfer"
-              title={isGovernedExecuteReady ? "Execute-ready · not migration proven" : "Confirm Validate before write"}
+              title={isGovernedExecuteReady ? "Ready to run" : "Confirm Validate before write"}
               description={
                 (result && !runResultDescribesCurrentPlan
                   ? `The plan changed since the last run${staleRunDestLabel ? ` (it wrote ${staleRunDestLabel})` : ""}; nothing has been written for the route above. `
                   : "")
                 + (isGovernedExecuteReady
-                  ? "API preflight approved on Validate. Execute starts the write; Gate-8 post-write proof is still required for migration_proven."
-                  : "Execute stays locked until API Validate returns decision approve (local/review-grade cannot unlock).")
+                  ? "Validate approved this route. Row-count and checksum proof are made after the write."
+                  : "Run stays locked until Validate approves this route.")
               }
             />
           </div>
-          <div className="df2-card-footer df2-wizard-footer df2-run-footer">
-            <button
-              type="button"
-              className="df2-btn"
-              onClick={() => (result ? backFromTheaterToValidate() : setStep(STEP_VALIDATE))}
-            >
-              ← Back
-            </button>
+          <div className="df2-card-footer df2-wizard-footer df2-run-footer df2-step-footer">
+            <StepBackButton onClick={() => (result ? backFromTheaterToValidate() : setStep(STEP_VALIDATE))} />
             <div className="df2-run-footer-status" aria-live="polite">
               <span>
-                <strong>Route</strong> {sourceLabel} → {mapDestRouteLabel}
+                <strong>Route</strong> {sourceLabel} to {mapDestRouteLabel}
               </span>
               <span>
                 <strong>Preflight</strong>{" "}
@@ -9723,22 +9765,18 @@ export function TransferPage({
                       : "Requires API Validate with decision approve"
                   }
                 >
-                  <DtIcon name="activity" size={14} /> Save mapping to schedule
+                  <DtIcon name="schedule" size={14} /> Save mapping to schedule
                 </button>
               )}
-              <button
-                type="button"
-                className="df2-btn df2-btn-primary"
+              {!canExecute ? <StepFooterReason>Validate must approve this route first</StepFooterReason> : null}
+              <StepPrimaryButton
+                arrow={false}
+                leadingIcon={<DtIcon name="play" size={16} />}
                 onClick={() => void executeTransfer()}
                 disabled={!canExecute}
-                title={
-                  !canExecute
-                    ? "Requires API Validate with decision approve"
-                    : undefined
-                }
               >
-                <DtIcon name="transfer" size={16} /> Execute Transfer
-              </button>
+                Run transfer
+              </StepPrimaryButton>
             </div>
           </div>
         </div>
@@ -9922,13 +9960,7 @@ export function TransferPage({
             />
           </div>
           <div className="df2-card-footer df2-wizard-footer df2-run-footer">
-            <button
-              type="button"
-              className="df2-btn"
-              onClick={() => (result ? backFromTheaterToValidate() : setStep(STEP_VALIDATE))}
-            >
-              ← Back
-            </button>
+            <StepBackButton onClick={() => (result ? backFromTheaterToValidate() : setStep(STEP_VALIDATE))} />
             <div className="df2-run-footer-status" aria-live="polite">
               <span>
                 <strong>Result</strong> {result.success ? "Completed" : "Needs attention"}
@@ -9945,7 +9977,7 @@ export function TransferPage({
             <div className="df2-run-footer-actions">
               {(!result.success || Boolean(result.destination_summary?.rejected_rows)) && (
                 <button type="button" className="df2-btn" onClick={() => setStep(STEP_VALIDATE)}>
-                  <DtIcon name="gate" size={14} /> Open Validate
+                  <DtIcon name="verify" size={14} /> Open Validate
                 </button>
               )}
               {result.job_id && !result.success && (
@@ -9979,7 +10011,7 @@ export function TransferPage({
               )}
               {studioSchedulePersistable && (
                 <button type="button" className="df2-btn" onClick={() => void handleScheduleRoute()}>
-                  <DtIcon name="activity" size={14} /> Schedule
+                  <DtIcon name="schedule" size={14} /> Schedule
                 </button>
               )}
               <button type="button" className="df2-btn df2-btn-primary" onClick={resetTransferStudio}>

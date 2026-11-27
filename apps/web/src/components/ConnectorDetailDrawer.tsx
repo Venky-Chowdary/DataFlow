@@ -90,7 +90,7 @@ export function ConnectorDetailDrawer({
             loading={testing}
             loadingLabel="Testing…"
             onClick={onTest}
-            leadingIcon={<DtIcon name="activity" size={14} />}
+            leadingIcon={<DtIcon name="test-connection" size={14} />}
           >
             Test
           </Button>

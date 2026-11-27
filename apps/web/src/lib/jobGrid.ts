@@ -17,6 +17,7 @@ import { reconcileBarPercent } from "./progressRing";
 import { readSession } from "./session";
 import { formatSyncModeLabel } from "./transferConstants";
 import type { TransferJob } from "./types";
+import { VERDICT_RANK, jobVerdictState, verdictPresentation, type VerdictState } from "./verdict";
 import { isJobSuccess, jobStatusLabel, presentedJobStatus } from "./uiUtils";
 
 /** Statuses that still emit progress — the grid shows a live bar for these. */
@@ -86,17 +87,6 @@ export interface JobVerificationView {
   quarantined: number;
 }
 
-const VERIFICATION_BADGE: Record<JobVerificationTone, string> = {
-  ok: "df2-badge df2-badge-live",
-  warn: "df2-badge df2-badge-warn",
-  danger: "df2-badge df2-badge-error",
-  muted: "df2-badge df2-badge-muted",
-};
-
-export function verificationBadgeClass(tone: JobVerificationTone): string {
-  return VERIFICATION_BADGE[tone];
-}
-
 /**
  * The Verification column for one list row. Uses the detail card's rules
  * (`classifyGate8Status`) on the bounded Gate-8 summary the list carries, so
@@ -140,52 +130,26 @@ export function jobVerification(job: TransferJob): JobVerificationView {
   };
 }
 
-/** Plain grid label over a classifier verdict; the Gate-8 basis stays in the tooltip. */
-export interface JobVerificationDisplay {
-  label: string;
-  tone: JobVerificationTone;
-  title: string;
+/**
+ * The Verification column: the Trust Report's verdict word for the row
+ * (lib/verdict.ts), never a grid-only vocabulary. The verdict comes from
+ * `GET /parity/verdicts` (merged onto the row as `parity_verdict`: undefined
+ * while it loads, null when it could not be read).
+ */
+export function jobVerdict(job: TransferJob): VerdictState {
+  const listed = job.parity_verdict ?? undefined;
+  return jobVerdictState(job, listed, job.parity_verdict === null ? "error" : "loading");
 }
 
-/** Classifier labels that verified only part of the data (a sample, a batch, one table). */
-const PARTIAL_VERDICTS = new Set([
-  "Batch verified",
-  "Last stream checksum",
-  "Append delta",
-  "Write-pass + dest read-back",
-]);
-
-/**
- * Words an operator reads in the grid: Verified, Verified (sample), Verified
- * (partial), Unverified, Failed, Pending, Not run, Quarantined N. Only the
- * presentation of `jobVerification`; the verdict itself is not re-derived.
- */
-export function jobVerificationDisplay(view: JobVerificationView): JobVerificationDisplay {
-  const held = view.quarantined > 0
-    ? ` ${view.quarantined.toLocaleString()} rows held out in quarantine.`
-    : "";
-  if (view.label === "Pending" && view.tone === "muted") {
-    return { label: "Pending", tone: "muted", title: view.title };
-  }
-  if (view.label === "Not run" || view.label === "Not captured") {
-    return {
-      label: "Not run",
-      tone: "muted",
-      title: view.label === "Not run" ? view.title : "This run recorded no Gate-8 verdict.",
-    };
-  }
-  if (view.tone === "danger") return { label: "Failed", tone: "danger", title: view.title + held };
-  const verdict: JobVerificationDisplay = view.tone === "ok"
-    ? { label: "Verified", tone: "ok", title: view.title }
-    : view.label === "Sample verified"
-      ? { label: "Verified (sample)", tone: "warn", title: view.title }
-      : PARTIAL_VERDICTS.has(view.label)
-        ? { label: "Verified (partial)", tone: "warn", title: view.title }
-        : { label: "Unverified", tone: "warn", title: view.title };
-  if (view.quarantined > 0) {
-    return { label: `Quarantined ${view.quarantined.toLocaleString()}`, tone: "warn", title: verdict.title + held };
-  }
-  return verdict;
+/** Tooltip for the Verification cell: what the verdict means, then how Gate-8 checked. */
+export function jobVerdictTitle(job: TransferJob): string {
+  const state = jobVerdict(job);
+  const basis = jobVerification(job);
+  const meaning = verdictPresentation(state).meaning;
+  const held = basis.quarantined > 0 ? ` ${basis.quarantined.toLocaleString()} rows held in quarantine.` : "";
+  return basis.label === "Pending" || basis.label === "Not run" || basis.label === "Not captured"
+    ? `${meaning}${held}`
+    : `${meaning} Checked by: ${basis.label}.${held}`;
 }
 
 /** Grid status: one short word; the full label goes in its title / aria-label. */
@@ -319,7 +283,6 @@ const STATUS_RANK: Record<string, number> = {
   completed_with_warnings: 5,
 };
 
-const VERIFICATION_RANK: Record<JobVerificationTone, number> = { danger: 0, warn: 1, muted: 2, ok: 3 };
 
 export interface JobsGridRowText {
   name: (job: TransferJob) => string;
@@ -340,7 +303,7 @@ function sortKey(job: TransferJob, column: JobsGridColumnId, text: JobsGridRowTe
     case "rows":
       return jobRowsDisplay(job).value;
     case "verification":
-      return VERIFICATION_RANK[jobVerification(job).tone];
+      return VERDICT_RANK[jobVerdict(job)];
     case "duration":
       return durationMs(job);
     case "started":
@@ -486,7 +449,7 @@ export function jobsCsv(jobs: TransferJob[], text: JobsGridRowText): string {
   const rows = jobs.map((job) => {
     const status = presentedJobStatus(job);
     const verification = jobVerification(job);
-    const shown = jobVerificationDisplay(verification);
+    const shown = verdictPresentation(jobVerdict(job));
     return [
       job._id,
       text.name(job),
@@ -498,7 +461,7 @@ export function jobsCsv(jobs: TransferJob[], text: JobsGridRowText): string {
       job.sync_mode ? jobModeLabel(job) : "",
       (job as { records_processed_unknown?: boolean }).records_processed_unknown ? "" : job.records_processed ?? "",
       destMetricCompact(formatJobRowMetric(job)),
-      shown.label,
+      shown.word,
       verification.label,
       verification.quarantined || "",
       formatJobDuration(job.started_at, job.completed_at) || "",

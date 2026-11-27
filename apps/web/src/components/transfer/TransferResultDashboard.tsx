@@ -5,7 +5,7 @@ import { ConnectorIcon } from "../../app/brand-icons";
 import { CopyIdChip } from "../ui/CopyIdChip";
 import { readJobEventLog } from "../../lib/jobEventLog";
 import { useActiveData } from "../../lib/DataContext";
-import type { LoadHistoryReport, TransferResult } from "../../lib/types";
+import type { Gate8ReconciliationPayload, LoadHistoryReport, TransferResult } from "../../lib/types";
 import { LiveEventLog } from "../ui/LiveEventLog";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
@@ -15,6 +15,8 @@ import { exportDownloadTarget, exportRetentionNote } from "../../lib/jobExportDo
 import { Gate8ProofCard } from "./Gate8ProofCard";
 import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, isGate8LastStream, presentMultiStreamGate8, type Gate8Reconciliation } from "./gate8Status";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
+import { RunCheckSummary, runCheckRows } from "./RunCheckSummary";
+import { readGate8Population } from "../../lib/gate8Population";
 import { ConservationLedgerCard } from "./ConservationLedgerCard";
 import { conservationCompleteCopy, destHeadline, readConservationLedger, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
 import { formatStreamNames, presentStoredEventLog, presentStoredExplanation, readJobStreamNames, readJobStreams, readRejectedRows, type JobEvidenceCarrier } from "../../lib/jobEvidence";
@@ -469,52 +471,32 @@ export function TransferResultDashboard({
         compact
       />
 
-      <ConservationLedgerCard
-        job={{
-          status: result.success
-            ? (rejected > 0 || coercedNull > 0 ? "completed_with_quarantine" : "completed")
-            : "failed",
-          records_processed: rec,
-          records_transferred: rec,
-          row_accounting: result.row_accounting,
-        }}
-        onOpenValidate={onOpenValidate}
-      />
-
-      {streamHealth.length > 0 && (
-        <section className="df2-result-streams" aria-label="Per-stream health">
-          <h3 className="df2-result-title">Streams</h3>
-          <StreamHealthTable streams={streamHealth} />
-        </section>
-      )}
-
-      <JobTrustScoreCard
-        job={{
-          status: result.success
-            ? (rejected > 0 || coercedNull > 0 ? "completed_with_quarantine" : "completed")
-            : "failed",
-          records_processed: rec,
-          rejected_rows: rejected,
-          coerced_null_rows: coercedNull,
-          reconciliation: (gate8Report ?? result.reconciliation) as Record<string, unknown> | undefined,
-          destination_summary: ds as Record<string, unknown> | undefined,
-          cdc_cursor_gap: result.cdc_cursor_gap,
-          error_code: result.error_code,
-          source_ha_role: result.source_ha_role,
-        }}
-        onOpenValidate={onOpenValidate}
-        onResume={onResume}
-        onOpenGate8={() => {
-          document.querySelector(".df2-result-gate8")?.scrollIntoView({ behavior: "smooth", block: "start" });
-        }}
-        onOpenQuarantine={
-          showQuarantine
-            ? () => document.getElementById("df2-result-quarantine")?.scrollIntoView({ behavior: "smooth" })
-            : undefined
-        }
-      />
-
-      {(() => {
+      {/* One "How this was checked" section; the full ledger and the Gate-8
+          card sit behind its disclosure (lead item 3). Gate-8 runs after the
+          write here, so it is told so (afterWrite). */}
+      <RunCheckSummary
+        rows={runCheckRows({
+          reconciliation: (gate8Report ?? result.reconciliation) as Gate8ReconciliationPayload | undefined,
+          population: readGate8Population({
+            row_accounting: result.row_accounting,
+            reconciliation: (gate8Report ?? result.reconciliation) as Gate8ReconciliationPayload | undefined,
+          }),
+          writerRows: Number((result.row_accounting as { writer_ack?: unknown } | undefined)?.writer_ack) || null,
+        })}
+        details={(
+          <>
+            <ConservationLedgerCard
+              job={{
+                status: result.success
+                  ? (rejected > 0 || coercedNull > 0 ? "completed_with_quarantine" : "completed")
+                  : "failed",
+                records_processed: rec,
+                records_transferred: rec,
+                row_accounting: result.row_accounting,
+              }}
+              onOpenValidate={onOpenValidate}
+            />
+            {(() => {
         const writerChecksum = String(
           ds?.checksum || (ds as Record<string, unknown> | undefined)?.active_checksum || "",
         );
@@ -544,6 +526,7 @@ export function TransferResultDashboard({
             explanation={presentStoredExplanation(result.explanation, result)}
             jobId={result.job_id}
             className="df2-result-gate8"
+            afterWrite
             onOpenValidate={onOpenValidate}
             onOpenQuarantine={
               showQuarantine
@@ -553,6 +536,43 @@ export function TransferResultDashboard({
           />
         );
       })()}
+          </>
+        )}
+      />
+
+      {streamHealth.length > 0 && (
+        <section className="df2-result-streams" aria-label="Per-stream health">
+          <h3 className="df2-result-title">Streams</h3>
+          <StreamHealthTable streams={streamHealth} />
+        </section>
+      )}
+
+      <JobTrustScoreCard
+        job={{
+          status: result.success
+            ? (rejected > 0 || coercedNull > 0 ? "completed_with_quarantine" : "completed")
+            : "failed",
+          records_processed: rec,
+          rejected_rows: rejected,
+          coerced_null_rows: coercedNull,
+          reconciliation: (gate8Report ?? result.reconciliation) as Record<string, unknown> | undefined,
+          destination_summary: ds as Record<string, unknown> | undefined,
+          cdc_cursor_gap: result.cdc_cursor_gap,
+          error_code: result.error_code,
+          source_ha_role: result.source_ha_role,
+        }}
+        onOpenValidate={onOpenValidate}
+        onResume={onResume}
+        onOpenGate8={() => {
+          document.querySelector(".df2-run-checks-details")?.setAttribute("open", "");
+          document.querySelector(".df2-result-gate8")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
+        onOpenQuarantine={
+          showQuarantine
+            ? () => document.getElementById("df2-result-quarantine")?.scrollIntoView({ behavior: "smooth" })
+            : undefined
+        }
+      />
 
       {resolvedProof && (
         <section className="df2-result-mapping-proof" aria-label="Mapping proof">
@@ -568,7 +588,7 @@ export function TransferResultDashboard({
           </div>
           <div className="df2-result-mapping-proof-actions">
             <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={() => setProofOpen(true)}>
-              <DtIcon name="layers" size={14} /> Open mapping proof
+              <DtIcon name="map" size={14} /> Open mapping proof
             </button>
             {result.job_id && (
               <button
@@ -630,7 +650,7 @@ export function TransferResultDashboard({
       {(result.cdc_plugin || result.cdc_delivery || result.cdc_row_filter || result.cdc_shared_reader || result.snapshot_mode || result.watermark || result.cdc_lease_holder || result.source_ha_role) && (
         <section className="df2-result-cdc-strip" aria-label="CDC run summary">
           <header>
-            <DtIcon name="activity" size={14} />
+            <DtIcon name="live" size={14} />
             <strong>CDC</strong>
             <span>{cdcDeliveryResultCopy({
               cdcDelivery: result.cdc_delivery,
@@ -960,7 +980,7 @@ export function TransferResultDashboard({
         <div className="df2-result-actions df2-result-actions-remediate">
           {onOpenValidate && (!result.success || hasIntegrityLoss) && (
             <button type="button" className="df2-btn df2-btn-primary" onClick={onOpenValidate}>
-              <DtIcon name="gate" size={14} /> Open Validate
+              <DtIcon name="verify" size={14} /> Open Validate
             </button>
           )}
           <button type="button" className="df2-btn df2-btn-primary" onClick={onNewTransfer}>
@@ -973,7 +993,7 @@ export function TransferResultDashboard({
           )}
           {onSchedule && (
             <button type="button" className="df2-btn" onClick={onSchedule}>
-              <DtIcon name="activity" size={14} /> Schedule route
+              <DtIcon name="schedule" size={14} /> Schedule route
             </button>
           )}
         </div>

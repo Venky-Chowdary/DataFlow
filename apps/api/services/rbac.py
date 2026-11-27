@@ -445,6 +445,8 @@ _PATH_RULES: list[tuple[str, str, str]] = [
 # paths that cannot be represented safely by a prefix.
 _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("GET", "/api/v1/ops/risk-contract-upgrade-report", Permission.WORKSPACE_MANAGE),
+    # The schedule form's next-runs preview: computation only, no schedule read or write.
+    ("POST", "/api/v1/schedules/preview", Permission.SCHEDULE_READ),
     ("GET", "/api/v1/ops/cdc-cursors", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/ops/cdc-cursors/keys", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/ops/cdc-cursors/clear", Permission.WORKSPACE_MANAGE),

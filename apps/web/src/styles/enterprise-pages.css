@@ -730,7 +730,6 @@
   margin: 0 0 12px;
   padding: 12px;
   border: 1px solid var(--df-warning-border);
-  border-left: 4px solid var(--df-warning);
   border-radius: var(--df-radius-md);
   background: var(--df-warning-bg);
 }
@@ -764,7 +763,6 @@
   gap: 6px;
   padding: 12px 14px;
   border: 1px solid var(--df-warning-border);
-  border-left: 3px solid var(--df-warning);
   border-radius: var(--df-radius-card, 8px);
   background: var(--df-warning-bg);
 }
@@ -913,7 +911,6 @@
   gap: 8px;
   padding: 10px 12px;
   border: 1px solid var(--df-border);
-  border-left: 3px solid var(--df-brand, var(--df-warning));
   border-radius: var(--df-radius-card, 8px);
   background: var(--df-surface-muted);
 }

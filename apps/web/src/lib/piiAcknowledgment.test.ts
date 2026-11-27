@@ -93,7 +93,6 @@ describe("PII acknowledgment transport and naming", () => {
     // every blocker surface must resolve its own text through blockerTitle().
     const surfaces = [
       "../pages/JobsPage.tsx",
-      "../components/PreflightTimeline.tsx",
       "../components/transfer/ValidateDashboard.tsx",
     ];
     for (const rel of surfaces) {
@@ -176,7 +175,7 @@ describe("validate transport honesty", () => {
     const msg = validateTransportMessage("upstream timed out", 1_000_000);
     assert.match(msg, /1,000,000 row/);
     assert.match(msg, /Re-run Validate/);
-    assert.match(msg, /Execute stays locked/);
+    assert.match(msg, /Run stays locked/);
     assert.equal(
       validateTransportMessage("upstream timed out", null).includes("while checking"),
       false,

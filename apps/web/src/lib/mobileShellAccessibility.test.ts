@@ -38,10 +38,11 @@ describe("responsive app shell accessibility", () => {
   });
 
   it("uses a compact six-step row with the route below it", () => {
-    assert.match(stepperCss, /grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/);
+    assert.match(stepperCss, /grid-template-columns: repeat\(6, auto\)/);
     assert.match(transferStudioCss, /\.df2-page-transfer-studio \.df2-transfer-studio-chrome-row\s*\{\s*display: grid;\s*grid-template-columns: minmax\(0, 1fr\)/);
     assert.match(stepperCss, /df2-transfer-studio-chrome-row \.df2-route-bar\s*\{[\s\S]*?order: 2/);
-    assert.match(stepperCss, /df2-wizard-label-short\s*\{[\s\S]*?display: inline !important/);
+    // Full step names on the phone too: no "Src" / "Gate" abbreviations.
+    assert.doesNotMatch(stepperCss, /df2-wizard-label-short/);
     assert.match(tokensCss, /--df-stepper-mobile-height: 32px/);
     assert.match(tokensCss, /--df-mobile-nav-max-width: 280px/);
   });

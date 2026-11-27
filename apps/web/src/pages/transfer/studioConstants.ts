@@ -1,3 +1,4 @@
+import type { IconName } from "../../components/icons/iconMap";
 /** Transfer Studio step / upload constants (Phase F9 extraction from TransferPage). */
 
 export const FILE_FORMAT_SOURCE_TYPES = new Set([
@@ -31,13 +32,14 @@ export const STEP_MAP = 4;
 export const STEP_VALIDATE = 5;
 export const STEP_RUN = 6;
 
-export const STEPS: { n: number; label: string; shortLabel: string; icon: string }[] = [
-  { n: STEP_SOURCE, label: "Source", shortLabel: "Src", icon: "upload" },
-  { n: STEP_DESTINATION, label: "Destination", shortLabel: "Dest", icon: "connectors" },
-  { n: STEP_SHAPE, label: "Transform", shortLabel: "Xform", icon: "layers" },
-  { n: STEP_MAP, label: "Map", shortLabel: "Map", icon: "sparkle" },
-  { n: STEP_VALIDATE, label: "Validate", shortLabel: "Gate", icon: "gate" },
-  { n: STEP_RUN, label: "Run", shortLabel: "Run", icon: "transfer" },
+/** Step names are never abbreviated: the phone stepper shows these full names too. */
+export const STEPS: { n: number; label: string; icon: IconName }[] = [
+  { n: STEP_SOURCE, label: "Source", icon: "upload" },
+  { n: STEP_DESTINATION, label: "Destination", icon: "connectors" },
+  { n: STEP_SHAPE, label: "Transform", icon: "transform" },
+  { n: STEP_MAP, label: "Map", icon: "map" },
+  { n: STEP_VALIDATE, label: "Validate", icon: "verify" },
+  { n: STEP_RUN, label: "Run", icon: "play" },
 ];
 
 export const RUN_LAUNCH_STAGES = [

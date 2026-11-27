@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { SectionLoader } from "../components/LoadingState";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
+import { Callout } from "../components/ui/Callout";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
@@ -73,6 +75,7 @@ export function TransformLibraryPage() {
   const [previewError, setPreviewError] = useState("");
 
   const load = useCallback(async () => {
+    setLoadError("");
     try {
       const [list, opList, tmpl] = await Promise.all([
         listTransformLibrary(),
@@ -286,7 +289,7 @@ export function TransformLibraryPage() {
 
           {whereUsed && whereUsed.length > 0 ? (
             <div className="df2-alert df2-alert-warn" role="status">
-              <DtIcon name="warn" size={16} />
+              <DtIcon name="warning" size={16} />
               <div>
                 <p>
                   Bound by {whereUsed.length} schedule{whereUsed.length === 1 ? "" : "s"}:
@@ -573,12 +576,19 @@ export function TransformLibraryPage() {
             </Button>
           }
         />
-        {loadError ? (
-          <p className="df2-alert df2-alert-error" role="alert">{loadError}</p>
+        {loadError && recipes === null ? (
+          <ErrorState
+            title="Couldn't load the Transform Library"
+            message={loadError}
+            onRetry={() => void load()}
+          />
         ) : recipes === null ? (
           <SectionLoader title="Loading library…" />
         ) : (
           <>
+            {loadError ? (
+              <Callout tone="danger" role="alert" title="Couldn't refresh the library">{loadError}</Callout>
+            ) : null}
             {templates.length ? (
               <PageSection title="Templates">
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>

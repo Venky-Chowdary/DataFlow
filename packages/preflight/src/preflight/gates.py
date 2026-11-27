@@ -4211,20 +4211,72 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
     )
 
 
+_HOST_GATE_STATUS = {
+    "pass": GateStatus.PASS,
+    "block": GateStatus.BLOCK,
+    "skip": GateStatus.SKIP,
+    "warn": GateStatus.WARN,
+    # A host that reports its own failure refused the check: Run stays locked.
+    "error": GateStatus.BLOCK,
+    "fail": GateStatus.BLOCK,
+    "failed": GateStatus.BLOCK,
+}
+#: Fields that say why a skip happened (apps/web/src/lib/gateChecklist.ts gateOutcome).
+_SKIP_REASON_FIELDS = ("unmeasured", "remediation_kind", "error", "declared", "applicable",
+                       "schemaless", "dest_recreated", "rule_id")
+
+
 def _host_gate_to_result(gate_id: GateId, payload: dict[str, Any], start: float) -> GateResult:
-    """Translate hosted gate dicts (pass/block/skip/warn) onto package GateResult."""
-    raw = str(payload.get("status") or "skip").strip().lower()
-    status = {
-        "pass": GateStatus.PASS,
-        "block": GateStatus.BLOCK,
-        "skip": GateStatus.SKIP,
-        "warn": GateStatus.WARN,
-    }.get(raw, GateStatus.SKIP)
+    """Translate hosted gate dicts (pass/block/skip/warn) onto package GateResult.
+
+    A payload with no status, or one this package does not know, proved
+    nothing: it is a skip that says so in structured fields (``unmeasured``,
+    ``skip_reason``), never a skip carrying whatever details the host sent.
+    A host status of error / fail is a block. A host skip that names no
+    reason is kept, with ``unmeasured`` and ``skip_reason`` added.
+    """
+    raw = str(payload.get("status") or "").strip().lower()
+    status = _HOST_GATE_STATUS.get(raw)
+    host_details = payload.get("details")
+    details = dict(host_details) if isinstance(host_details, dict) else {}
+    if status is None:
+        return GateResult(
+            gate_id=gate_id,
+            status=GateStatus.SKIP,
+            message=(
+                "This check could not run: the service that runs it sent "
+                + ("no result." if not raw else f"a result this version does not know ({raw[:40]}).")
+            ),
+            details={
+                "unmeasured": True,
+                "remediation_kind": "retry_validate",
+                "skip_reason": "host_status_missing" if not raw else "host_status_unknown",
+                "host_status": raw[:40],
+            },
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+    message = str(payload.get("message") or "")
+    if status is GateStatus.BLOCK and raw != "block":
+        details["host_status"] = raw
+        message = message or "This check failed in the service that runs it."
+    if status is GateStatus.SKIP and not any(k in details for k in _SKIP_REASON_FIELDS):
+        return GateResult(
+            gate_id=gate_id,
+            status=GateStatus.SKIP,
+            message=message or "This check could not run: the service that runs it gave no reason.",
+            details={
+                **details,
+                "unmeasured": True,
+                "remediation_kind": "retry_validate",
+                "skip_reason": "host_skip_unexplained",
+            },
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
     return GateResult(
         gate_id=gate_id,
         status=status,
-        message=str(payload.get("message") or ""),
-        details=dict(payload.get("details") or {}),
+        message=message,
+        details=details,
         duration_ms=(time.perf_counter() - start) * 1000,
     )
 
@@ -4339,8 +4391,8 @@ def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
         return GateResult(
             gate_id=GateId.G9_SYNC_CONTRACT,
             status=GateStatus.SKIP,
-            message="Sync contract skipped — hosted cursor gate unavailable",
-            details={"source_read_mode": mode, "sync_mode": sync},
+            message="Sync contract check could not run: the service that runs it did not answer.",
+            details={"source_read_mode": mode, "sync_mode": sync, "unmeasured": True, "reason": "check_service_unavailable"},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
 
@@ -4353,8 +4405,8 @@ def gate_g13_source_coverage(ctx: PreflightContext) -> GateResult:
         return GateResult(
             gate_id=GateId.G13_SOURCE_COVERAGE,
             status=GateStatus.SKIP,
-            message="Source coverage skipped — hosted G13 unavailable",
-            details={},
+            message="Source coverage check could not run: the service that runs it did not answer.",
+            details={"unmeasured": True, "reason": "check_service_unavailable"},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
     _coverage, gate = build_source_coverage_gate(
@@ -4373,8 +4425,8 @@ def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
         return GateResult(
             gate_id=GateId.G14_DESTINATION_REQUIREMENTS,
             status=GateStatus.SKIP,
-            message="Destination requirements skipped — hosted G14 unavailable",
-            details={},
+            message="Destination requirements check could not run: the service that runs it did not answer.",
+            details={"unmeasured": True, "reason": "check_service_unavailable"},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
     dest_columns = _live_dest_column_names(dest)
@@ -4391,8 +4443,8 @@ def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
         return GateResult(
             gate_id=GateId.G14_DESTINATION_REQUIREMENTS,
             status=GateStatus.SKIP,
-            message="Destination requirements not applicable",
-            details={},
+            message="Destination requirements do not apply to this route.",
+            details={"applicable": False},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
     return _host_gate_to_result(GateId.G14_DESTINATION_REQUIREMENTS, gate, start)
@@ -4407,8 +4459,8 @@ def gate_g15_dest_exists_shape(ctx: PreflightContext) -> GateResult:
         return GateResult(
             gate_id=GateId.G15_DEST_EXISTS_SHAPE,
             status=GateStatus.SKIP,
-            message="Dest-exists shape skipped — hosted G15 unavailable",
-            details={},
+            message="Destination shape check could not run: the service that runs it did not answer.",
+            details={"unmeasured": True, "reason": "check_service_unavailable"},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
     dest_cols = _live_dest_column_names(dest)

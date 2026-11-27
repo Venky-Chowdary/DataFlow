@@ -30,6 +30,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from services import schedule_clock
 from services.workspace_filter import WorkspaceFilter
 from services.ops_events import emit_event
 from services.schedule_store import (
@@ -110,7 +111,7 @@ def _approval_event(event: str, outcome: str, schedule_id: str, request: dict[st
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return schedule_clock.utc_now().isoformat()
 
 
 def _fingerprint(payload: dict[str, Any]) -> str:
@@ -299,7 +300,7 @@ def _acknowledged_drift_omissions(
         for m in (sched.mappings or [])
         if isinstance(m, dict)
     }
-    at = datetime.now(timezone.utc).isoformat()
+    at = schedule_clock.utc_now().isoformat()
     out: list[dict[str, Any]] = []
     for col in named:
         if col.lower() in covered:
@@ -412,7 +413,7 @@ def approve_request(
         # Approving is an instruction to proceed, so the next beat is now rather
         # than a full cadence away — the operator is not asked to wait a day for
         # the decision they just made to take effect.
-        "next_run_at": (run_at or datetime.now(timezone.utc))
+        "next_run_at": (run_at or schedule_clock.utc_now())
         .astimezone(timezone.utc)
         .isoformat(),
         "retry_at": None,
@@ -565,7 +566,7 @@ def resolve_plan_change(
     from services.schedule_mapping_contract import is_empty_mapping_finding
     from services.schedule_store import next_run_for
 
-    now = datetime.now(timezone.utc)
+    now = schedule_clock.utc_now()
     if is_empty_mapping_finding(str(request.get("code") or ""), str(request.get("finding") or "")):
         # Persisting the mapping contract arms the pipeline; it does not owe a
         # missed run. The first run is the next cadence slot, as on any enable

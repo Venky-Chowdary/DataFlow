@@ -1,0 +1,225 @@
+{
+ "generated_by": "apps/api/tests/test_gate_payloads_fixture.py",
+ "payloads": {
+  "g2_privilege_probe_unavailable": {
+   "details": {
+    "can_create_table": true,
+    "can_write": true,
+    "evidence_scope": {
+     "coverage": "n/a",
+     "kind": "destination_connectivity"
+    },
+    "privilege_probe": {
+     "detail": "ACL describe unavailable",
+     "engine": "postgresql",
+     "method": "has_table_privilege",
+     "status": "unavailable"
+    },
+    "table_exists": false
+   },
+   "id": "g2_destination",
+   "message": "Privilege catalog unavailable for create-new destination — cannot prove CREATE (ACL describe unavailable). Re-validate when grants are readable, or target an existing table.",
+   "status": "block"
+  },
+  "g2_redshift_staging_denied": {
+   "details": {
+    "can_create_table": true,
+    "can_write": true,
+    "evidence_scope": {
+     "coverage": "n/a",
+     "kind": "destination_connectivity"
+    },
+    "redshift_staging_probe": {
+     "bucket": "dw-stage",
+     "detail": "Staging bucket `dw-stage` ACL does not grant write for COPY FROM S3",
+     "method": "GetBucketAcl",
+     "status": "denied"
+    },
+    "table_exists": true
+   },
+   "id": "g2_destination",
+   "message": "Staging bucket `dw-stage` ACL does not grant write for COPY FROM S3",
+   "status": "block"
+  },
+  "g3_declared_without_samples": {
+   "details": {
+    "accepted_width_narrowings": [],
+    "evidence_scope": {
+     "columns": 2,
+     "coverage": "full_schema",
+     "kind": "schema_contract",
+     "note": "Declared types only — no sample values"
+    },
+    "issues": [
+     "Lossy coercion: qty (VARCHAR) → qty (INTEGER) — declared lossy; sign Migration Risk Contract or remap",
+     "Lossy coercion: seen_at (TIMESTAMP) → seen_at (DATE) — datetime→date (time-of-day truncation; not soft-passed by samples) — sign Migration Risk Contract or remap"
+    ],
+    "issues_detail": [
+     {
+      "column": "seen_at",
+      "contracted_holdout": false,
+      "failed": 0,
+      "fidelity_collapse": true,
+      "message": "Lossy coercion: seen_at (TIMESTAMP) → seen_at (DATE) — datetime→date (time-of-day truncation; not soft-passed by samples)",
+      "nested_shape_collapse": false,
+      "reason": "Lossy coercion: seen_at (TIMESTAMP) → seen_at (DATE) — datetime→date (time-of-day truncation; not soft-passed by samples)",
+      "risk_acknowledged": false,
+      "sample_failures": [],
+      "sampled": 0,
+      "sentinel_nulls": 0,
+      "severity": "block",
+      "source": "seen_at",
+      "source_type": "TIMESTAMP",
+      "suggested_fix": "Accept risk on Map, or remap to a fidelity-preserving type.",
+      "suggested_target_type": null,
+      "suggested_transform": null,
+      "target": "seen_at",
+      "target_type": "DATE"
+     }
+    ],
+    "remediation_kind": "change_target_type",
+    "rule_id": "g3_schema_contract.lossy_coercion",
+    "warnings": []
+   },
+   "id": "g3_schema_contract",
+   "message": "2 type coercion issue(s): Lossy coercion: qty (VARCHAR) → qty (INTEGER) — declared lossy; sign Migration Risk Contract or remap",
+   "status": "block"
+  },
+  "g3_probed_with_signed_column": {
+   "details": {
+    "accepted_width_narrowings": [],
+    "evidence_scope": {
+     "columns": 3,
+     "coverage": "sample",
+     "kind": "schema_contract",
+     "note": "3 preview rows · value-aware coercion",
+     "sample_rows": 3
+    },
+    "issues": [
+     "Lossy coercion: qty (VARCHAR) → qty (INTEGER) — declared lossy; sign Migration Risk Contract or remap (samples cannot soft-pass)",
+     "Lossy coercion: code (VARCHAR(20)) → code (VARCHAR(10)) — VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap) — sign Migration Risk Contract or remap"
+    ],
+    "issues_detail": [
+     {
+      "calendar_holdout": false,
+      "contracted_holdout": false,
+      "declared_lossy": true,
+      "failed": 1,
+      "fidelity_collapse": true,
+      "json_scalar_wraps": 0,
+      "probe_cast_only": false,
+      "risk_acknowledged": false,
+      "sample_failures": [
+       "row 2: cannot cast 'x' to INTEGER"
+      ],
+      "sampled": 3,
+      "sentinel_nulls": 0,
+      "severity": "block",
+      "source": "qty",
+      "source_type": "VARCHAR",
+      "suggested_fix": "Sign a Migration Risk Contract, widen the destination type, or remap",
+      "suggested_target_type": null,
+      "suggested_transform": null,
+      "target": "qty",
+      "target_type": "INTEGER"
+     },
+     {
+      "calendar_holdout": false,
+      "contracted_holdout": true,
+      "declared_lossy": true,
+      "failed": 2,
+      "fidelity_collapse": true,
+      "json_scalar_wraps": 0,
+      "probe_cast_only": false,
+      "risk_acknowledged": true,
+      "sample_failures": [
+       "row 1: cannot cast 'n/a' to INTEGER"
+      ],
+      "sampled": 3,
+      "sentinel_nulls": 0,
+      "severity": "warn",
+      "source": "price",
+      "source_type": "VARCHAR",
+      "suggested_fix": "",
+      "suggested_target_type": null,
+      "suggested_transform": null,
+      "target": "price",
+      "target_type": "INTEGER"
+     },
+     {
+      "column": "code",
+      "contracted_holdout": false,
+      "failed": 0,
+      "fidelity_collapse": true,
+      "message": "Lossy coercion: code (VARCHAR(20)) → code (VARCHAR(10)) — VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)",
+      "nested_shape_collapse": false,
+      "reason": "Lossy coercion: code (VARCHAR(20)) → code (VARCHAR(10)) — VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)",
+      "risk_acknowledged": false,
+      "sample_failures": [],
+      "sampled": 3,
+      "sentinel_nulls": 1,
+      "severity": "block",
+      "source": "code",
+      "source_type": "VARCHAR(20)",
+      "suggested_fix": "Accept risk on Map, or remap to a fidelity-preserving type.",
+      "suggested_target_type": null,
+      "suggested_transform": null,
+      "target": "code",
+      "target_type": "VARCHAR(10)"
+     }
+    ],
+    "remediation_kind": "change_target_type",
+    "rule_id": "g3_schema_contract.lossy_coercion",
+    "warnings": [
+     "Lossy coercion: price (VARCHAR) → price (INTEGER)"
+    ]
+   },
+   "id": "g3_schema_contract",
+   "message": "2 type coercion issue(s) — qty: row 2: cannot cast 'x' to INTEGER",
+   "status": "block"
+  },
+  "g3_schemaless_with_signed_column": {
+   "details": {
+    "bson_affinity": true,
+    "dest_kind": "mongodb",
+    "evidence_scope": {
+     "coverage": "declared_types",
+     "kind": "schema_contract",
+     "note": "Schemaless dest — BSON/AttributeValue affinity (no DDL)"
+    },
+    "issues": [
+     "owner_id → owner_id: Schemaless affinity: ObjectId → INTEGER on mongodb invents a numeric/scalar domain the source never had. — sign Migration Risk Contract or remap"
+    ],
+    "issues_detail": [
+     {
+      "kind": "bson_affinity_block",
+      "message": "Schemaless affinity: ObjectId → INTEGER on mongodb invents a numeric/scalar domain the source never had.",
+      "risk_acknowledged": false,
+      "severity": "block",
+      "source": "owner_id",
+      "source_type": "ObjectId",
+      "target": "owner_id",
+      "target_type": "INTEGER"
+     },
+     {
+      "kind": "bson_affinity_block",
+      "message": "Schemaless affinity: ObjectId → INTEGER on mongodb invents a numeric/scalar domain the source never had.",
+      "risk_acknowledged": true,
+      "severity": "block",
+      "source": "team_id",
+      "source_type": "ObjectId",
+      "target": "team_id",
+      "target_type": "INTEGER"
+     }
+    ],
+    "schemaless": true,
+    "warnings": [
+     "team_id → team_id: Schemaless affinity: ObjectId → INTEGER on mongodb invents a numeric/scalar domain the source never had. (risk contract)"
+    ]
+   },
+   "id": "g3_schema_contract",
+   "message": "Schemaless BSON affinity blocked 1 mapping(s) on mongodb: owner_id → owner_id: Schemaless affinity: ObjectId → INTEGER on mongodb invents a numeric/scalar domain the source never had. — sign Migration Risk Contract or remap",
+   "status": "block"
+  }
+ }
+}

@@ -170,8 +170,8 @@
   color: #5eead4;
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
+  letter-spacing: normal;
+  text-transform: none;
 }
 
 .df2-page-docs .df2-docs-hero-title {
@@ -824,7 +824,6 @@
   gap: 4px;
   padding: 12px 14px;
   border: 1px solid #e2e8f0;
-  border-left: 3px solid var(--df-brand);
   background: var(--df-surface);
   border-radius: 10px;
   min-width: 0;
@@ -1941,7 +1940,6 @@
   gap: 4px;
   padding: 14px 16px;
   border: 1px solid #e2e8f0;
-  border-left: 3px solid var(--df-brand);
   background: var(--df-surface);
   border-radius: 10px;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);

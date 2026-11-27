@@ -15,9 +15,9 @@ was given; :func:`audit_schedule_acknowledgment` writes the governance record.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
+from services import schedule_clock
 from services.audit_coverage import record_security_event
 
 
@@ -132,7 +132,7 @@ def schedule_acknowledgment_fields(
         "acknowledgment_at": (
             str(getattr(previous, "acknowledgment_at", "") or "")
             if unchanged
-            else datetime.now(timezone.utc).isoformat()
+            else schedule_clock.utc_now().isoformat()
         ),
     }
 

@@ -7,7 +7,9 @@ import {
   STALE_CHUNK_RELOAD_KEY,
   alreadyReloadedForStaleChunk,
   clearStaleChunkReloadGuard,
+  expireAfterLoad,
   isStaleChunkError,
+  lazyNamed,
   pageErrorCopy,
   reloadOnceForStaleChunk,
   shouldAutoReloadStaleChunk,
@@ -132,5 +134,35 @@ describe("reloadOnceForStaleChunk", () => {
     const browser = installBrowserStubs();
     assert.equal(reloadOnceForStaleChunk(new Error("render")), false);
     assert.equal(browser.reloads(), 0);
+  });
+});
+
+describe("expireAfterLoad (deep link survives a slow screen chunk)", () => {
+  it("does not expire before the screen's code has loaded", async () => {
+    let resolve!: () => void;
+    const loaded = new Promise<void>((r) => { resolve = r; });
+    let expired = false;
+    expireAfterLoad(loaded, 5, () => { expired = true; });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(expired, false, "a 30 ms chunk load outlived a 5 ms timer started at the click");
+    resolve();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(expired, true);
+  });
+
+  it("still expires when the chunk fails to load, and cancel stops it", async () => {
+    let fired = 0;
+    expireAfterLoad(Promise.reject(new Error("chunk 404")), 1, () => { fired += 1; });
+    const cancel = expireAfterLoad(Promise.resolve(), 20, () => { fired += 10; });
+    cancel();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(fired, 1);
+  });
+
+  it("lazyNamed exposes whenLoaded, which never rejects", async () => {
+    const ok = lazyNamed(async () => ({ Page: () => null }), "Page");
+    const bad = lazyNamed(async (): Promise<{ Page: () => null }> => { throw new Error("offline"); }, "Page");
+    await ok.whenLoaded();
+    await bad.whenLoaded();
   });
 });

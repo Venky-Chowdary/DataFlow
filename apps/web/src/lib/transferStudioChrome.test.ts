@@ -33,16 +33,16 @@ function basePreflight(over: Partial<PreflightResult> = {}): PreflightResult {
 }
 
 describe("Transfer Studio chrome contracts", () => {
-  it("WizardSteps exposes shortLabel for density breakpoints", () => {
+  it("WizardSteps shows every step's full name, never an abbreviation", () => {
     const src = readFileSync(join(webRoot, "components/ui/WizardSteps.tsx"), "utf8");
-    assert.match(src, /wizard-label-short/);
-    assert.match(src, /shortLabel/);
+    assert.doesNotMatch(src, /wizard-label-short/);
+    assert.doesNotMatch(src, /shortLabel/);
   });
 
   it("enterprise CSS keeps the compact short labels and the validate rail", () => {
     const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
     assert.match(css, /@media \(max-width: 1439px\)/);
-    assert.match(css, /wizard-label-short \{\s*display: inline !important;/s);
+    assert.doesNotMatch(css, /wizard-label-short/);
     assert.match(css, /validate-rail-primary-fix[\s\S]*width: 100% !important/);
     assert.match(
       css,
@@ -56,7 +56,6 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(fullNames, /@media \(min-width: 768px\)/);
     assert.match(fullNames, /max-width: 150px/);
     assert.match(fullNames, /\.df2-wizard-label \{\s*display: inline !important;/);
-    assert.match(fullNames, /\.df2-wizard-label-short \{\s*display: none !important;/);
     assert.match(fullNames, /color: var\(--df-text-primary\) !important/);
     assert.match(fullNames, /color: var\(--df-brand-strong\) !important/);
     assert.match(fullNames, /font-weight: var\(--df-fw-bold\)/);
@@ -82,7 +81,8 @@ describe("Transfer Studio chrome contracts", () => {
     const inspector = readFileSync(join(webRoot, "components/transfer/TransferStudioInspector.tsx"), "utf8");
     const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
 
-    assert.match(constants, /label: "Transform", shortLabel: "Xform"/);
+    assert.match(constants, /label: "Transform", icon: "transform"/);
+    assert.doesNotMatch(constants, /Xform|shortLabel/);
     assert.doesNotMatch(constants, /label: "Shape"/);
     assert.match(inspector, /title: "Transform \(pre-load\)"/);
     assert.match(page, /Continue to Transform/);
@@ -355,14 +355,14 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(panel, /businessRule\.status === "needs_confirmation"/);
   });
 
-  it("ValidateActionsRail labels review-grade passes as Review-grade, not ready", () => {
+  it("ValidateActionsRail labels review-grade passes as Needs review, not ready", () => {
     const src = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
     assert.match(src, /reviewGrade/);
     assert.match(src, /statusLabel/);
-    assert.match(src, /reviewGrade\s*\n\s*\? "Review-grade"/);
+    assert.match(src, /reviewGrade\s*\n\s*\? "Needs review"/);
     assert.match(src, /executeDisabled[\s\S]*reviewGrade/);
-    assert.match(src, /Execute \(review\)/);
-    assert.match(src, /Review-grade \/ local preflight/);
+    // One Run label; the reason it is disabled is said beside it.
+    assert.match(src, /Validate returned review: resolve it, then re-run/);
     assert.doesNotMatch(src, /span>\{passed \? "ready" : "blocked"\}/);
   });
 
@@ -382,11 +382,12 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(rail, /preflightError/);
     assert.match(rail, /transportFailed/);
     assert.match(rail, /\? "Failed"/);
-    assert.match(rail, /!preflight && !transportFailed \? "Run preflight" : "Re-run Validate"/);
+    assert.match(rail, /!preflight && !transportFailed \? "Run Validate" : "Re-run Validate"/);
     assert.match(dash, /preflightError = ""/);
     assert.match(dash, /transportFailed/);
-    assert.match(dash, /"FAILED"/);
-    assert.match(dash, /Validate did not finish — Re-run from the rail/);
+    assert.match(dash, /\? "Failed"/);
+    // P1-16: a failure with Retry (ErrorState), never a verdict.
+    assert.match(dash, /<ErrorState[\s\S]{0,300}onRetry=\{onRunPreflight\}/);
     // Dashboard diagnoses; rail owns the teal Re-run.
     assert.doesNotMatch(
       dash,
@@ -436,7 +437,7 @@ describe("Transfer Studio chrome contracts", () => {
     const ledgerCss = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
 
     assert.match(mapStep, /\{continueToValidate\}/);
-    assert.match(mapStep, /Continue to Validate →/);
+    assert.match(mapStep, /StepPrimaryButton[\s\S]{0,200}Continue to Validate/);
     assert.match(mapStep, /df2-rule-map-body/);
     assert.match(mapStep, /df2-rule-honesty/);
     assert.match(mapStep, /embedded/);
@@ -641,10 +642,14 @@ describe("Transfer Studio chrome contracts", () => {
 
     assert.match(constants, /label: "Source".*label: "Destination".*label: "Transform".*label: "Map".*label: "Validate".*label: "Run"/s);
     assert.match(page, /Continue to Destination/);
-    assert.match(page, /Analyze Route/);
+    assert.match(page, /Analyze route/);
     assert.match(page, /Continue to Transform/);
-    assert.match(page, /DtIcon name="arrow-left"[\s\S]{0,40}Back to source/);
-    assert.match(xform, /Back to Destination/);
+    // Every step: one Back (arrow icon, "Back") and one primary, from StudioStepFooter.
+    assert.match(page, /<StepBackButton onClick=\{\(\) => \(studioFlags\.canvas \? backWizard\(\) : setStep\(STEP_SOURCE\)\)\} \/>/);
+    assert.match(xform, /<StepBackButton label=\{canvasEnabled \? "Back to Destination" : "Back"\}/);
+    // No arrow characters in button labels (P1-23): the arrow is an icon.
+    assert.doesNotMatch(page, /Continue to [A-Za-z]+ →|← Back/);
+    assert.doesNotMatch(mapStep, /Continue to Validate →|← Back/);
     const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
     assert.match(shape, /Continue without transforming/);
     // Rules loaded but no shape steps → CTA is "Continue to Map".
@@ -652,14 +657,15 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(xform, /ruleCount: ruleReport\?\.rule_count/);
     assert.match(shape, /Continue with this transform/);
     assert.match(xform, /continueState\.label/);
-    assert.match(mapStep, /Continue to Validate →/);
-    assert.match(mapStep, /← Back/);
-    assert.match(rail, /"Execute"/);
-    assert.match(page, /Execute Transfer/);
+    assert.match(mapStep, /StepPrimaryButton[\s\S]{0,200}Continue to Validate/);
+    // One word for the write on every step: Run (P1-11), never Execute.
+    assert.match(rail, /"Run transfer"/);
+    assert.match(page, /Run transfer/);
+    assert.doesNotMatch(page, /Execute Transfer/);
     assert.doesNotMatch(page, /Continue to Shape/);
     // One primary exit per step — dest Analyze is ghost, not a second primary.
-    assert.match(page, /className="df2-btn df2-btn-ghost"[\s\S]{0,500}Analyze Route/);
-    assert.match(page, /className="df2-btn df2-btn-primary"[\s\S]{0,400}Continue to Transform/);
+    assert.match(page, /variant="ghost"[\s\S]{0,400}Analyze route/);
+    assert.match(page, /<StepPrimaryButton[\s\S]{0,400}Continue to Transform/);
   });
 
   it("laptop density does not hide Dest/Transform/Validate primary actions behind 48px", () => {
@@ -1077,7 +1083,10 @@ describe("enterprise wedge proof surfaces", () => {
     assert.match(page, /studioSchedulePersistable \? \(\) => void handleScheduleRoute\(\) : undefined/);
     assert.match(page, /studioSchedulePersistable && \(/);
     // UX-34: the completion toast names where the proof is, without internal names.
-    assert.match(app, /The Trust Report and post-write proof are on the job in Jobs\./);
+    // Lead item 2: it also says the verdict, and is green only for proven / explained.
+    assert.match(app, /The Trust Report is on the job in Jobs\./);
+    assert.match(app, /Verification: \$\{verification\.word\}/);
+    assert.match(app, /tone: verification\?\.supportsSuccess \? "success" : "info"/);
   });
 
   it("Settings API keys own one Generate control; tenant placeholders are not a bank", () => {
@@ -1105,8 +1114,11 @@ describe("enterprise wedge proof surfaces", () => {
     const theater = readFileSync(join(webRoot, "components/JobTheater.tsx"), "utf8");
     const gate8 = readFileSync(join(webRoot, "components/transfer/Gate8ProofCard.tsx"), "utf8");
     assert.match(theater, /label="Validate"/);
-    assert.match(theater, /df2-theater-pop-strip/);
-    assert.match(theater, /Dest COUNT/);
+    // One "How this was checked" section: destination count, checksum, Validate run.
+    assert.match(theater, /<RunCheckSummary/);
+    const checks = readFileSync(join(webRoot, "components/transfer/RunCheckSummary.tsx"), "utf8");
+    assert.match(checks, /Destination count/);
+    assert.match(checks, /Validate run/);
     assert.match(theater, /Run lineage/);
     assert.match(theater, /readGate8Population/);
     assert.doesNotMatch(theater, /population_proof:\s*true/);

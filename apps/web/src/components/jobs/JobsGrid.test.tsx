@@ -17,6 +17,7 @@ Object.assign(globalThis, {
   Node: dom.window.Node,
   MouseEvent: dom.window.MouseEvent,
   KeyboardEvent: dom.window.KeyboardEvent,
+  CustomEvent: dom.window.CustomEvent, // the row menu (Radix) dispatches DOM CustomEvents
   getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   IS_REACT_ACT_ENVIRONMENT: true,
 });
@@ -41,7 +42,8 @@ const { DEFAULT_JOBS_GRID_SORT, JOBS_GRID_COLUMNS } = await import("../../lib/jo
 const jobs: TransferJob[] = [
   { _id: "job-live", name: "orders_daily", status: "running", progress_pct: 40, total_rows: 1000, records_processed: 400 },
   { _id: "job-ok", name: "customers_full", status: "completed", records_processed: 10,
-    verification_summary: { passed: false, message: "2 rows differ" } },
+    verification_summary: { passed: false, message: "2 rows differ" },
+    parity_verdict: { verdict: "unexplained", unexplained: 2, method: "full" } },
   { _id: "job-bad", name: "events_stream", status: "failed", records_processed: 0 },
 ].map((j) => ({
   source_type: "mysql",
@@ -125,9 +127,14 @@ describe("JobsGrid", () => {
     assert.equal(rowEl("job-live").tabIndex, -1);
     const status = rowEl("job-bad").querySelector(".df2-jobs-grid-status");
     assert.equal(status?.textContent, "Failed", "status is text, not colour alone");
-    const verify = rowEl("job-ok").querySelector(".df2-jobs-grid-col-verification .df2-badge");
-    assert.equal(verify?.textContent, "Failed", "failed verification shows its plain label");
-    assert.match(rowEl("job-ok").querySelector(".df2-jobs-grid-verify")?.getAttribute("title") || "", /2 rows differ/);
+    // The Trust Report's word, icon + text, the row count; the Gate-8 basis in the tooltip.
+    const verify = rowEl("job-ok").querySelector(".df2-jobs-grid-col-verification .df2-verdict");
+    assert.equal(verify?.textContent, "Unexplained· 2 rows");
+    assert.equal(verify?.getAttribute("data-verdict"), "unexplained");
+    assert.ok(verify?.querySelector("svg"), "never colour alone");
+    assert.match(verify?.getAttribute("title") || "", /Some rows differ and no rule explains them\. Checked by: /);
+    assert.equal(rowEl("job-live").querySelector(".df2-verdict")?.textContent, "Not checked yet");
+    assert.equal(rowEl("job-bad").querySelector(".df2-verdict")?.textContent, "Unverifiable", "a failed run Gate-8 never checked");
     const bar = rowEl("job-live").querySelector('[role="progressbar"]');
     assert.equal(bar?.getAttribute("aria-valuenow"), "40");
     assert.equal(rowEl("job-live").querySelector(".df2-jobs-grid-col-rows .df2-jobs-grid-num")?.textContent, "400");
@@ -155,7 +162,8 @@ describe("JobsGrid", () => {
     assert.equal(rows.querySelector(".df2-jobs-grid-num")?.textContent, "48,173");
     assert.equal(rows.querySelector(".is-danger, .is-warn"), null, "row counts carry no verdict colour");
     assert.match(rows.querySelector("[title]")?.getAttribute("title") || "", /at dest/);
-    assert.equal(rowEl("job-q").querySelectorAll(".df2-jobs-grid-col-verification .df2-badge").length, 1);
+    assert.equal(rowEl("job-q").querySelectorAll(".df2-jobs-grid-col-verification .df2-verdict").length, 1);
+    assert.match(rowEl("job-q").querySelector(".df2-verdict")?.getAttribute("title") || "", /37 rows held in quarantine/);
   });
 
   it("moves the cursor with arrows / Home / End and opens with Enter or Space", async () => {
@@ -219,7 +227,9 @@ describe("JobsGrid", () => {
       host.querySelector(".df2-jobs-grid-scroll")!.dispatchEvent(new dom.window.Event("scroll"));
     });
     assert.ok(document.querySelector('[role="menu"]'), "scrolling the grid moves the menu with its row, not closes it");
-    await key(menu, "ArrowDown");
+    assert.equal(document.activeElement, items[0], "opening moves focus to the first item");
+    await key(document.activeElement!, "ArrowDown");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); }); // roving focus moves on the next tick
     assert.equal(document.activeElement, items[1]);
     await act(async () => (items[1] as HTMLButtonElement).click());
     assert.deepEqual(calls.menu, ["copy:job-bad"]);

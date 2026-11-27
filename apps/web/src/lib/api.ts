@@ -1,3 +1,4 @@
+import { publishReportVerdict } from "./reportVerdicts";
 import type { ProgressAbsence, ProgressDelivery } from "./jobProgressGate";
 import { ApiUnreachableError, noteApiReachable, noteApiUnreachable } from "./connectivity";
 import type { RouteCertification, RouteCertificationStatus } from "./routeCertification";
@@ -220,7 +221,7 @@ export function gatewayTimeoutCopy(status: number, operation: string): string {
   if (/^(validate|preflight)/i.test(op)) {
     return (
       `Control plane timed out (HTTP ${status}) while Validate was running. `
-      + `Re-run Validate. Execute stays locked.`
+      + `Re-run Validate. Run stays locked.`
     );
   }
   return (
@@ -1920,6 +1921,18 @@ export async function cancelJob(jobId: string): Promise<{ success: boolean; job_
 }
 
 /** Subscribe to live job progress via SSE with polling fallback. Returns cleanup function. */
+/** The selected table names of a job's request, in order (never its endpoints or secrets). */
+function selectedStreamNames(request: unknown): string[] | undefined {
+  if (!request || typeof request !== "object") return undefined;
+  const contracts = (request as { stream_contracts?: unknown }).stream_contracts;
+  if (!Array.isArray(contracts)) return undefined;
+  const names = contracts
+    .filter((c): c is Record<string, unknown> => Boolean(c) && typeof c === "object" && (c as Record<string, unknown>).selected !== false)
+    .map((c) => String(c.name ?? c.stream ?? "").trim())
+    .filter(Boolean);
+  return names.length ? [...new Set(names)] : undefined;
+}
+
 export function streamJobProgress(
   jobId: string,
   onUpdate: (delivery: ProgressDelivery) => void,
@@ -2109,6 +2122,12 @@ export function streamJobProgress(
         ? raw.row_accounting as JobProgress["row_accounting"]
         : undefined,
       streams: streamHealth.length ? streamHealth : undefined,
+      // Per-table progress on the Run screen (UI pass 2): the table loading
+      // now, the finished ones, and the run's table names in engine order.
+      stream_progress: raw.stream_progress && typeof raw.stream_progress === "object"
+        ? raw.stream_progress as JobProgress["stream_progress"]
+        : undefined,
+      stream_names: Array.isArray(raw.stream_names) ? raw.stream_names.map(String) : selectedStreamNames(raw.transfer_request),
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
         : undefined,
@@ -3265,7 +3284,7 @@ export function validateTransportMessage(
   if (!isTransportFailure(message)) return message;
   return (
     `Validate did not finish${rows}. The control plane timed out or hung — `
-    + `Re-run Validate. Execute stays locked until the API returns a verdict.`
+    + `Re-run Validate. Run stays locked until the API returns a verdict.`
   );
 }
 
@@ -3324,7 +3343,7 @@ async function pollPlanPreflight(
     return data;
   }
   throw new Error(
-    `${lastError} Re-run Validate — Execute stays locked until a verdict lands.`,
+    `${lastError} Re-run Validate. Run stays locked until a verdict lands.`,
   );
 }
 
@@ -6310,7 +6329,10 @@ function parityReportUrl(jobId: string, suffix = ""): string {
 
 async function parityReportFrom(res: Response, fallback: string): Promise<ParityReport> {
   if (!res.ok) throw await apiErrorFrom(res, fallback);
-  return (await res.json()) as ParityReport;
+  const report = (await res.json()) as ParityReport;
+  // One verdict per job everywhere: the Jobs grid and drawer follow this report.
+  publishReportVerdict(report);
+  return report;
 }
 
 /** GET the trust report for one job. */
@@ -6387,6 +6409,40 @@ export async function downloadParitySignedPack(jobId: string): Promise<Blob> {
   const res = await apiFetch(parityReportUrl(jobId, "/export?format=json"));
   if (!res.ok) throw await apiErrorFrom(res, "Could not download the signed pack.");
   return res.blob();
+}
+
+/**
+ * The Trust Report verdict of each listed finished job (Jobs grid rows).
+ * The API leaves out a job it cannot show or that has not finished.
+ */
+export async function fetchJobVerdicts(
+  ids: string[],
+  init: { signal?: AbortSignal } = {},
+): Promise<Record<string, import("./verdict").ListVerdict>> {
+  const wanted = [...new Set(ids.filter(Boolean))].slice(0, 100);
+  if (!wanted.length) return {};
+  const res = await apiFetch(`${API_BASE}/parity/verdicts?ids=${encodeURIComponent(wanted.join(","))}`, { signal: init.signal });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not load verdicts.");
+  const body = (await res.json()) as { verdicts?: Record<string, import("./verdict").ListVerdict> };
+  return body.verdicts && typeof body.verdicts === "object" ? body.verdicts : {};
+}
+
+/** The next runs the scheduler will use for a cadence (schedule form preview; computation only). */
+export async function previewScheduleNextRuns(
+  body: {
+    interval: string; cron: string; timezone: string; stored_next_run_at?: string | null;
+    cadence_changed?: boolean; enabled?: boolean; count?: number;
+  },
+  init: { signal?: AbortSignal } = {},
+): Promise<import("./scheduleNextRuns").ServerPreview> {
+  const res = await apiFetch(`${API_BASE}/schedules/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: init.signal,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not preview the next runs.");
+  return (await res.json()) as import("./scheduleNextRuns").ServerPreview;
 }
 
 /** Workspace-wide parity over the most recent runs (Dashboard, Migration health). */

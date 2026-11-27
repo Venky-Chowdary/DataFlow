@@ -1,0 +1,63 @@
+/*
+ * Verdict chip (components/ui/VerdictChip.tsx). Tokens only.
+ * The word stays primary ink on a faint tint (AA in both themes); the icon and
+ * the 1px hairline carry the verdict's colour. No side stripes.
+ */
+.df2-verdict {
+  --verdict-ink: var(--df-text-tertiary);
+  --verdict-tint: var(--df-surface-muted);
+  --verdict-line: var(--df-border-strong);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 1px 8px 1px 6px;
+  border: 1px solid var(--verdict-line);
+  border-radius: var(--df-radius-pill);
+  background: var(--verdict-tint);
+  color: var(--df-text-primary);
+  font-size: var(--df-fs-chip);
+  font-weight: var(--df-fw-medium);
+  line-height: 20px;
+  white-space: nowrap;
+}
+.df2-verdict[data-tone="success"] {
+  --verdict-ink: var(--df-success-text);
+  --verdict-tint: var(--df-success-bg);
+  --verdict-line: var(--df-success-border);
+}
+.df2-verdict[data-tone="info"] {
+  --verdict-ink: var(--df-info-text);
+  --verdict-tint: var(--df-info-bg);
+  --verdict-line: var(--df-info-border);
+}
+.df2-verdict[data-tone="danger"] {
+  --verdict-ink: var(--df-danger-text, var(--df-danger));
+  --verdict-tint: var(--df-danger-bg);
+  --verdict-line: var(--df-danger-border);
+}
+.df2-verdict-icon {
+  flex: none;
+  color: var(--verdict-ink);
+}
+.df2-verdict-prefix {
+  color: var(--df-text-secondary);
+  font-weight: var(--df-fw-regular);
+}
+.df2-verdict-word {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.df2-verdict-count {
+  color: var(--df-text-secondary);
+  font-weight: var(--df-fw-regular);
+}
+.df2-verdict-icon.is-spinning {
+  animation: df2-verdict-spin 1s linear infinite;
+}
+@keyframes df2-verdict-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .df2-verdict-icon.is-spinning { animation: none; }
+}

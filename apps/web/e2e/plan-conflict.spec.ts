@@ -155,7 +155,7 @@ test.describe("plan conflict (PS-26)", () => {
     // What the editor now holds is what the next Validate saves: revision 2's
     // mappings (status fed by customer_email), on base 2.
     const save = page.waitForRequest((r: Request) => r.url().includes("/mappings") && r.method() === "POST");
-    await page.getByRole("button", { name: /Run preflight|Re-run Validate/ }).first().click();
+    await page.getByRole("button", { name: /Run Validate|Re-run Validate/ }).first().click();
     const sent = (await save).postDataJSON() as SaveLog[number];
     expect(sent.base_version).toBe(2);
     expect(sent.mappings.find((m) => m.target === "status")?.source).toBe("customer_email");
@@ -253,7 +253,7 @@ test.describe("plan conflict (PS-26)", () => {
       });
     });
     await walkToValidate(page);
-    await expect(page.locator(".dt-toast", { hasText: /Preflight passed/ }).first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".dt-toast", { hasText: /Validate passed/ }).first()).toBeVisible({ timeout: 30_000 });
     const seen: string[] = [];
     page.on("request", (r) => { if (r.url().includes("/api/")) seen.push(`${r.method()} ${new URL(r.url()).pathname}`); });
     await page.getByRole("button", { name: "4. Map" }).first().click();

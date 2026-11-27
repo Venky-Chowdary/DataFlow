@@ -19,6 +19,7 @@ describe("Studio copy", () => {
   it("the completion toast names where the proof is, without internal names", () => {
     const app = readFileSync(join(src, "DataTransferApp.tsx"), "utf8");
     assert.doesNotMatch(app, /Gate-8 proof stays on Job Theater/);
-    assert.match(app, /The Trust Report and post-write proof are on the job in Jobs\./);
+    // It names the verdict too (lead item 2), and where the Trust Report is.
+    assert.match(app, /The Trust Report is on the job in Jobs\./);
   });
 });

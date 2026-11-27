@@ -3,13 +3,16 @@
  */
 
 import { Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { DtIcon } from "./components/DtIcon";
+import { DtIcon, type IconName } from "./components/DtIcon";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { ToastProvider, useToast } from "./components/Toast";
 import { ConfirmProvider, useConfirm } from "./components/ui/ConfirmDialog";
 import { Button } from "./components/ui/Button";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
+import { CommandMenu } from "./components/ui/CommandMenu";
+import { ShortcutsSheet } from "./components/ui/ShortcutsSheet";
+import { shellShortcut } from "./lib/commandRegistry";
 import { WorkspaceSwitcher } from "./components/ui/WorkspaceSwitcher";
 import { FirstRunWorkspace } from "./components/ui/FirstRunWorkspace";
 import { StatusPopover } from "./components/StatusPopover";
@@ -50,7 +53,7 @@ import { usePageMeta } from "./lib/usePageMeta";
 import { metaForLogin, metaForScreen } from "./lib/seo";
 import type { JobsStudioIntent } from "./pages/JobsPage";
 import { DashboardPage } from "./pages/DashboardPage";
-import { lazyNamed } from "./lib/lazyPage";
+import { expireAfterLoad, lazyNamed } from "./lib/lazyPage";
 
 /** Overview is the signed-in home screen — never a separate hashed chunk.
  * Other routes stay lazy; stale Vite hashes reload once (see lazyPage). */
@@ -70,7 +73,7 @@ const DocsPage = lazyNamed(() => import("./pages/DocsPage"), "DocsPage");
 const BenchmarksPage = lazyNamed(() => import("./pages/BenchmarksPage"), "BenchmarksPage");
 
 /** Each lazy screen by the screen id that opens it, so its code can be fetched early (UX-43). */
-const SCREEN_CHUNKS: Partial<Record<Screen, { preload: () => void }>> = {
+const SCREEN_CHUNKS: Partial<Record<Screen, { preload: () => void; whenLoaded: () => Promise<void> }>> = {
   pilot: PilotPage,
   transfer: TransferPage,
   connectors: ConnectorsPage,
@@ -101,21 +104,21 @@ function LazyScreen({ label, children }: { label: string; children: ReactNode })
   );
 }
 
-const NAV: { id: Screen; label: string; icon: string; desc: string; group: "platform" | "ops" | "system" }[] = [
+const NAV: { id: Screen; label: string; icon: IconName; desc: string; group: "platform" | "ops" | "system" }[] = [
   { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Health, throughput, and recent jobs", group: "platform" },
   { id: "transfer", label: "Transfer", icon: "transfer", desc: "Move data with preflight gates", group: "platform" },
   { id: "connectors", label: "Connectors", icon: "connectors", desc: "Saved sources & destinations", group: "platform" },
-  { id: "contracts", label: "Contracts", icon: "shield", desc: "Schema agreements and breakers", group: "platform" },
+  { id: "contracts", label: "Contracts", icon: "contract", desc: "Schema agreements and breakers", group: "platform" },
   { id: "exit", label: "Exit readiness", icon: "arrow-up-right", desc: "Rehearsed exits and evidence", group: "platform" },
   { id: "jobs", label: "Jobs", icon: "jobs", desc: "Live progress and history", group: "ops" },
-  { id: "schedules", label: "Schedules", icon: "activity", desc: "Recurring syncs", group: "ops" },
-  { id: "transforms", label: "Transforms", icon: "layers", desc: "Post-load SQL models", group: "ops" },
-  { id: "transform-library", label: "Library", icon: "book", desc: "Reusable pre-load transforms", group: "ops" },
+  { id: "schedules", label: "Schedules", icon: "schedule", desc: "Recurring syncs", group: "ops" },
+  { id: "transforms", label: "Transforms", icon: "transform", desc: "Post-load SQL models", group: "ops" },
+  { id: "transform-library", label: "Library", icon: "library", desc: "Reusable pre-load transforms", group: "ops" },
   { id: "query", label: "Query", icon: "search", desc: "Ad-hoc SQL and export", group: "ops" },
-  { id: "pilot", label: "Pilot", icon: "sparkle", desc: "Natural-language assistant", group: "ops" },
+  { id: "pilot", label: "Pilot", icon: "ai", desc: "Natural-language assistant", group: "ops" },
   { id: "settings", label: "Settings", icon: "settings", desc: "Security, team, SSO", group: "system" },
   { id: "mcp", label: "MCP", icon: "zap", desc: "IDE tool integrations", group: "system" },
-  { id: "docs", label: "Help", icon: "book", desc: "How Datawrap works", group: "system" },
+  { id: "docs", label: "Help", icon: "help", desc: "How Datawrap works", group: "system" },
   { id: "benchmarks", label: "Proofs", icon: "speed", desc: "Scale and fidelity benchmarks", group: "system" },
 ];
 
@@ -173,6 +176,8 @@ function AppShell({
   const [modalType, setModalType] = useState("");
   const [editingConnector, setEditingConnector] = useState<Connector | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [mobileShell, setMobileShell] = useState(() => window.matchMedia("(max-width: 1023px)").matches);
   const [sidebarNavCompact, setSidebarNavCompact] = useState(() => loadSidebarNavCompact());
@@ -285,9 +290,15 @@ function AppShell({
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      const action = shellShortcut(e);
+      if (action === "menu") {
+        // The command menu (UI pass 2): actions for the selection, pages, records.
         e.preventDefault();
-        searchRef.current?.focus();
+        setShortcutsOpen(false);
+        setCommandOpen((open) => !open);
+      } else if (action === "shortcuts") {
+        e.preventDefault();
+        setShortcutsOpen(true);
       } else if (e.key === "Escape" && document.activeElement === searchRef.current) {
         searchRef.current?.blur();
       }
@@ -544,8 +555,10 @@ function AppShell({
 
   useEffect(() => {
     if (!searchFocus) return;
-    const timer = window.setTimeout(() => setSearchFocus(null), 800);
-    return () => window.clearTimeout(timer);
+    // The focus is a prop of a lazy screen: drop it only once that screen's code
+    // has loaded, or a slow chunk mounts the page after the link is gone.
+    const loaded = SCREEN_CHUNKS[searchFocus.screen]?.whenLoaded() ?? Promise.resolve();
+    return expireAfterLoad(loaded, 800, () => setSearchFocus(null));
   }, [searchFocus]);
 
   const userInitial = userEmail ? userEmail.charAt(0).toUpperCase() : "U";
@@ -757,7 +770,7 @@ function AppShell({
                 <span className="df2-sidebar-collapse-label">Settings</span>
               </button>
               <button type="button" onClick={onSignOut} title="Sign out">
-                <DtIcon name="gate" size={14} />
+                <DtIcon name="sign-out" size={14} />
                 <span className="df2-sidebar-collapse-label">Sign out</span>
               </button>
             </div>
@@ -784,6 +797,17 @@ function AppShell({
               <span>Workspace</span>
               <strong> {currentNav?.label ?? "Datawrap"}</strong>
             </div>
+            <CommandMenu
+              open={commandOpen}
+              onOpenChange={setCommandOpen}
+              navItems={NAV}
+              jobs={jobs}
+              connectors={connectors}
+              schedules={schedules}
+              onNavigate={navigateFromSearch}
+              onShowShortcuts={() => setShortcutsOpen(true)}
+            />
+            <ShortcutsSheet open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
             <WorkspaceSearch
               query={searchQuery}
               onQueryChange={setSearchQuery}
@@ -929,11 +953,18 @@ function AppShell({
                     onOpenSchedules={() => setScreen("schedules")}
                     onOpenContracts={() => setScreen("contracts")}
                     onFreshTransfer={openFreshTransfer}
-                    onTransferComplete={() => {
+                    onTransferComplete={(verification) => {
                       loadJobs();
                       void loadSchedules();
-                      // UX-34: say where the proof is, in the product's own words.
-                      toast({ title: "Transfer complete", message: "The Trust Report and post-write proof are on the job in Jobs.", tone: "success" });
+                      // Same words as the run header: the Trust Report verdict, and green
+                      // only when it is proven or explained.
+                      toast({
+                        title: "Transfer completed",
+                        message: verification?.verdict
+                          ? `Verification: ${verification.word}. The Trust Report is on the job in Jobs.`
+                          : "The Trust Report is on the job in Jobs.",
+                        tone: verification?.supportsSuccess ? "success" : "info",
+                      });
                     }}
                   />
                 </PageErrorBoundary>
@@ -1018,6 +1049,7 @@ function AppShell({
                 <div className={`df2-screen-keep ${showScreen("jobs")}`} hidden={screen !== "jobs"} aria-hidden={screen !== "jobs"}>
                 <PageErrorBoundary label="Job Theater">
                   <JobsPage
+                    active={screen === "jobs"}
                     jobs={jobs}
                     history={jobHistory}
                     onLoadPage={fetchJobs}

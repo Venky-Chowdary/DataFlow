@@ -331,12 +331,12 @@ function RepairProposalState({
             <p>
               The source is not broken. Map guessed destination types from the preview.
               Later values do not fit those types, so CREATE would be too narrow and
-              Execute would load nothing — on any warehouse or database destination.
+              Run would load nothing — on any warehouse or database destination.
             </p>
             <ol className="df2-repair-next-steps">
               <li>Approve updates the Map CREATE types listed below — the destination is not written yet.</li>
               <li>Evidence below identifies types proven against scanned values. Missing or unknown proof flags are unverified.</li>
-              <li>Re-run Validate after approval. Execute only after the required gates pass.</li>
+              <li>Re-run Validate after approval. Run only after the required gates pass.</li>
             </ol>
             <p className="df2-label-hint">
               Live destination columns still need ALTER — Map cannot change destination

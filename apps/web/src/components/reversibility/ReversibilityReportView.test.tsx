@@ -71,7 +71,7 @@ describe("Reversibility tab (static)", () => {
     // Said once: the API's reason carries the data check, so the view does not repeat it.
     assert.equal(t.split("not proven for rows not sampled").length - 1, 1);
     assert.doesNotMatch(html, /df2-badge-live">Fits sample/);
-    assert.match(t, /Conditional columns were checked against 25 observed rows from the plan sample\. A sample never proves the full table: under Require reversibility a conditional column is checked on the sample here and enforced on every row while Execute writes\./);
+    assert.match(t, /Conditional columns were checked against 25 observed rows from the plan sample\. A sample never proves the full table: under Require reversibility a conditional column is checked on the sample here and enforced on every row while Run writes\./);
   });
 
   it("the switch off: the gate is not required; on and not reversible: it blocks Execute", () => {
@@ -81,7 +81,7 @@ describe("Reversibility tab (static)", () => {
     const on = view(blockedReversibilityFixture());
     assert.match(on, /role="switch" aria-checked="true"/);
     assert.match(on, /role="alert"/);
-    assert.match(text(on), /Gate G24R · Blocks Execute\. This transfer must be reversible, and it is not: customers\.customer_id/);
+    assert.match(text(on), /Gate G24R · Blocks Run\. This transfer must be reversible, and it is not: customers\.customer_id/);
   });
 
   it("adds the data check in words when the reason does not state it", () => {
@@ -116,7 +116,7 @@ describe("Reversibility tab (static)", () => {
     assert.match(t, /Partly reversible/);
     assert.match(t, /Dropped payments\.note note is not mapped, so the destination does not hold it\./);
     assert.match(t, /email → email_hash/);
-    assert.match(t, /Blocks Execute/);
+    assert.match(t, /Blocks Run/);
   });
 
   it("names the contract 10 reason codes and row changes in words, with badges", () => {
@@ -235,7 +235,7 @@ describe("Reversibility tab actions (jsdom)", () => {
     assert.deepEqual(changes, [true]);
     assert.equal(require, true);
     const t = host!.textContent || "";
-    assert.match(t, /Blocks Execute/);
+    assert.match(t, /Blocks Run/);
     assert.match(t, /Re-run Validate to apply the reversibility gate/);
     assert.equal(host!.querySelector('button[role="switch"]')!.getAttribute("aria-checked"), "true");
   });

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { DtIcon } from "../components/DtIcon";
+import { DtIcon, type IconName } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { Button } from "../components/ui/Button";
@@ -21,7 +21,7 @@ import {
 } from "../lib/mcpClientConfig";
 import { API_BASE } from "../lib/types";
 
-function mcpIntegrations(url: string) {
+function mcpIntegrations(url: string): { id: string; label: string; icon: IconName; desc: string; snippet: string }[] {
   return [
     {
       id: "cursor",

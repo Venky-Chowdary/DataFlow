@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 PROGRESS_FIELD = "stream_progress"
 
 
+
 def _store() -> Any:
     from services.mongodb_service import get_mongodb_service
 
@@ -87,6 +88,52 @@ def record_stream_completed(
         _write(job_id, progress)
     except Exception:  # noqa: BLE001 — see docstring
         logger.warning("stream progress not recorded for %s (job %s)", stream_name, job_id, exc_info=True)
+
+
+def record_stream_started(job_id: str, stream_name: str, *, table: str = "") -> None:
+    """Record that ``stream_name`` is the table this pass is loading now (never raises).
+
+    The Run screen's per-table progress (UI pass 2) reads it: which table is
+    being read and written, since when, and the job's row counter when it
+    started (each table's writer counts its own rows, so the counter restarts
+    for this table at its first batch). ``completed_streams`` reads only
+    ``completed`` entries, so a resume is unaffected; the finish overwrites
+    this entry with the completed one.
+    """
+    if not job_id or not stream_name:
+        return
+    try:
+        job = _store().get_job(job_id) or {}
+        progress = dict(job.get(PROGRESS_FIELD) or {})
+        progress[_key(stream_name)] = {
+            "status": "running",
+            "stream": stream_name,
+            "table": table or stream_name,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "counter_at_start": int(job.get("records_processed") or 0),
+        }
+        _write(job_id, progress)
+    except Exception:  # noqa: BLE001 — progress display only
+        logger.warning("stream start not recorded for %s (job %s)", stream_name, job_id, exc_info=True)
+
+
+def forget_stream_started(job_id: str, stream_name: str) -> None:
+    """Drop a ``running`` entry when its table stops without finishing (never raises).
+
+    A failed or cancelled table leaves ``stream_progress`` as it was before
+    it started: the record keeps vouching only for finished tables.
+    """
+    if not job_id or not stream_name:
+        return
+    try:
+        job = _store().get_job(job_id) or {}
+        progress = dict(job.get(PROGRESS_FIELD) or {})
+        entry = progress.get(_key(stream_name))
+        if isinstance(entry, dict) and entry.get("status") == "running":
+            progress.pop(_key(stream_name))
+            _write(job_id, progress)
+    except Exception:  # noqa: BLE001 — progress display only
+        logger.warning("stream start not cleared for %s (job %s)", stream_name, job_id, exc_info=True)
 
 
 def forget_streams(job_id: str, tables: list[str]) -> None:

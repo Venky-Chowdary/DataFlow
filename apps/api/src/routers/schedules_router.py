@@ -571,6 +571,74 @@ class ScheduleSummaryResponse(BaseModel):
         return cls(**{k: v for k, v in payload.items() if k in cls.model_fields})
 
 
+class NextRunsPreviewBody(BaseModel):
+    interval: str = Field(default="daily", max_length=64)
+    cron: str = Field(default="", max_length=256)
+    timezone: str = Field(default="UTC", max_length=64)
+    stored_next_run_at: str | None = Field(default=None, max_length=64)
+    cadence_changed: bool = True
+    enabled: bool = True
+    count: int = Field(default=5, ge=1, le=10)
+
+
+#: Preview calls per caller per window (10 per 10 s), shared by every worker
+#: and replica through the shared limiter (Redis when REDIS_URL is set).
+PREVIEW_RATE_LIMIT = 10
+PREVIEW_RATE_WINDOW_SEC = 10
+
+
+def _preview_caller_key(request: Request) -> str:
+    """Who the preview limit counts: the authenticated principal, else the trusted client address.
+
+    A signed-in account or an API key / service account is one caller
+    whatever address it comes from (services.audit_coverage.request_principal:
+    the key id for keys, the account for sessions; hashed, so no address book
+    lands in the limiter store). An anonymous caller is its client address as
+    the app's forwarded-for trust setting resolves it (services.client_ip:
+    TRUSTED_PROXY_COUNT hops), never a header it could choose.
+    """
+    import hashlib
+
+    from services.audit_coverage import request_principal
+    from services.client_ip import client_ip_from_request
+
+    who = request_principal(request)
+    if who.get("actor_id"):
+        digest = hashlib.sha256(f"{who['actor_type']}:{who['actor_id'].strip().lower()}".encode()).hexdigest()[:32]
+        return f"schedule-preview:principal:{digest}"
+    return f"schedule-preview:ip:{client_ip_from_request(request) or 'unknown'}"
+
+
+@router.post("/preview")
+def preview_schedule_next_runs(body: NextRunsPreviewBody, request: Request):
+    # Sync on purpose: FastAPI runs it on the worker thread pool, never on the
+    # event loop; next_run is milliseconds and the service caps count and time.
+    """The next runs the scheduler will use for a cadence (the schedule form's preview).
+
+    Pure computation with the scheduler's own functions: reads no schedule
+    and writes nothing, so the form can never show times the beat will not use.
+    Limited per caller across every worker (the form asks once per edit); a
+    loop asking faster gets 429 and Retry-After.
+    """
+    from services.auth_state import get_auth_state
+    from services.schedule_store import preview_next_runs
+
+    allowed, retry_after = get_auth_state().rate_limit_hit(
+        _preview_caller_key(request), limit=PREVIEW_RATE_LIMIT, window_sec=PREVIEW_RATE_WINDOW_SEC
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many schedule previews; try again in a moment.",
+            headers={"Retry-After": str(max(1, int(retry_after or PREVIEW_RATE_WINDOW_SEC)))},
+        )
+    return preview_next_runs(
+        body.interval, body.cron, body.timezone,
+        stored_next_run_at=body.stored_next_run_at, cadence_changed=body.cadence_changed,
+        enabled=body.enabled, count=body.count,
+    )
+
+
 @router.get("/intervals")
 async def schedule_intervals():
     from services.schedule_store import SCHEMA_POLICIES

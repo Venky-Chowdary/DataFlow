@@ -128,6 +128,12 @@ describe("boot hash normalisation keeps a jobs deep link (fresh-load race)", () 
     assert.equal(normalizedAppHash("jobs", "#/jobs?jobId=older", false), "#/jobs");
     assert.equal(normalizedAppHash("dashboard", "#/jobs?jobId=older", true), "#/overview");
   });
+  it("replace on Exit readiness keeps the rehearsal / system ids", () => {
+    assert.equal(normalizedAppHash("exit", "#/exit?rehearsal=exr_1", true), "#/exit?rehearsal=exr_1");
+    assert.equal(normalizedAppHash("exit", "#/exit?system=sys_1", true), "#/exit?system=sys_1");
+    assert.equal(normalizedAppHash("exit", "#/exit?rehearsal=exr_1", false), "#/exit");
+    assert.equal(normalizedAppHash("jobs", "#/exit?rehearsal=exr_1", true), "#/jobs");
+  });
 });
 
 /** D339: notification e-mails link to https://<web origin>/jobs/<id>. nginx

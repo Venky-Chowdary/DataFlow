@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from services.checkpoint_service import Checkpoint, CheckpointService
+from services.cron_schedule import next_run
 from services.error_handling import humanize_transfer_failure
 from services.excel_parser import excel_cell_value
 from services.file_load_ledger import (
@@ -160,7 +161,7 @@ def test_incremental_upsert_is_a_schedule_sync_mode(tmp_path, monkeypatch):
     assert sched.sync_mode == "incremental_deduped"
 
 
-def test_completion_pinned_schedule_advances_to_the_next_boundary(tmp_path, monkeypatch):
+def test_completion_pinned_schedule_advances_to_the_next_boundary(tmp_path, monkeypatch, frozen_schedule_clock):
     import services.schedule_store as store
 
     monkeypatch.setattr(store, "STORE_PATH", tmp_path / "schedules.json")
@@ -188,7 +189,8 @@ def test_completion_pinned_schedule_advances_to_the_next_boundary(tmp_path, monk
     assert store.unstick_completion_pinned_schedules() == 1
     done = store.get_schedule(sched.id)
     nxt = store._parse_ts(done.next_run_at)
-    assert nxt is not None and nxt > datetime.now(timezone.utc)
+    assert nxt is not None and nxt > frozen_schedule_clock
+    assert nxt == next_run("*/5 * * * *", frozen_schedule_clock, "UTC")
     assert nxt.second == 0
     assert done.id not in {item.id for item in store.due_schedules()}
 

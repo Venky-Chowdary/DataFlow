@@ -7,12 +7,12 @@ import type { JobListStatus } from "../../lib/jobHistory";
 import { JOBS_GRID_COLUMNS, type JobsGridColumnId, type JobsGridDensity } from "../../lib/jobGrid";
 import { JobsMenu } from "./JobsMenu";
 
+/** Absent when not known (the server did not count it, or the list has not loaded): the tab then shows no number, never 0. */
 export interface JobsPivotCounts {
-  all: number;
-  running: number;
-  completed: number;
-  failed: number;
-  /** Absent when the server did not count it; the tab then shows no number. */
+  all?: number;
+  running?: number;
+  completed?: number;
+  failed?: number;
   attention?: number;
 }
 
@@ -93,7 +93,7 @@ export function JobsToolbar({
       actions={
         <div className="df2-toolbar-actions-cluster" role="group" aria-label="Job actions">
           {onRefresh && (
-            <Button size="sm" onClick={onRefresh} leadingIcon={<DtIcon name="activity" size={14} />}>
+            <Button size="sm" onClick={onRefresh} leadingIcon={<DtIcon name="refresh" size={14} />}>
               Refresh
             </Button>
           )}

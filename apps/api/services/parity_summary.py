@@ -124,6 +124,50 @@ def _jobs_by_id(store: Any, ids: list[str]) -> dict[str, dict[str, Any]]:
     return {i: j for i in ids if (j := store.get_job(i))}
 
 
+def _summary_or_none(job: dict[str, Any], job_id: str) -> dict[str, Any] | None:
+    """The job's verdict summary, or None when its stored evidence cannot be read.
+
+    A read for display only (no write, no row moves): one unreadable job must
+    not blank a page of verdicts. The failure is logged with its type.
+    """
+    try:
+        return _job_summary(job, job_id)
+    except Exception as exc:  # noqa: BLE001 - display read; logged, the row shows "Not loaded"
+        logger.warning("parity verdict unavailable for %s (%s)", job_id, type(exc).__name__)
+        return None
+
+
+def job_verdicts(ids: list[str], visible: Any) -> dict[str, dict[str, Any]]:
+    """``{job_id: {verdict, unexplained, method}}`` for the finished jobs ``visible`` allows.
+
+    One batch read, then the stored summary or a report from stored evidence
+    (``reread=False``): the same verdict the Trust Report and the Migration
+    health dashboard state for the run.
+    """
+    from services.parity_evidence import job_is_terminal
+
+    if not ids:
+        return {}
+    full = _jobs_by_id(job_store(), ids)
+    out: dict[str, dict[str, Any]] = {}
+    for job_id in ids:
+        job = full.get(job_id)
+        if not job or not visible(job) or not job_is_terminal(job):
+            continue
+        summary = _summary_or_none(job, job_id)
+        if summary is None:
+            continue  # left out: the grid shows "Not loaded" and asks again; nothing is written
+        from services.job_list_view import parity_stamp
+
+        out[job_id] = {
+            "parity_stamp": parity_stamp(job),
+            "verdict": summary.get("verdict") or "unverifiable",
+            "unexplained": int(summary.get("unexplained") or 0),
+            "method": summary.get("method") or "none",
+        }
+    return out
+
+
 def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
     """KPIs, the per-run trend (newest last) and the table x run heatmap."""
     from services.job_status import job_timestamp_iso

@@ -243,3 +243,34 @@ async def parity_summary(
 
     scope = tenant_scope(request, workspace_id).filter
     return await asyncio.to_thread(build_summary, scope, limit=limit)
+
+
+#: Most job ids one verdicts read answers (one Jobs grid page).
+_VERDICTS_MAX_IDS = 100
+
+
+@router.get("/parity/verdicts")
+async def parity_verdicts(
+    request: Request,
+    ids: str = Query(default="", max_length=8000, description="Comma-separated job ids"),
+):
+    """The Trust Report verdict of each listed finished job, for list rows.
+
+    The Jobs grid shows the same five words as the Trust Report. The list
+    payload drops the evidence a verdict is decided from, so the grid asks
+    here for its page: the verdict comes from the summary Parity Studio stored
+    on the job, or from a report built from the stored evidence (no customer
+    database is read). A job that is unknown, of another workspace, or not
+    finished is left out (the grid says "Not checked yet" for a live run).
+    """
+    from services.parity_summary import job_verdicts
+
+    wanted: list[str] = []
+    for raw in ids.split(","):
+        job_id = raw.strip()
+        if job_id and job_id not in wanted:
+            wanted.append(job_id)
+    if len(wanted) > _VERDICTS_MAX_IDS:
+        raise HTTPException(status_code=422, detail=f"Ask for at most {_VERDICTS_MAX_IDS} jobs at a time.")
+    verdicts = await asyncio.to_thread(job_verdicts, wanted, lambda job: _can_access_job(request, job))
+    return {"verdicts": verdicts}

@@ -491,6 +491,8 @@ def build_shape_gate(contract: dict[str, Any]) -> dict[str, Any]:
                 if c.get("kind") in {COL_ADD, COL_PENDING, COL_UNACCOUNTED}
                 and str(c.get("source") or "").strip()
             ],
+            # A new table has no existing shape to bind: G15 does not apply (re-review B).
+            "applicable": status != "skip",
             "rule_id": f"{GATE_ID}.{shape}",
             "remediation_kind": contract.get("primary_action") or "review_mappings",
         },

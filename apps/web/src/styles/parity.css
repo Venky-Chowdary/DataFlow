@@ -101,9 +101,8 @@
   gap: var(--df-space-2);
   margin: 0;
   padding: var(--df-space-2) var(--df-space-3);
-  /* Neutral surface; the tone is the 3px edge and the icon (W6: no tinted blocks). */
-  border: 1px solid var(--df-border);
-  border-left: 3px solid var(--df-warning);
+  /* Neutral surface; the tone is the icon (W6: no tinted blocks). */
+  border: 1px solid var(--df-warning-border);
   border-radius: var(--df-radius-md);
   background: var(--df-surface);
   color: var(--df-text-primary);
@@ -117,7 +116,7 @@
 }
 
 .df2-parity-notice.is-danger {
-  border-left-color: var(--df-danger);
+  border-color: var(--df-danger-border);
 }
 
 .df2-parity-notice.is-danger > svg {
@@ -896,7 +895,7 @@
 }
 
 .df2-parity-notice.is-ok {
-  border-left-color: var(--df-success);
+  border-color: var(--df-success-border);
 }
 
 .df2-parity-notice.is-ok > svg {
@@ -904,7 +903,7 @@
 }
 
 .df2-parity-notice.is-muted {
-  border-left-color: var(--df-border-strong);
+  border-color: var(--df-border);
 }
 
 .df2-parity-notice.is-muted > svg {

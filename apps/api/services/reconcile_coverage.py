@@ -188,9 +188,17 @@ def qualify_multi_stream_reconciliation(
     if not isinstance(streams, list) or len(streams) < 2:
         return report
     scope = str(report.get("checksum_scope") or "")
+    stream_names = [
+        str(row.get("name") or "").strip()
+        for row in streams
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    ]
     if scope in _NARROW_CHECKSUM_SCOPES:
         if scope == LAST_STREAM_CHECKSUM:
-            return _qualify_last_stream_ladder(report)
+            out = _qualify_last_stream_ladder(report)
+            if stream_names and not out.get("compared_stream"):
+                out = {**out, "compared_stream": stream_names[-1]}
+            return out
         return report
     claimed_full = (
         str(report.get("assurance_level") or "") == "full_checksum"
@@ -213,6 +221,9 @@ def qualify_multi_stream_reconciliation(
     out = dict(report)
     out["checksum_scope"] = LAST_STREAM_CHECKSUM
     out["multi_stream"] = True
+    # The one table Gate-8 compared: the Run screen marks Verify on it only.
+    if names:
+        out["compared_stream"] = names[-1]
     out["stream_count"] = len(streams)
     out["migration_proven"] = False
     out["population_proof"] = False

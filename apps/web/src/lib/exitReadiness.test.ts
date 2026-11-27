@@ -364,7 +364,7 @@ describe("deep links and errors", () => {
 
   it("keeps the API's reason and advises by status", () => {
     assert.match(exitErrorMessage(new ApiError("A rehearsal of this system is running", 409), "x"), /running\. The page has been refreshed/);
-    assert.match(exitErrorMessage(new ApiError("criticality must be one of", 422), "x"), /^The request was refused: criticality/);
+    assert.match(exitErrorMessage(new ApiError("criticality must be one of", 422), "x"), /^criticality must be one of\.$/);
     assert.match(exitErrorMessage(new ApiError("Exit system not found", 404), "x"), /Not found in this workspace/);
     assert.match(exitErrorMessage(new ApiError("boom", 503), "Could not load."), /HTTP 503/);
   });

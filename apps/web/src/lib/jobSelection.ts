@@ -58,3 +58,13 @@ export function absentEvidenceLabel(read: JobDetailRead): string {
   if (read === "read") return "Not captured";
   return read === "pending" ? "Loading…" : "Detail unavailable — Refresh";
 }
+
+/**
+ * The command menu offers actions on a job only when the person picked it on
+ * the visible Jobs screen and its detail is open (review UI2 #3): the row
+ * selected automatically on arrival, or a page kept mounted behind another
+ * screen, never gets "Selected job" actions.
+ */
+export function selectionCommandsEnabled(state: { active: boolean; explicitPick: boolean; panelOpen: boolean }): boolean {
+  return state.active && state.explicitPick && state.panelOpen;
+}

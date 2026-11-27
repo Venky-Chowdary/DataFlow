@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import io
 import stat
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from connectors.sftp_reader import list_file_stats_on
@@ -270,7 +270,7 @@ def test_schedule_duplicate_policy_and_in_file_keep_last(tmp_path, monkeypatch):
 
 
 def test_enable_waits_password_is_redacted_wrong_folder_is_not_auth_and_drift_is_once(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, frozen_schedule_clock
 ):
     from services import schedule_store
 
@@ -299,9 +299,9 @@ def test_enable_waits_password_is_redacted_wrong_folder_is_not_auth_and_drift_is
     due = datetime.fromisoformat(enabled.next_run_at)
     if due.tzinfo is None:
         due = due.replace(tzinfo=timezone.utc)
-    assert due > datetime.now(timezone.utc)
-    assert due > datetime.now(timezone.utc) - timedelta(seconds=1)
-    assert due.year >= 2026
+    # The scheduler's clock is pinned: enabling waits for the next 06:00 after it.
+    assert due > frozen_schedule_clock
+    assert due == datetime(2026, 11, 28, 6, 0, tzinfo=timezone.utc)
 
     saved = SavedConnector(
         id="c1",

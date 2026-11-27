@@ -34,6 +34,9 @@ import {
 } from "../../components/MappingProofDrawer";
 import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
+import { useConfirm } from "../../components/ui/ConfirmDialog";
+import { StepBackButton, StepFooterReason, StepPrimaryButton } from "../../components/transfer/StudioStepFooter";
+import { plural } from "../../lib/plural";
 import type { JobsMenuItem } from "../../components/jobs/JobsMenu";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
@@ -691,38 +694,55 @@ export function TransferMapStep({
     { id: "expand", label: "Open full table", onSelect: () => setMapDialogOpen(true), section: "View" },
   ];
 
+  // The one reason Continue is disabled, said in the footer (P1-18): the same
+  // predicates as canContinueToValidate, in the order the user clears them.
+  const targetIssueColumns = Array.from(new Set(targetIssues.flatMap((t) => t.columns)));
+  const requiredUnmapped = targetIssues.filter((t) => t.code === "required_unmapped").flatMap((t) => t.columns);
+  const continueReason = canContinueToValidate
+    ? ""
+    : requiredUnmapped.length > 0 && requiredUnmapped.length === targetIssues.length
+      ? `Map ${plural(requiredUnmapped.length, "required destination column")}: ${requiredUnmapped.slice(0, 3).join(", ")}${requiredUnmapped.length > 3 ? "…" : ""}`
+      : targetIssues.length > 0
+        ? `Fix ${plural(targetIssues.length, "destination column issue")}: ${targetIssueColumns.slice(0, 3).join(", ")}${targetIssueColumns.length > 3 ? "…" : ""}`
+        : blockerSummary.blockers.length > 0
+          ? blockerSummary.headline
+          : approvalPendingCount > 0
+            ? `Approve ${plural(approvalPendingCount, "column")} to continue`
+            : "";
+  const continueReasonId = useId();
   const continueToValidate = (
-    <button
-      type="button"
-      className="df2-btn df2-btn-primary"
+    <StepPrimaryButton
       onClick={continueWithMemory}
       disabled={!canContinueToValidate}
-      title={
-        targetIssues.length > 0
-          ? `${targetIssues.length} destination column issue(s)\n${targetIssues.slice(0, 4).map((t) => t.title).join("\n")}`
-          : blockerSummary.blockers.length > 0
-          ? `${blockerSummary.headline}\n${blockerSummary.detail}`
-          : approvalPendingCount > 0
-            ? `${approvalPendingCount} column(s) need Approve before Validate.`
-          : "Continue to Validate"
-      }
+      aria-describedby={continueReason ? continueReasonId : undefined}
     >
-      Continue to Validate →
-    </button>
+      Continue to Validate
+    </StepPrimaryButton>
   );
+  const { confirm } = useConfirm();
+  const confirmClearKey = async () => {
+    if (!onClearPrimaryKey || !primaryKeyField) return;
+    const ok = await confirm({
+      title: `Stop using ${primaryKeyField} as the key?`,
+      message: "Upsert, dedupe and CDC need a key. A new table is created without one.",
+      confirmLabel: "Clear key",
+      cancelLabel: "Keep key",
+      tone: "danger",
+    });
+    if (ok) onClearPrimaryKey();
+  };
 
   return (
     <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-map-step-panel">
       {hideFooter && (
         <div className="df2-wizard-back">
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onBack}>
-            Back to Connect
-          </button>
+          <StepBackButton size="sm" label="Back to Destination" onClick={onBack} />
         </div>
       )}
       <div className="df2-card-head df2-map-step-head">
         <div className="df2-map-step-head-copy">
-          <h3 className="df2-card-title">Map columns</h3>
+          {/* Own class: the laptop-density rule that hides .df2-card-title must not drop the step's name (P1-22). */}
+          <h2 className="df2-map-step-title">Map columns</h2>
           {routeSummary ? <p className="df2-map-route" title={routeTitle}>{routeSummary}</p> : null}
           <p
             className={`df2-map-status${mapAttention > 0 || stepCounts.destinationIssues > 0 ? " is-warn" : approvalPendingCount === 0 ? " is-ok" : ""}`}
@@ -789,7 +809,7 @@ export function TransferMapStep({
         {destTableExists !== false && extraSourceColumns.length > 0 && (
           <details className="df2-map-stream-diverge is-compact" role="status">
             <summary>
-              <DtIcon name="layers" size={16} />
+              <DtIcon name="info" size={16} />
               <strong>{destShapeHeadline || "Extra source columns — remap or omit"}</strong>
               <span> · {extraSourceColumns.length}</span>
             </summary>
@@ -847,7 +867,7 @@ export function TransferMapStep({
           <details className="df2-rule-map-banner">
             <summary title={ruleBannerLine}>
               <span className="df2-rule-map-chevron" aria-hidden="true" />
-              <DtIcon name="book" size={16} />
+              <DtIcon name="docs" size={16} />
               <strong>Business rules</strong>
               <span className="df2-rule-map-census">{ruleBannerLine}</span>
             </summary>
@@ -983,6 +1003,17 @@ export function TransferMapStep({
                 onWitnessReview={setFocusSource}
                 onWitnessKeep={witness.keep}
                 witnessKept={witness.kept}
+                destinationAttention={
+                  targetIssueColumns.length > 0
+                    ? {
+                      columns: targetIssueColumns,
+                      title: requiredUnmapped.length === targetIssues.length
+                        ? `${plural(requiredUnmapped.length, "required destination column")} ${requiredUnmapped.length === 1 ? "has" : "have"} no source:`
+                        : `${plural(targetIssues.length, "destination column issue")}:`,
+                      onShow: remapControls ? showTargetIssues : undefined,
+                    }
+                    : undefined
+                }
               />
               {witness.error && (
                 <div className="df2-witness-bar is-error" role="alert">
@@ -1048,7 +1079,7 @@ export function TransferMapStep({
       </div>
 
       {!hideFooter && <div className="df2-card-footer df2-wizard-footer df2-map-footer">
-        <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
+        <StepBackButton onClick={onBack} />
         <div className="df2-map-footer-status" aria-live="polite">
           <span
             className={requiresPrimaryKey && !primaryKeyField ? "is-warn" : undefined}
@@ -1095,13 +1126,14 @@ export function TransferMapStep({
         </div>
         <div className="df2-map-footer-actions">
           {/* Not inside .df2-map-footer-status: compact widths hide that strip. */}
+          <StepFooterReason id={continueReasonId}>{continueReason}</StepFooterReason>
           {primaryKeyField && onClearPrimaryKey ? (
             <button
               type="button"
               className="df2-btn df2-btn-ghost"
               data-testid="map-clear-primary-key"
-              title={`Stop using ${primaryKeyField} as the key — a new table is created without it`}
-              onClick={onClearPrimaryKey}
+              title={`Stop using ${primaryKeyField} as the key`}
+              onClick={() => void confirmClearKey()}
             >
               Clear key
             </button>
@@ -1111,9 +1143,9 @@ export function TransferMapStep({
               type="button"
               className="df2-btn df2-btn-ghost"
               onClick={onOpenIdentitySettings}
-              title="Open Advanced settings — primary key, sync mode, cursor (same drawer as Destination)"
+              title="Primary key, sync mode and cursor"
             >
-              <DtIcon name="settings" size={14} /> Advanced
+              <DtIcon name="sliders" size={16} /> Advanced
             </button>
           )}
           {continueToValidate}
@@ -1144,7 +1176,7 @@ export function TransferMapStep({
       >
         {destColumns.length === 0 && !destSchemaLoading && destTableExists === false && (
           <div className="df2-map-dialog-banner" role="status">
-            <DtIcon name="sparkle" size={16} />
+            <DtIcon name="info" size={16} />
             <span>
               <strong>Create-new {destDisplayType || "destination"}</strong>
               {" — "}
@@ -1240,6 +1272,7 @@ export function TransferMapStep({
         loading={autoMap.loading}
         error={autoMap.error}
         suggestions={autoMap.suggestions}
+        confidenceFloor={confidenceThreshold}
         currentTarget={currentTargetOf}
         onApply={(picked) => {
           studio.applySuggestions(picked);

@@ -214,6 +214,15 @@ def _stream_names_for_list(job: dict[str, Any]) -> list[str]:
     return names
 
 
+def parity_stamp(job: dict[str, Any] | None) -> str:
+    """The parity state's version and stored-summary time: changes whenever the verdict can."""
+    state = (job or {}).get("parity")
+    if not isinstance(state, dict) or not state:
+        return ""
+    summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
+    return f"{int(state.get('version') or 0)}:{summary.get('at') or ''}"
+
+
 def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
     """Return a compact copy for list views — never ship quarantine samples here."""
     if not job:
@@ -238,6 +247,11 @@ def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
     verification = verification_summary_for_list(job)
     if verification:
         out["verification_summary"] = verification
+    stamp = parity_stamp(job)
+    if stamp:
+        # Parity Studio decisions and re-reads do not touch updated_at: the
+        # grid re-reads a row's verdict when this changes (review UI2 #2).
+        out["parity_stamp"] = stamp
     # The detail card relabels a last-table digest on a multi-table run; the
     # grid needs the same flag to apply the same rule.
     summary = job.get("destination_summary")

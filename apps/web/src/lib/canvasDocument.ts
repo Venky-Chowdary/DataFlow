@@ -5,6 +5,7 @@
  * Post-load operations are plan cards and are not steps.
  */
 
+import type { IconName } from "../components/icons/iconMap";
 import {
   categoryLabel,
   iconFor,
@@ -46,7 +47,7 @@ export interface FlowNodeModel {
   title: string;
   summary: string;
   short: string;
-  icon: string;
+  icon: IconName;
   stripe: NodeStripe;
   status: NodeStatus;
   ports: CanvasPort[];

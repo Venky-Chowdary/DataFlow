@@ -1,0 +1,35 @@
+/*
+ * Sentence case on the screens UI pass 2 touched (review UI2 #13; banned
+ * pattern: ALL-CAPS labels and kickers, Title Case status words). The words
+ * are written in sentence case in the source; these rules stop the CSS from
+ * re-casing them. Scoped to these screens so others move only when fixed
+ * on purpose. Labels: 12px, normal tracking, ink-3 / secondary ink.
+ */
+.df2-app .df2-jobs-grid-table thead th,
+.df2-app .df2-jobs-grid-table thead th .df2-jobs-grid-sort {
+  text-transform: none;
+  letter-spacing: normal;
+}
+.df2-app .df2-jobs-kpis .df2-stat-label,
+.df2-app .df2-jobs-v3-summary-route span,
+.df2-app .df2-copy-id-label,
+.df2-app .df2-quarantine-next-copy > strong,
+.df2-app .df2-gate8-proof-grid dt,
+.df2-app .df2-theater-v3 .df2-stat-label {
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: var(--df-fs-label);
+  color: var(--df-text-secondary);
+}
+.df2-app .df2-jobs-grid .df2-badge,
+.df2-app .df2-jobs-detail-drawer .df2-badge,
+.df2-app .df2-conn-probe .df2-badge,
+.df2-app .df2-theater-v3 .df2-badge,
+.df2-app .df2-run-result .df2-badge {
+  text-transform: none;
+}
+.df2-app .df2-copilot-edge-open,
+.df2-app .df2-copilot-edge-open span {
+  text-transform: none;
+  letter-spacing: normal;
+}

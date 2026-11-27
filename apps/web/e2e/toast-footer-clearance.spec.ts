@@ -1,6 +1,101 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { installHermeticStubs } from "./hermetic";
 import { openStudio } from "./support";
+
+/** App notifications: one sonner region on <body>; every toast keeps `.dt-toast`. */
+const TOAST_REGION = "[data-sonner-toaster]";
+/** Toasts on screen: a dismissed toast keeps its node for its exit transition. */
+const TOASTS = `${TOAST_REGION} [data-sonner-toast]:not([data-removed="true"]) .dt-toast`;
+
+/** Sonner's phone layout (its mobile breakpoint): the region spans the width, bottom-centred. */
+const PHONE_MAX_WIDTH = 600;
+const isPhone = (width: number) => width <= PHONE_MAX_WIDTH;
+
+/**
+ * On a phone the region spans the screen between the 16px gutters and sits on
+ * the bottom edge, so whatever is at the very end of a page without a step
+ * footer can sit under it until the toast is dismissed or expires. What must
+ * hold: it stays inside the gutters and covers only a bottom band of the
+ * screen, never the page header or the middle of the screen where the user
+ * is reading.
+ */
+function expectPhoneToastBand(
+  box: { left: number; right: number; top: number; bottom: number },
+  viewport: { width: number; height: number },
+  label: string,
+) {
+  expect(box.left, `phone toast keeps the left gutter (${label})`).toBeGreaterThanOrEqual(15);
+  expect(box.right, `phone toast keeps the right gutter (${label})`).toBeLessThanOrEqual(viewport.width - 15);
+  expect(box.bottom, `phone toast sits inside the screen (${label})`).toBeLessThanOrEqual(viewport.height);
+  expect(box.top, `phone toast covers only the bottom band of the screen (${label})`)
+    .toBeGreaterThanOrEqual(viewport.height * 0.7);
+}
+
+/**
+ * Every toast has a Dismiss control that removes it at once (errors never
+ * expire on their own). Pointer activity on the stack expands it and pauses
+ * every timer (the same signal a hover or a focused toast sends), so each
+ * Dismiss is reachable and no toast expires while it is being checked.
+ */
+async function expectToastsDismissible(page: Page): Promise<void> {
+  const toasts = page.locator(TOASTS);
+  const reachable = page.locator(
+    `${TOAST_REGION} [data-sonner-toast][data-visible="true"]:not([data-removed="true"]) .dt-toast`,
+  );
+  const holdStack = () => page.evaluate((region) => {
+    document.querySelector(region)?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+  }, TOAST_REGION);
+  await holdStack();
+  for (let left = await toasts.count(); left > 0; left--) {
+    await holdStack();
+    await reachable.first().getByRole("button", { name: "Dismiss notification" }).click();
+    await expect(toasts).toHaveCount(left - 1);
+    // The dismissed toast plays its exit over the stack; wait until it is gone.
+    await expect(page.locator(`${TOAST_REGION} [data-sonner-toast][data-removed="true"]`)).toHaveCount(0);
+  }
+}
+
+/**
+ * Sonner slides a toast in (and restacks the others) with a CSS transition.
+ * Geometry read mid-flight reports a box that is still moving, so wait until
+ * every toast box is the same on two consecutive frames.
+ */
+async function settleToastMotion(page: Page): Promise<void> {
+  const read = () => page.evaluate(async (selector) => {
+    const boxes = () => Array.from(document.querySelectorAll(selector))
+      .map(node => node.getBoundingClientRect())
+      .map(box => [box.left, box.top, box.right, box.bottom].map(Math.round).join(","))
+      .join("|");
+    const first = boxes();
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    return first === boxes();
+  }, TOASTS);
+  await expect.poll(read, { message: "toast motion must settle", timeout: 5_000 }).toBe(true);
+}
+
+/**
+ * The isolated QA fixtures run in the project's browser (the CI Chromium, or
+ * the local executable the config names). QA_BROWSER_CHANNEL launches a
+ * branded channel instead (e.g. "msedge") for a cross-browser pass.
+ */
+async function launchQaBrowser(
+  playwright: { chromium: { launch(options: { channel: string }): Promise<Browser> } },
+  shared: Browser,
+): Promise<{ newPage: Browser["newPage"]; close: () => Promise<void> }> {
+  const channel = process.env.QA_BROWSER_CHANNEL;
+  if (channel) return playwright.chromium.launch({ channel });
+  const contexts: BrowserContext[] = [];
+  return {
+    newPage: async (options) => {
+      const context = await shared.newContext(options);
+      contexts.push(context);
+      return context.newPage();
+    },
+    close: async () => {
+      await Promise.all(contexts.map((context) => context.close()));
+    },
+  };
+}
 
 async function gate8ProofHarness(page: Page, origin: string) {
   const moduleResponse = await page.request.get(`${origin}/src/components/transfer/Gate8ProofCard.tsx`);
@@ -84,7 +179,6 @@ async function gate8ProofHarness(page: Page, origin: string) {
           return element(React.Fragment, null,
             element('header', { 'data-testid': 'proof-header' },
               element('h1', null, 'Migration evidence'),
-              element('div', { className: 'df2-toast-dock', 'data-df2-toast-dock': '' }),
               element('button', { onClick: () => toast({ title: 'Synthetic evidence review',
                 message: 'File integrity does not establish migration correctness.', tone: 'warning' }) }, 'Show QA notification')),
             element(Gate8ProofCard, { report: reports[kind], jobId: 'qa-proof-' + kind }),
@@ -115,8 +209,8 @@ test.describe("isolated Gate8 proof", () => {
   for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
     for (const scenario of ["full and failed signature isolation", "sample and writer acknowledgement",
       "invalid file and signature feedback", "delayed verification job lifecycle"]) {
-      test(`Gate8 ${scenario} ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
-        const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+      test(`Gate8 ${scenario} ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }, testInfo) => {
+        const browser = await launchQaBrowser(playwright, sharedBrowser);
         const page = await browser.newPage({ viewport });
         try {
           const harness = await gate8ProofHarness(page, new URL(baseURL ?? "http://127.0.0.1:5173").origin);
@@ -160,7 +254,8 @@ test.describe("isolated Gate8 proof", () => {
           const inspect = async (name: string) => {
             await page.evaluate(() => document.fonts.ready);
             await page.getByRole("button", { name: "Show QA notification", exact: true }).click();
-            await expect(page.locator("[data-df2-toast-dock] .dt-toast")).toBeVisible();
+            await expect(page.locator(TOASTS)).toBeVisible();
+            await settleToastMotion(page);
             await page.getByTestId("proof-footer").scrollIntoViewIfNeeded();
             const geometry = await card.evaluate(panel => {
               const bounds = panel.getBoundingClientRect();
@@ -194,10 +289,13 @@ test.describe("isolated Gate8 proof", () => {
                   visible: resultBox.top >= 0 && resultBox.bottom <= innerHeight + 1,
                   display: style.display, wrap: style.overflowWrap, border: style.borderTopWidth,
                   fontSize: style.fontSize, text: result.textContent, bounds: resultBox.toJSON() } : null,
-                toasts: Array.from(document.querySelectorAll(".dt-toast")).map(toast => {
+                toasts: Array.from(document.querySelectorAll("[data-sonner-toaster] .dt-toast")).map(toast => {
                   const box = toast.getBoundingClientRect();
                   return { clearCard: !intersects(box, bounds), clearFooter: !intersects(box, footer),
-                    clearFeedback: !resultBox || !intersects(box, resultBox) };
+                    clearFeedback: !resultBox || !intersects(box, resultBox),
+                    clearActions: controls.every(control => !intersects(box, control.getBoundingClientRect())),
+                    inViewport: box.left >= 0 && box.top >= 0 && box.right <= innerWidth + 1 && box.bottom <= innerHeight + 1,
+                    box: box.toJSON() };
                 }) };
             });
             expect(geometry.overflow).toBeLessThanOrEqual(1);
@@ -206,7 +304,12 @@ test.describe("isolated Gate8 proof", () => {
             if (geometry.feedback) expect(geometry.feedback).toMatchObject({ belowActions: true, fullWidth: true,
               fits: true, visible: true, display: "grid", wrap: "anywhere", border: "1px", fontSize: "12px" });
             expect(geometry.toasts).toHaveLength(1);
-            for (const toast of geometry.toasts) expect(toast).toEqual({ clearCard: true, clearFooter: true, clearFeedback: true });
+            for (const toast of geometry.toasts) {
+              expect(toast.inViewport, `toast must stay inside the viewport (${name})`).toBe(true);
+              if (isPhone(viewport.width)) expectPhoneToastBand(toast.box, viewport, name);
+              else expect(toast, `toast must leave the proof card, its result and actions readable (${name})`)
+                .toMatchObject({ clearCard: true, clearFooter: true, clearFeedback: true, clearActions: true });
+            }
             await testInfo.attach(`gate8-${name}-geometry`, { body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
             for (const capture of ["end", "start"]) {
               const path = testInfo.outputPath(`gate8-${name}-${capture}-${viewport.width}.png`);
@@ -299,6 +402,7 @@ test.describe("isolated Gate8 proof", () => {
           expect(harness.evidence.failures).toEqual([]);
           expect(harness.evidence.gets.length).toBeGreaterThanOrEqual(2);
           expect(harness.evidence.fulfilled).toBe(harness.evidence.posts.length);
+          await expectToastsDismissible(page);
           await testInfo.attach("gate8-api-evidence", { body: JSON.stringify(harness.evidence, null, 2), contentType: "application/json" });
         } finally {
           await browser.close();
@@ -406,8 +510,8 @@ test.describe("isolated repair proposal", () => {
   for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
     for (const scenario of ["labels and long identifiers", "manual gates and no mappings",
       "pending dismissal and partial mixed apply", "failure and response lifecycle guards"]) {
-      test(`repair ${scenario} ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
-        const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+      test(`repair ${scenario} ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }, testInfo) => {
+        const browser = await launchQaBrowser(playwright, sharedBrowser);
         const page = await browser.newPage({ viewport });
         try {
           const harness = await repairProposalHarness(page, new URL(baseURL ?? "http://127.0.0.1:5173").origin);
@@ -714,8 +818,8 @@ async function quarantineRecoveryHarness(page: Page, origin: string) {
 test.describe("isolated quarantine recovery", () => {
   for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
     for (const scenario of ["state and proof gates", "long reasons and value editor"]) {
-      test(`recovery ${scenario} ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
-        const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+      test(`recovery ${scenario} ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }, testInfo) => {
+        const browser = await launchQaBrowser(playwright, sharedBrowser);
         const page = await browser.newPage({ viewport });
         try {
           const harness = await quarantineRecoveryHarness(page, new URL(baseURL ?? "http://127.0.0.1:5173").origin);
@@ -742,18 +846,24 @@ test.describe("isolated quarantine recovery", () => {
             }
           };
           const toastClearance = async (name: string) => {
-            await expect(page.locator(".df2-quarantine-notifications .dt-toast").first()).toBeVisible();
-            const geometry = await page.getByRole("region", { name: "Quarantine table", exact: true }).evaluate(region => {
+            await expect(page.locator(TOASTS).first()).toBeVisible();
+            await settleToastMotion(page);
+            const geometry = await page.getByRole("region", { name: "Quarantine table", exact: true }).evaluate((region, selector) => {
               const findings = region.getBoundingClientRect();
-              return Array.from(document.querySelectorAll(".df2-quarantine-notifications .dt-toast")).map(toast => {
+              return Array.from(document.querySelectorAll(selector)).map(toast => {
                 const bounds = toast.getBoundingClientRect();
-                return { bottom: bounds.bottom, findingsTop: findings.top,
+                return { box: bounds.toJSON(), findingsTop: findings.top,
+                  inViewport: bounds.left >= 0 && bounds.top >= 0 && bounds.right <= innerWidth + 1 && bounds.bottom <= innerHeight + 1,
                   nonintersection: bounds.bottom <= findings.top || bounds.top >= findings.bottom
                     || bounds.right <= findings.left || bounds.left >= findings.right };
               });
-            });
+            }, TOASTS);
             expect(geometry.length).toBeGreaterThan(0);
-            for (const toast of geometry) expect(toast.nonintersection).toBe(true);
+            for (const toast of geometry) {
+              expect(toast.inViewport, `toast must stay inside the viewport (${name})`).toBe(true);
+              if (isPhone(viewport.width)) expectPhoneToastBand(toast.box, viewport, name);
+              else expect(toast.nonintersection, `toast must leave the quarantine findings readable (${name})`).toBe(true);
+            }
             await testInfo.attach(`recovery-toast-clearance-${name}`, {
               body: JSON.stringify(geometry, null, 2), contentType: "application/json" });
           };
@@ -792,7 +902,7 @@ test.describe("isolated quarantine recovery", () => {
               harness.releaseReplay();
               await expect.poll(() => harness.evidence.gets).toBe(getCount + 1);
               await expect(completed).toHaveText("[]");
-              if (failure !== "missing-ledger") await expect(page.locator(".dt-toast--warning").last())
+              if (failure !== "missing-ledger") await expect(page.locator(TOASTS).and(page.locator(".dt-toast--warning")).last())
                 .toContainText(failure === "missing-proof" ? "proof not verified" : "ledger requires review");
               harness.releaseGet();
               await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
@@ -806,8 +916,8 @@ test.describe("isolated quarantine recovery", () => {
               await toastClearance(failure);
               if (failure === "missing-proof") {
                 await expect(review).toContainText("Child replay proof failed or is unavailable");
-                await expect(page.locator(".dt-toast--success")).toHaveCount(0);
-                await expect(proof.locator('svg polyline[points="20,6 9,17 4,12"]')).toHaveCount(0);
+                await expect(page.locator(TOASTS).and(page.locator(".dt-toast--success"))).toHaveCount(0);
+                await expect(proof.locator("svg.lucide-check")).toHaveCount(0);
                 await expect(proof.locator("svg")).toHaveCount(1);
                 await screenshot("missing-proof");
                 await refresh(harness.closed);
@@ -923,18 +1033,17 @@ test.describe("isolated quarantine recovery", () => {
             await expect(page.locator(".df2-quarantine-value")).toHaveText("NULL");
             await page.getByRole("button", { name: "Propose repair", exact: true }).click();
             await expect.poll(() => harness.evidence.proposals.length).toBe(1);
-            await expect(page.locator(".dt-toast--error").last()).toContainText("Synthetic proposal refused");
+            await expect(page.locator(TOASTS).and(page.locator(".dt-toast--error")).last()).toContainText("Synthetic proposal refused");
             expect(harness.evidence.proposals[0]).toMatchObject({ job_id: "qa-recovery", rejected_details: [{ column: "amount", value: null }] });
             await toastClearance("proposal-error");
-            await page.locator(".dt-toast--error").last().getByRole("button", { name: "View notification details" }).click();
-            const notificationDialog = page.getByRole("dialog", { name: "Notification details", exact: true });
-            await expect(notificationDialog).toBeVisible();
-            await expect(notificationDialog).toContainText("Synthetic proposal refused");
-            await expect(page.locator(".dt-toast-host")).toBeHidden();
-            await screenshot("notification-review");
-            await page.keyboard.press("Escape");
-            await expect(notificationDialog).toHaveCount(0);
-            await toastClearance("proposal-error-after-review");
+            // A short error reads in full on the toast: no clamp, so no Details review.
+            // Errors never expire; the user dismisses them.
+            const proposalError = page.locator(TOASTS).filter({ hasText: "Synthetic proposal refused" });
+            await expect(proposalError.locator(".dt-toast-message")).not.toHaveClass(/\bis-clamped\b/);
+            await expect(proposalError.getByRole("button", { name: "Details", exact: true })).toHaveCount(0);
+            await screenshot("proposal-error");
+            await proposalError.getByRole("button", { name: "Dismiss notification" }).click();
+            await expect(proposalError).toHaveCount(0);
           }
           if (scenario === "state and proof gates") await refresh(harness.open);
           harness.setResult(harness.verified);
@@ -954,7 +1063,7 @@ test.describe("isolated quarantine recovery", () => {
           await expect(proof).toHaveClass(/\bis-verified\b/);
           await expect(proof).not.toHaveClass(/\bis-review\b/);
           await expect(review).toHaveCount(0);
-          await expect(proof.locator('svg polyline[points="20,6 9,17 4,12"]')).toHaveCount(1);
+          await expect(proof.locator("svg.lucide-check")).toHaveCount(1);
           await expect(replay()).toHaveCount(0);
           expect(harness.evidence.posts.length).toBe(postsBefore + 1);
           expect(harness.evidence.posts.at(-1)).toMatchObject({ rows: [{ column: "amount",
@@ -965,6 +1074,7 @@ test.describe("isolated quarantine recovery", () => {
           expect(harness.evidence.failures).toEqual([]);
           await toastClearance("verified-closed");
           await screenshot("verified-closed");
+          await expectToastsDismissible(page);
           await testInfo.attach("recovery-api-evidence", { body: JSON.stringify(harness.evidence, null, 2), contentType: "application/json" });
         } finally {
           await browser.close();
@@ -974,8 +1084,8 @@ test.describe("isolated quarantine recovery", () => {
   }
 
   for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
-    test(`recovery partial sample refusal ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
-      const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+    test(`recovery partial sample refusal ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }, testInfo) => {
+      const browser = await launchQaBrowser(playwright, sharedBrowser);
       const page = await browser.newPage({ viewport });
       try {
         const harness = await quarantineRecoveryHarness(page, new URL(baseURL ?? "http://127.0.0.1:5173").origin);
@@ -1095,8 +1205,8 @@ async function schemaReviewHarness(page: Page, origin: string, fixture: string) 
 test.describe("isolated schema review", () => {
   for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
     for (const scenario of ["dashboard", "layout", "hard", "keyboard", "dashboard-hard-evolution"]) {
-      test(`${scenario} ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
-        const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+      test(`${scenario} ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }, testInfo) => {
+        const browser = await launchQaBrowser(playwright, sharedBrowser);
         const page = await browser.newPage({ viewport });
         const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
         const zero = { acknowledge: 0, approve: 0, reject: 0, remap: 0 };
@@ -1287,8 +1397,8 @@ test.describe("isolated schema review", () => {
 
 test.describe("isolated real-component entity icons", () => {
   for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
-    test(`entity icons and schema rows ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
-      const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+    test(`entity icons and schema rows ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }, testInfo) => {
+      const browser = await launchQaBrowser(playwright, sharedBrowser);
       const page = await browser.newPage({ viewport });
       const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
       const failures: string[] = [];
@@ -1481,7 +1591,7 @@ async function pendingFeatureHarness(page: Page, origin: string, fixture: string
         function ToastFixture() {
           const { toast } = useToast();
           const emit = () => {
-            const count = params.get('fixture') === 'toast-single' ? 1 : 3;
+            const count = { 'toast-single': 1, 'toast-burst': 5 }[params.get('fixture')] ?? 3;
             for (let index = 1; index <= count; index++) toast({ tone: 'warning',
               title: 'Synthetic warning ' + index,
               message: ('Order identity requires explicit operator review before any write. ' +
@@ -1492,8 +1602,7 @@ async function pendingFeatureHarness(page: Page, origin: string, fixture: string
               element('div', { className: 'df2-transfer-studio-chrome-row' },
                 element('div', { className: 'df2-wizard-studio' },
                   element('div', { className: 'df2-wizard-track' }, 'Source  Destination  Transform  Map  Validate  Run')),
-                element('div', { className: 'df2-route-bar' }, 'Postgres source  →  MySQL destination  ·  5.1k rows'),
-                element('div', { className: 'df2-toast-dock', 'data-df2-toast-dock': '' }))),
+                element('div', { className: 'df2-route-bar' }, 'Postgres source  →  MySQL destination  ·  5.1k rows'))),
             element('button', { onClick: emit }, 'Emit synthetic warnings'),
             element('button', null, 'Stable focus target'));
         }
@@ -1512,8 +1621,8 @@ async function pendingFeatureHarness(page: Page, origin: string, fixture: string
 
 test.describe("pending feature browser QA", () => {
   for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
-    test(`append identity and conditional MySQL caption ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
-      const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+    test(`append identity and conditional MySQL caption ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }, testInfo) => {
+      const browser = await launchQaBrowser(playwright, sharedBrowser);
       const page = await browser.newPage({ viewport });
       const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
       try {
@@ -1569,83 +1678,103 @@ test.describe("pending feature browser QA", () => {
       }
     });
 
-    test(`long warning preview review and expiry focus ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
-      const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+    test(`long warning preview review and expiry focus ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }, testInfo) => {
+      const browser = await launchQaBrowser(playwright, sharedBrowser);
       const page = await browser.newPage({ viewport });
       const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
       try {
         await page.clock.install();
         const evidence = await pendingFeatureHarness(page, origin, "fixture=toast");
         await page.getByRole("button", { name: "Emit synthetic warnings", exact: true }).click();
-        const toasts = page.locator(".dt-toast");
-        const more = page.getByRole("button", { name: "Review 1 more notifications", exact: true, includeHidden: true });
-        await expect(toasts).toHaveCount(2);
-        await expect(more).toBeVisible();
-        await expect(page.locator(".df2-toast-dock .dt-toast")).toHaveCount(2);
+        const toasts = page.locator(TOASTS);
+        await expect(toasts).toHaveCount(3);
+        await expect(page.getByRole("region", { name: /^Notifications/ })).toBeAttached();
         await page.evaluate(() => document.fonts.ready);
-        const preview = await toasts.evaluateAll(nodes => nodes.map(node => {
-          const title = node.querySelector(".dt-toast-title")!;
-          const titleStyle = getComputedStyle(title);
-          const titleBox = title.getBoundingClientRect();
-          const message = node.querySelector(".dt-toast-message")!;
-          const style = getComputedStyle(message);
-          const box = message.getBoundingClientRect();
-          const toastBox = node.getBoundingClientRect();
-          const bodyBox = node.querySelector(".dt-toast-body")!.getBoundingClientRect();
-          const buttons = Array.from(node.querySelectorAll("button")).map(button => button.getBoundingClientRect());
-          return { width: toastBox.width, titleWidth: titleBox.width, messageWidth: box.width,
-            titleWhiteSpace: titleStyle.whiteSpace, titleHeight: titleBox.height,
-            titleLineHeight: parseFloat(titleStyle.lineHeight), titleOverflow: titleStyle.textOverflow,
-            whiteSpace: style.whiteSpace, height: box.height, lineHeight: parseFloat(style.lineHeight),
-            contained: toastBox.left >= 0 && toastBox.right <= innerWidth + 1,
-            controlsClear: buttons.every(button => button.left >= bodyBox.right - 1),
-            clipped: buttons.some(button => button.right > toastBox.right + 1) };
-        }));
+        await settleToastMotion(page);
+        // The newest toast leads a collapsed stack; the two behind it show only
+        // their edges, with their content (and Dismiss) hidden until the stack expands.
+        const preview = await page.evaluate((region) => {
+          const items = Array.from(document.querySelectorAll(`${region} [data-sonner-toast]`));
+          return items.map(item => {
+            const node = item.querySelector(".dt-toast")!;
+            const message = node.querySelector(".dt-toast-message")!;
+            const style = getComputedStyle(message);
+            const box = message.getBoundingClientRect();
+            const toastBox = node.getBoundingClientRect();
+            const bodyBox = node.querySelector(".dt-toast-body")!.getBoundingClientRect();
+            const close = node.querySelector(".dt-toast-close")!.getBoundingClientRect();
+            const buttons = Array.from(node.querySelectorAll("button")).map(button => button.getBoundingClientRect());
+            return { front: item.getAttribute("data-front") === "true",
+              title: node.querySelector(".dt-toast-title")!.textContent,
+              contentVisible: getComputedStyle(node.querySelector(".dt-toast-body")!).visibility === "visible",
+              width: toastBox.width, titleWidth: node.querySelector(".dt-toast-title")!.getBoundingClientRect().width,
+              messageWidth: box.width, clamped: message.classList.contains("is-clamped"),
+              lines: Math.round(box.height / parseFloat(style.lineHeight)),
+              contained: toastBox.left >= 0 && toastBox.right <= innerWidth + 1 && toastBox.top >= 0 && toastBox.bottom <= innerHeight + 1,
+              closeClear: close.left >= bodyBox.right - 1,
+              clipped: buttons.some(button => button.right > toastBox.right + 1 || button.left < toastBox.left - 1),
+              minTarget: Math.min(...buttons.map(button => button.height)) };
+          });
+        }, TOAST_REGION);
+        const front = preview.filter(toast => toast.front);
+        expect(front).toHaveLength(1);
+        expect(front[0].title).toBe("Synthetic warning 3");
         for (const snapshot of preview) {
-          expect(snapshot.width).toBeGreaterThanOrEqual(180);
-          expect(snapshot.titleWidth).toBeGreaterThan(20);
-          expect(snapshot.messageWidth).toBeGreaterThan(20);
-          expect(snapshot.titleWhiteSpace).toBe("nowrap");
-          expect(snapshot.titleHeight).toBeLessThanOrEqual(snapshot.titleLineHeight + 2);
-          expect(snapshot.titleOverflow).toBe("ellipsis");
-          expect(snapshot.whiteSpace).toBe("nowrap");
-          expect(snapshot.height).toBeLessThanOrEqual(snapshot.lineHeight + 2);
-          expect(snapshot.contained).toBe(true);
-          expect(snapshot.controlsClear).toBe(true);
-          expect(snapshot.clipped).toBe(false);
+          expect(snapshot.contained, `${snapshot.title} stays on screen`).toBe(true);
+          expect(snapshot.contentVisible, `${snapshot.title} shows its content only at the front of a collapsed stack`).toBe(snapshot.front);
+        }
+        expect(front[0].width).toBeGreaterThanOrEqual(180);
+        expect(front[0].titleWidth).toBeGreaterThan(20);
+        expect(front[0].messageWidth).toBeGreaterThan(20);
+        // A long message clamps to four lines and offers its full text through Details.
+        expect(front[0].clamped).toBe(true);
+        expect(front[0].lines).toBeLessThanOrEqual(4);
+        expect(front[0].closeClear).toBe(true);
+        expect(front[0].clipped).toBe(false);
+        expect(front[0].minTarget).toBeGreaterThanOrEqual(24);
+        if (isPhone(viewport.width)) {
+          const box = await toasts.filter({ hasText: "END-WARNING-3" }).boundingBox();
+          expectPhoneToastBand({ left: box!.x, right: box!.x + box!.width, top: box!.y, bottom: box!.y + box!.height }, viewport, "long warning");
         }
         expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
         await page.screenshot({ path: testInfo.outputPath(`toast-preview-${viewport.width}.png`), animations: "disabled" });
-        const details = page.getByRole("button", { name: "View notification details", exact: true }).last();
-        await details.click();
+
+        // Keyboard focus on a toast pauses every timer and expands the stack:
+        // each toast then shows in full, none overlapping another.
+        const frontToast = toasts.filter({ hasText: "END-WARNING-3" });
+        const details = frontToast.getByRole("button", { name: "Details", exact: true });
+        await details.focus();
+        await expect(page.locator(`${TOAST_REGION} [data-sonner-toast][data-expanded="true"]`)).toHaveCount(3);
+        await settleToastMotion(page);
+        const expanded = await toasts.evaluateAll(nodes => nodes.map(node => {
+          const box = node.getBoundingClientRect();
+          return { top: box.top, bottom: box.bottom, left: box.left, right: box.right,
+            visible: getComputedStyle(node.querySelector(".dt-toast-body")!).visibility === "visible" };
+        }));
+        for (const [index, box] of expanded.entries()) {
+          expect(box.visible).toBe(true);
+          expect(box.top >= 0 && box.bottom <= viewport.height && box.left >= 0 && box.right <= viewport.width,
+            "an expanded stack stays on screen").toBe(true);
+          for (const other of expanded.slice(index + 1)) {
+            expect(Math.min(box.bottom, other.bottom) - Math.max(box.top, other.top) <= 1,
+              "expanded toasts never overlap each other").toBe(true);
+          }
+        }
+        await page.screenshot({ path: testInfo.outputPath(`toast-expanded-${viewport.width}.png`), animations: "disabled" });
+        await page.clock.fastForward(11000);
+        await expect(toasts, "focus holds every toast past the warning hold time").toHaveCount(3);
+
+        // Details opens the full text; the toast it belongs to is held while it is open.
+        await page.keyboard.press("Enter");
         const dialog = page.getByRole("dialog", { name: "Notification details", exact: true });
-        await expect(dialog).toBeFocused();
-        const host = page.locator(".dt-toast-host");
-        await expect(host).toHaveCSS("display", "none");
-        await expect(host).toHaveAttribute("inert", "");
+        await expect(dialog).toBeVisible();
+        await expect.poll(() => dialog.evaluate(panel => panel.contains(document.activeElement))).toBe(true);
         await expect(dialog.locator(".dt-toast-review-item")).toHaveCount(1);
-        await expect(dialog).toContainText("END-WARNING-3");
         const fullMessage = (index: number) => ("Order identity requires explicit operator review before any write. " +
           "Inspect the full schema policy and destination constraints. ").repeat(8) + `END-WARNING-${index}`;
         await expect(dialog.getByText(fullMessage(3), { exact: true })).toHaveCount(1);
-        await page.keyboard.press("Escape");
-        await expect(dialog).toHaveCount(0);
-        await expect(host).toBeVisible();
-        await expect(host).not.toHaveAttribute("inert", "");
-        await expect(details).toBeFocused();
-        await more.click();
-        await expect(dialog).toBeFocused();
-        await expect(dialog.locator(".dt-toast-review-item")).toHaveCount(3);
-        for (const index of [1, 2, 3]) {
-          await expect(dialog).toContainText(`END-WARNING-${index}`);
-          await expect(dialog.getByText(fullMessage(index), { exact: true })).toHaveCount(1);
-        }
         await page.clock.fastForward(11000);
-        await expect(toasts).toHaveCount(2);
-        await expect(more).toHaveCount(1);
-        await expect(more).toBeHidden();
-        await expect(host).toHaveCSS("display", "none");
-        await expect(host).toHaveAttribute("inert", "");
+        await expect(frontToast, "the reviewed toast stays while its details are open").toHaveCount(1);
         await expect(dialog).toBeVisible();
         const reviewGeometry = await dialog.evaluate(panel => {
           const body = panel.querySelector(".df2-modal-body")!;
@@ -1661,57 +1790,82 @@ test.describe("pending feature browser QA", () => {
         expect(reviewGeometry.separated).toBe(true);
         expect(reviewGeometry.clipped).toBe(false);
         expect(reviewGeometry.overflow).toBeLessThanOrEqual(1);
-        await page.screenshot({ path: testInfo.outputPath(`toast-review-top-${viewport.width}.png`), animations: "disabled" });
-        await dialog.locator(".df2-modal-body").evaluate(body => { body.scrollTop = body.scrollHeight; });
-        await expect(dialog.getByText(/END-WARNING-1$/)).toBeInViewport();
-        await page.screenshot({ path: testInfo.outputPath(`toast-review-bottom-${viewport.width}.png`), animations: "disabled" });
+        await page.screenshot({ path: testInfo.outputPath(`toast-review-${viewport.width}.png`), animations: "disabled" });
         const close = dialog.getByRole("button", { name: "Close", exact: true });
         const closeReceivesPointer = await close.evaluate(button => {
           const box = button.getBoundingClientRect();
           return button.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
         });
-        await page.keyboard.press("Tab");
-        await expect(close).toBeFocused();
-        await page.keyboard.press("Enter");
+        expect(closeReceivesPointer, "a toast must not cover the notification review Close control").toBe(true);
+        await page.keyboard.press("Escape");
         await expect(dialog).toHaveCount(0);
-        await expect(host).toBeVisible();
-        await expect(host).not.toHaveAttribute("inert", "");
-        await expect(more).toBeVisible();
-        await expect(more).toBeFocused();
-        await page.screenshot({ path: testInfo.outputPath(`toast-restored-${viewport.width}.png`), animations: "disabled" });
+        await expect(details, "closing the review returns focus to Details").toBeFocused();
+
+        // Moving focus away resumes the timers; expiry never moves focus.
         const stable = page.getByRole("button", { name: "Stable focus target", exact: true });
         await stable.focus();
         await page.clock.fastForward(10001);
         await expect(toasts).toHaveCount(0);
-        await expect(more).toHaveCount(0);
         await expect(stable).toBeFocused();
         await page.screenshot({ path: testInfo.outputPath(`toast-expired-${viewport.width}.png`), animations: "disabled" });
         expect(evidence.failures).toEqual([]);
         expect(evidence.blocked).toEqual([]);
-        expect(closeReceivesPointer, "Toast preview must not cover the notification review Close control").toBe(true);
+      } finally {
+        await browser.close();
+      }
+    });
+
+    test(`a burst stacks at most three and every toast dismisses ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }) => {
+      const browser = await launchQaBrowser(playwright, sharedBrowser);
+      const page = await browser.newPage({ viewport });
+      const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
+      try {
+        const evidence = await pendingFeatureHarness(page, origin, "fixture=toast-burst");
+        await page.getByRole("button", { name: "Emit synthetic warnings", exact: true }).click();
+        // Sonner keeps every toast but shows three; the rest wait behind the stack.
+        await expect(page.locator(`${TOAST_REGION} [data-sonner-toast][data-visible="true"]`)).toHaveCount(3);
+        await expect(page.locator(TOASTS).filter({ hasText: "END-WARNING-5" })
+          .locator("xpath=ancestor::*[@data-sonner-toast][1]")).toHaveAttribute("data-front", "true");
+        await settleToastMotion(page);
+        const boxes = await page.locator(`${TOAST_REGION} [data-sonner-toast][data-visible="true"] .dt-toast`).evaluateAll(nodes =>
+          nodes.map(node => node.getBoundingClientRect().toJSON()));
+        for (const box of boxes) {
+          expect(box.left >= 0 && box.top >= 0 && box.right <= viewport.width + 1 && box.bottom <= viewport.height + 1,
+            "every visible toast stays on screen").toBe(true);
+        }
+        await expectToastsDismissible(page);
+        expect(evidence.failures).toEqual([]);
+        expect(evidence.blocked).toEqual([]);
       } finally {
         await browser.close();
       }
     });
   }
 
-  test("single Transfer Studio toast has readable width", async ({ playwright, baseURL }) => {
-    const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+  test("single Transfer Studio toast has readable width", async ({ playwright, browser: sharedBrowser, baseURL }) => {
+    const browser = await launchQaBrowser(playwright, sharedBrowser);
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
     try {
       await pendingFeatureHarness(page, origin, "fixture=toast-single");
       await page.getByRole("button", { name: "Emit synthetic warnings", exact: true }).click();
-      const toast = page.locator(".df2-toast-dock .dt-toast");
+      const toast = page.locator(TOASTS);
       await expect(toast).toHaveCount(1);
+      await settleToastMotion(page);
       const geometry = await toast.evaluate(node => ({
         width: node.getBoundingClientRect().width,
+        right: node.getBoundingClientRect().right,
+        bottom: node.getBoundingClientRect().bottom,
         titleWidth: node.querySelector(".dt-toast-title")!.getBoundingClientRect().width,
         messageWidth: node.querySelector(".dt-toast-message")!.getBoundingClientRect().width,
       }));
       expect(geometry.width).toBeGreaterThanOrEqual(180);
+      expect(geometry.width).toBeLessThanOrEqual(400);
       expect(geometry.titleWidth).toBeGreaterThan(20);
       expect(geometry.messageWidth).toBeGreaterThan(20);
+      // Desktop: bottom-right, inside the page edge.
+      expect(geometry.right).toBeLessThanOrEqual(1440 - 16);
+      expect(geometry.bottom).toBeLessThanOrEqual(1000 - 16);
     } finally {
       await browser.close();
     }
@@ -1719,15 +1873,22 @@ test.describe("pending feature browser QA", () => {
 });
 
 /**
- * D-BP-11: a toast must never cover the sticky footer action bar, a primary
- * action, or the step's content card — the "Source profiled" toast painted
- * over "Continue to Transform", "Preflight passed" covered the contract row
- * on Validate, and the toast stack covered the bottom-right of the Map
- * empty-state card. Geometry, not styling.
+ * D-BP-11: a toast must never cover the sticky step footer (Back, the primary,
+ * the reason beside it, the secondary actions), the strips docked on it (the
+ * Validate contract row) or the stepper — the "Source profiled" toast painted
+ * over "Continue to Transform", "Preflight passed" covered the contract row on
+ * Validate, and on a phone the region covered "Analyze route" in the two-row
+ * Destination footer. Geometry, not styling.
  *
- * Every visible .dt-toast is measured — .first() can resolve to a toast that
- * is registered but not yet rendered (boundingBox() returns null), which is
- * how this spec used to false-fail.
+ * Toasts live in one fixed sonner region on <body> (`[data-sonner-toaster]`),
+ * raised above the step footer by the footer's measured height. The region
+ * floats over the step's content (cards, tables) by design — it is
+ * dismissible and pauses on hover and focus — so content cards are no longer
+ * overlap targets; the controls and the stepper are.
+ *
+ * Every visible toast is measured — .first() can resolve to a toast that is
+ * registered but not yet rendered (boundingBox() returns null), which is how
+ * this spec used to false-fail.
  */
 
 function intersects(
@@ -1750,7 +1911,7 @@ interface SnapBox {
 }
 
 interface ClearanceSnap {
-  dock: SnapBox | null;
+  viewport: { width: number; height: number };
   panel: SnapBox | null;
   stepper: SnapBox | null;
   toasts: SnapBox[];
@@ -1758,16 +1919,25 @@ interface ClearanceSnap {
   routeChip: { box: SnapBox; clipped: boolean } | null;
   routeLabels: { clipped: boolean; text: string }[];
   footerStatuses: { clipped: boolean; text: string }[];
-  targets: SnapBox[];
+  targets: { box: SnapBox; what: string }[];
 }
 
+// What a toast must never cover: the step footer and every control in it
+// (Back, the primary, the secondary actions), the strips docked on top of it
+// and the stepper. Buttons inside the step's content cards (e.g. "Open
+// mapping proof") sit under the floating region like the rest of the content.
+const OVERLAP_TARGETS_SEL =
+  ".df2-wizard-footer, .df2-run-footer, .df2-validate-footer-contract, " +
+  ".df2-validate-footer-cdc, .df2-contract-bind, .df2-wizard-footer .df2-btn, " +
+  ".df2-step-primary, .df2-step-back, .df2-transfer-studio-chrome";
+
 // One DOM frame, one measurement. Bounding boxes used to be read through a
-// dozen separate protocol round-trips — a toast exiting or the dock band
-// reflowing between two calls mixed geometry from different frames and
+// dozen separate protocol round-trips — a toast exiting or the region
+// restacking between two calls mixed geometry from different frames and
 // false-failed at the wrap widths. Everything the assertions touch is
 // snapshotted in a single evaluate.
 async function snapshotClearance(page: Page): Promise<ClearanceSnap> {
-  return page.evaluate(() => {
+  return page.evaluate(({ targetsSel, toastsSel }) => {
     type B = { x: number; y: number; width: number; height: number };
     const rectOf = (el: Element): B => {
       const r = el.getBoundingClientRect();
@@ -1780,15 +1950,15 @@ async function snapshotClearance(page: Page): Promise<ClearanceSnap> {
       return r.width > 0 && r.height > 0;
     };
     const firstBox = (sel: string): B | null => {
-      const el = document.querySelector(sel);
-      return el && shown(el) ? rectOf(el) : null;
+      const el = Array.from(document.querySelectorAll(sel)).find(shown);
+      return el ? rectOf(el) : null;
     };
     // Overlap targets only: a bounding box reports layout geometry, not
     // painted pixels — inside an overflow-clipping ancestor, content beyond
     // the clip edge is not painted. Clip each target to its clipping
-    // ancestors so overlap measures visible pixels. Toasts must NOT be
-    // clipped this way: a toast clipped by the dock's overflow is exactly
-    // the D-BP-27 defect the containment check asserts on its unclipped box.
+    // ancestors so overlap measures visible pixels. Toasts are not clipped
+    // this way: a toast cut off by the screen edge is a defect the
+    // containment check asserts on its unclipped box.
     const painted = (el: Element): B | null => {
       const r = el.getBoundingClientRect();
       let left = r.left, top = r.top, right = r.right, bottom = r.bottom;
@@ -1817,6 +1987,10 @@ async function snapshotClearance(page: Page): Promise<ClearanceSnap> {
     };
     const clipped = (el: Element): boolean =>
       el.scrollWidth > el.clientWidth + 1;
+    const describe = (el: Element): string => {
+      const name = (el.getAttribute("aria-label") || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40);
+      return `${el.tagName.toLowerCase()}.${Array.from(el.classList).slice(0, 3).join(".")} "${name}"`;
+    };
 
     const labels = Array.from(
       document.querySelectorAll(
@@ -1855,22 +2029,16 @@ async function snapshotClearance(page: Page): Promise<ClearanceSnap> {
         text: (el.textContent || "").trim().slice(0, 48),
       }));
 
-    const targets = Array.from(
-      document.querySelectorAll(
-        ".df2-wizard-footer, .df2-run-footer, " +
-          ".df2-transfer-step-panel .df2-btn-primary, .df2-empty-state, " +
-          ".df2-map-empty-state, .df2-card, .df2-contract-bind, .df2-vd-metric",
-      ),
-    )
+    const targets = Array.from(document.querySelectorAll(targetsSel))
       .filter(shown)
-      .map(painted)
-      .filter((b): b is B => b !== null); // same set as OVERLAP_TARGETS_SEL
+      .map((el) => ({ box: painted(el), what: describe(el) }))
+      .filter((t): t is { box: B; what: string } => t.box !== null);
 
     return {
-      dock: firstBox(".df2-toast-dock"),
+      viewport: { width: innerWidth, height: innerHeight },
       panel: firstBox(".df2-transfer-step-viewport"),
       stepper: firstBox(".df2-transfer-studio-chrome"),
-      toasts: Array.from(document.querySelectorAll(".dt-toast"))
+      toasts: Array.from(document.querySelectorAll(toastsSel))
         .filter(shown)
         .map(rectOf),
       labels,
@@ -1879,7 +2047,7 @@ async function snapshotClearance(page: Page): Promise<ClearanceSnap> {
       footerStatuses,
       targets,
     };
-  });
+  }, { targetsSel: OVERLAP_TARGETS_SEL, toastsSel: TOASTS });
 }
 
 async function assertToastClearance(
@@ -1888,20 +2056,21 @@ async function assertToastClearance(
   opts: { requireToast?: boolean } = {},
 ) {
   const requireToast = opts.requireToast ?? true;
-  const toasts = page.locator(".dt-toast:visible");
+  const toasts = page.locator(TOASTS);
   if (requireToast) {
     await expect(toasts.first(), `a toast must be visible on ${label}`).toBeVisible();
   }
   // The toast's mount and the step's content land on different frames — a
   // snapshot right after the toast appears can precede the footer/cards.
-  // Wait for a VISIBLE overlap target (the selector's first DOM match can be
-  // a hidden control like "Apply read window") so the leg is rendered.
+  // Wait for a VISIBLE footer so the leg is rendered, and for the region to
+  // take its place above it (the footer is measured on the next frame).
   await expect(
-    page.locator(`${OVERLAP_TARGETS_SEL} >> visible=true`).first(),
-    `a footer / primary action / card must render on ${label}`,
+    page.locator(".df2-wizard-footer, .df2-run-footer").filter({ visible: true }).first(),
+    `the step footer must render on ${label}`,
   ).toBeVisible({ timeout: 15_000 });
+  await settleToastMotion(page);
   const snap = await snapshotClearance(page);
-  const { dock: dockBox, panel: panelBox, stepper: stepperBox } = snap;
+  const { panel: panelBox, stepper: stepperBox, viewport } = snap;
   const toastBoxes = snap.toasts;
   if (requireToast) {
     expect(
@@ -1910,24 +2079,17 @@ async function assertToastClearance(
     ).toBeGreaterThan(0);
   }
 
-  // D-BP-20: docked toasts must live inside the header toast dock — never
-  // over the step content. The content column also keeps the full width:
-  // its right edge stays aligned to the stepper's right edge (+/-8px).
-  // The shell-clear check runs on every leg, toast or not.
-  const vw = page.viewportSize()?.width ?? 1440;
-  if (dockBox && panelBox && stepperBox) {
-    // D-BP-27: at EVERY width, each visible toast box must be fully inside
-    // the dock band's box — left, right, top, and bottom. Partial visibility
-    // (a toast clipped off the lane edge) is a defect, not a layout.
-    for (const t of toastBoxes) {
-      expect(
-        t.x >= dockBox.x - 1 &&
-          t.y >= dockBox.y - 1 &&
-          t.x + t.width <= dockBox.x + dockBox.width + 1 &&
-          t.y + t.height <= dockBox.y + dockBox.height + 1,
-        `toast ${JSON.stringify(t)} must be fully inside the dock band ${JSON.stringify(dockBox)} on ${label}`,
-      ).toBe(true);
-    }
+  // D-BP-27: every visible toast is fully on screen — left, right, top and
+  // bottom. Partial visibility (a toast cut off by an edge) is a defect.
+  for (const t of toastBoxes) {
+    expect(
+      t.x >= -1 && t.y >= -1 && t.x + t.width <= viewport.width + 1 && t.y + t.height <= viewport.height + 1,
+      `toast ${JSON.stringify(t)} must be fully inside the ${viewport.width}x${viewport.height} viewport on ${label}`,
+    ).toBe(true);
+  }
+  // D-BP-20: the content column keeps the full width — its right edge stays
+  // aligned to the stepper's right edge (+/-8px). Checked on every leg.
+  if (panelBox && stepperBox) {
     const edgeDelta = Math.abs(panelBox.x + panelBox.width - (stepperBox.x + stepperBox.width));
     expect(
       edgeDelta,
@@ -1945,16 +2107,6 @@ async function assertToastClearance(
       `step label ${i} must not be clipped on ${label}`,
     ).toBe(false);
   }
-  // D-BP-27: at <=480 the dock lane stacks above the stepper — keep >=8px
-  // clearance between the lane bottom and the first step pill's top.
-  if (vw <= 480 && dockBox && labelBoxes.length > 0) {
-    const stepsTop = Math.min(...labelBoxes.map((b) => b.y));
-    const gap = stepsTop - (dockBox.y + dockBox.height);
-    expect(
-      gap >= 8,
-      `docked toast lane must keep >=8px clearance above the stepper on ${label} (gap=${gap.toFixed(1)})`,
-    ).toBe(true);
-  }
   for (let i = 0; i < labelBoxes.length; i++) {
     for (let j = i + 1; j < labelBoxes.length; j++) {
       expect(
@@ -1965,7 +2117,7 @@ async function assertToastClearance(
     for (const t of toastBoxes) {
       expect(
         intersects(labelBoxes[i], t),
-        `step label ${i} must not sit under a toast on ${label}`,
+        `step label '${labelTexts[i]}' must not sit under a toast on ${label}`,
       ).toBe(false);
     }
   }
@@ -1986,8 +2138,7 @@ async function assertToastClearance(
 
   // D-BP-26: footer status words must not truncate mid-word at >=1024 —
   // the CSS drops secondary detail spans instead of ellipsizing.
-  const vpw = page.viewportSize()?.width ?? 0;
-  if (vpw >= 1024) {
+  if (viewport.width >= 1024) {
     for (const s of snap.footerStatuses) {
       expect(
         s.clipped,
@@ -2002,13 +2153,13 @@ async function assertToastClearance(
 
   expect(
     snap.targets.length,
-    `a footer / primary action / card must be on screen on ${label}`,
+    `the step footer and its controls must be on screen on ${label}`,
   ).toBeGreaterThan(0);
   for (const t of toastBoxes) {
-    for (const b of snap.targets) {
+    for (const target of snap.targets) {
       expect(
-        intersects(t, b),
-        `toast ${JSON.stringify(t)} must not overlap ${JSON.stringify(b)} on ${label}`,
+        intersects(t, target.box),
+        `toast ${JSON.stringify(t)} must not overlap ${target.what} ${JSON.stringify(target.box)} on ${label}`,
       ).toBe(false);
     }
   }
@@ -2020,10 +2171,10 @@ async function loadSample(page: Page) {
     .click();
 }
 
-// Geometry specs must not read mid-animation boxes: dt-toast-in slides a
-// toast in with translateX(12px), and a measurement during that flight
-// reports a box hanging past the dock edge — the intermittent 1280/1024
-// false-failures. Freeze animation/transition to 0s for the whole run.
+// Geometry specs must not read mid-animation boxes: sonner slides a toast in
+// and restacks the others with transitions, and a measurement during that
+// flight reports a box that is still moving. Freeze animation/transition to
+// 0s for the whole run.
 function freezeAnimations(page: Page) {
   return page.addInitScript(() => {
     const apply = () => {
@@ -2039,11 +2190,6 @@ function freezeAnimations(page: Page) {
   });
 }
 
-const OVERLAP_TARGETS_SEL =
-  ".df2-wizard-footer, .df2-run-footer, " +
-  ".df2-transfer-step-panel .df2-btn-primary, .df2-empty-state, " +
-  ".df2-map-empty-state, .df2-card, .df2-contract-bind, .df2-vd-metric";
-
 test.describe("toast/footer clearance (D-BP-11)", () => {
   test.beforeEach(async ({ page }) => {
     // Hermetic: every endpoint the Source→Validate walk hits is stubbed from
@@ -2058,7 +2204,7 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
   });
 
   for (const width of [1440, 1280, 1024, 390]) {
-    test(`no toast overlap with footer, primary actions, or cards @${width}px`, async ({
+    test(`no toast overlap with the step footer, its actions, or the stepper @${width}px`, async ({
       page,
     }) => {
       await runClearanceWalk(page, width, "");
@@ -2066,8 +2212,7 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
   }
 });
 
-// D-BP-24: the same clearance contract holds in canvas mode — docked toasts
-// must live inside the header band at every width there too.
+// D-BP-24: the same clearance contract holds in canvas mode.
 test.describe("toast/footer clearance — canvas mode (D-BP-24)", () => {
   test.beforeEach(async ({ page }) => {
     await installHermeticStubs(page);
@@ -2117,6 +2262,11 @@ async function runClearanceWalk(page: Page, width: number, mode: string) {
       if (await fileTab.isVisible().catch(() => false)) {
         await fileTab.click();
         await page.waitForTimeout(400);
+        // File export: on a phone the footer wraps to two rows (Back and
+        // "Analyze route" above the primary); the region must clear both rows.
+        await assertToastClearance(page, `${mode}Destination (file export) @${width}px`, {
+          requireToast: false,
+        });
       }
       if (await clickIf(/Continue to Review|Continue to Transform/)) {
         await assertToastClearance(page, `${mode}Transform/Review @${width}px`, {
@@ -2133,6 +2283,11 @@ async function runClearanceWalk(page: Page, width: number, mode: string) {
         .getByRole("button", { name: /Continue to Validate/ })
         .first();
       await toValidate.waitFor({ state: "visible", timeout: 15_000 });
+      // Map gates Validate on approved mappings ("Approve 5 columns to
+      // continue"): approve the eligible ones as a user would, then continue.
+      const approve = page.getByRole("button", { name: /Approve eligible/ }).first();
+      if (await approve.isVisible().catch(() => false)) await approve.click();
+      await expect(toValidate, `Continue to Validate must enable on ${mode}Map @${width}px`).toBeEnabled({ timeout: 15_000 });
       await toValidate.click();
       // Validate panel + the contract bind field + at least one metric card
       // must be on screen, and the Validate toasts must be live. The leg
@@ -2143,7 +2298,7 @@ async function runClearanceWalk(page: Page, width: number, mode: string) {
       });
       await expect(page.locator(".df2-vd-metric").first()).toBeVisible();
       await expect(
-        page.locator(".dt-toast:visible", { hasText: /preflight|validat/i }).first(),
+        page.locator(TOASTS).filter({ hasText: /preflight|validat/i }).first(),
         `a preflight/validate toast must be shown on ${mode}Validate @${width}px`,
       ).toBeVisible({ timeout: 10_000 });
       await assertToastClearance(page, `${mode}Validate step @${width}px`);
@@ -2175,8 +2330,8 @@ test.describe("Jobs detail route and incremental snapshot layout", () => {
     { width: 768, height: 900 },
     { width: 390, height: 844 },
   ]) {
-    test(`long endpoints and aligned snapshot fields ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
-      const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+    test(`long endpoints and aligned snapshot fields ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }, testInfo) => {
+      const browser = await launchQaBrowser(playwright, sharedBrowser);
       const page = await browser.newPage({ viewport });
       const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
       const failures: string[] = [];
@@ -2316,8 +2471,8 @@ test.describe("Settings responsive navigation and notice layout", () => {
     { width: 1440, height: 1000 },
     { width: 390, height: 844 },
   ]) {
-    test(`settings sections and alerts stay contained ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
-      const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+    test(`settings sections and alerts stay contained ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }, testInfo) => {
+      const browser = await launchQaBrowser(playwright, sharedBrowser);
       const page = await browser.newPage({ viewport });
       const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
       const failures: string[] = [];
@@ -2442,8 +2597,8 @@ test.describe("Contracts lifecycle help stays contextual", () => {
     { width: 1440, height: 1000 },
     { width: 390, height: 844 },
   ]) {
-    test(`lifecycle help is collapsed until requested ${viewport.width}x${viewport.height}`, async ({ playwright, baseURL }, testInfo) => {
-      const browser = await playwright.chromium.launch({ channel: process.env.QA_BROWSER_CHANNEL ?? "msedge" });
+    test(`lifecycle help is collapsed until requested ${viewport.width}x${viewport.height}`, async ({ playwright, browser: sharedBrowser, baseURL }, testInfo) => {
+      const browser = await launchQaBrowser(playwright, sharedBrowser);
       const page = await browser.newPage({ viewport });
       const origin = new URL(baseURL ?? "http://127.0.0.1:5173").origin;
       const failures: string[] = [];

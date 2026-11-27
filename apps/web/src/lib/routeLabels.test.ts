@@ -33,6 +33,7 @@ describe("route labels", () => {
   });
   it("a file export does not show table-schema rules", () => {
     const studio = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "pages", "TransferPage.tsx"), "utf8");
-    assert.match(studio, /\{destKindMode === "database" \? \(\s*<>\s*<p className="df2-label-hint">\s*\{schemaPolicyHonestyLine\(schemaPolicy\)\}/);
+    // The schema-policy line (ADD COLUMN, drift) sits behind "What this means", only for a database.
+    assert.match(studio, /\{destKindMode === "database" \? \(\s*<p className="df2-label-hint">\s*\{schemaPolicyHonestyLine\(schemaPolicy\)\}/);
   });
 });

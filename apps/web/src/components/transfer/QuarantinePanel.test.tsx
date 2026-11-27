@@ -47,7 +47,8 @@ async function answer(request: Request, body: Record<string, unknown>, status = 
       ? { ...body, replay_block_reason: null }
       : body;
     request.resolve(new Response(JSON.stringify(responseBody), { status }));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // A few ms, not 0: the toast region (sonner) renders on its own next tick.
+    await new Promise((resolve) => setTimeout(resolve, 10));
   });
 }
 

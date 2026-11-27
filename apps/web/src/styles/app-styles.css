@@ -51,6 +51,18 @@
 /* Canonical final component layer — extend this or tokens.css only. */
 @import "./enterprise-ui.css";
 @import "./studio-next.css";
+/* Toasts, menus, spinners, skeletons — the shared feedback primitives. */
+@import "./feedback.css";
+/* Run result header + list error/loading states (.df2-run-result, .df2-error-state). */
+@import "./run-result.css";
+@import "./verdict.css";
+@import "./schedule-next-runs.css";
+@import "./explain.css";
+@import "./gate-checklist.css";
+@import "./table-progress.css";
+@import "./connection-test.css";
+@import "./command-menu.css";
+@import "./sentence-case.css";
 /* Public hero system — authority for the marketing hero band + hero drawings. */
 @import "./marketing-hero.css";
 

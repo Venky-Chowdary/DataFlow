@@ -1,3 +1,4 @@
+import type { IconName } from "../icons/iconMap";
 import { StatCard } from "./StatCard";
 
 export interface MetricItem {
@@ -5,7 +6,7 @@ export interface MetricItem {
   value: string | number;
   tone?: "default" | "blue" | "green" | "red" | "teal";
   sub?: string;
-  icon?: string;
+  icon?: IconName;
 }
 
 interface PageMetricsRowProps {

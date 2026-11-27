@@ -391,14 +391,17 @@ def build_dest_ri_validate_gate(
         "fk_parent_absent_at_destination",
         "fk_route_ignore",
     }:
+        ignored = parent_finding.get("severity") != "warn"
         return {
             "id": GATE_ID,
-            "status": "warn" if parent_finding.get("severity") == "warn" else "skip",
+            "status": "skip" if ignored else "warn",
             "message": str(parent_finding.get("message") or ""),
             "duration_ms": 0,
             "details": {
                 "schema": REPORT_SCHEMA,
                 "declared": True,
+                # The route ignores these keys (fk_route_ignore): nothing to prove here.
+                "applicable": not ignored,
                 "evidence": "plan_time_parent_probe",
                 "parents": list(parent_finding.get("parents") or []),
                 "relationships": list(parent_finding.get("columns") or []),

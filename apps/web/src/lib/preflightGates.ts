@@ -1,3 +1,4 @@
+import type { IconName } from "../components/icons/iconMap";
 /**
  * Canonical preflight gate catalog — single source for Validate UI + local preflight.
  * IDs MUST match backend GateId values in packages/preflight and preflight_service.
@@ -6,7 +7,7 @@
 export interface GateCatalogEntry {
   id: string;
   label: string;
-  icon: string;
+  icon: IconName;
   rule: string;
   /**
    * Operator code. Set when the id's leading number collides with another gate
