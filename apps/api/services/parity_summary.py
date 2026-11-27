@@ -223,9 +223,11 @@ def build_summary(workspace_filter: Any, *, limit: int = 30) -> dict[str, Any]:
     failed = {job_id for job_id, tables in by_job.items() if any(t.get("failed_verification") for t in tables.values())}
     # A run still being verified after the write (Parity at Scale, flag-gated) has
     # no verdict yet: it waits outside the denominator instead of reading as unproven.
+    # A run Gate-8 failed is decided (not proven) whatever else is still running, so
+    # it never drops out and lifts the percentage above what the runs proved.
     decided = [
         r for r in runs
-        if r["verdict"] != "verifying" and (r["verdict"] != "unverifiable" or r["job_id"] in failed)
+        if r["job_id"] in failed or r["verdict"] not in {"verifying", "unverifiable"}
     ]
     return {
         "generated_at": now_iso(),
