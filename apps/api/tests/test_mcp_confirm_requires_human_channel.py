@@ -432,6 +432,13 @@ class _FakeSettingsCollection:
         sets = dict(update.get("$set") or {})
         if inserted:
             sets.update(update.get("$setOnInsert") or {})
+        for path in update.get("$unset") or {}:
+            node = self.doc
+            *parents, leaf = path.split(".")
+            for key in parents:
+                node = node.get(key) if isinstance(node, dict) else None
+            if isinstance(node, dict):
+                node.pop(leaf, None)
         for path, value in sets.items():
             node = self.doc
             *parents, leaf = path.split(".")
@@ -724,9 +731,11 @@ def test_a_heal_cut_short_is_finished_by_the_next_read(app_client, monkeypatch):
     store._load_raw()  # created the document, then failed part-way
     assert failed["n"] == 1 and "saml" not in (coll.doc.get("sso") or {})
 
+    assert "file_heal_done" not in coll.doc, "no marker until every path is copied"
     store._load_raw()  # the document exists now: the next read still finishes the heal
     assert coll.doc["sso"]["saml"] == {"entity_id": "https://idp.example/saml"}
     assert coll.doc["ai_providers"]["openai"] == {"model": "file-model"}
+    assert coll.doc["file_heal_done"] is True
 
 
 def test_a_document_another_node_created_still_gets_this_nodes_sections(app_client, monkeypatch):
@@ -747,3 +756,35 @@ def test_a_document_another_node_created_still_gets_this_nodes_sections(app_clie
     writes = len(coll.writes)
     store._load_raw()
     assert len(coll.writes) == writes, "nothing missing: a read writes nothing"
+
+
+def test_a_deletion_is_not_undone_by_another_nodes_stale_file(app_client, monkeypatch):
+    """Review 5 (lead): with the heal on every read, node B's stale file copied a
+    setting deleted on node A back into the database. The heal is a one-time
+    migration: after the marker, no file is copied again."""
+    import json
+
+    import services.integrations_persistence as persistence
+
+    store = app_client["integrations_store"]
+    coll = _FakeSettingsCollection()
+    monkeypatch.setattr(persistence, "_collection", lambda: coll)
+    _file_ahead_of_database(store)
+    store._load_raw()  # node A's one-time heal
+    store.update_ai_provider("openai", {"api_key": "sk-to-be-deleted-1234"})
+    stale = json.loads(store.STORE_PATH.read_text(encoding="utf-8"))  # node B's copy of the file
+    assert stale["ai_providers"]["openai"]["api_key"]
+
+    # Node A: the admin removes the key, and the SAML entry goes (a $unset).
+    store.delete_ai_provider_key("openai")
+    coll.update_one({"_id": persistence.DOC_ID}, {"$unset": {"sso.saml": ""}})
+    assert "api_key" not in coll.doc["ai_providers"]["openai"], "a delete is an $unset, no tombstone"
+    assert "api_key" not in json.loads(store.STORE_PATH.read_text(encoding="utf-8"))["ai_providers"]["openai"]
+
+    # Node B reads with its stale file.
+    store.STORE_PATH.write_text(json.dumps(stale), encoding="utf-8")
+    writes = len(coll.writes)
+    store._load_raw()
+    assert len(coll.writes) == writes, "nothing is copied from a file after the marker"
+    assert "saml" not in coll.doc.get("sso", {})
+    assert "api_key" not in coll.doc["ai_providers"]["openai"]

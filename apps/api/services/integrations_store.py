@@ -242,6 +242,29 @@ def _write_file_paths(paths: dict[str, Any], updated_at: str) -> None:
         tmp.replace(STORE_PATH)
 
 
+def _delete_paths(paths: list[str]) -> None:
+    """Remove these dotted paths: ``$unset`` in the database, popped from the file."""
+    from services.integrations_persistence import unset_paths
+
+    _load_raw_state()  # a pending one-time heal runs first, never after the delete
+    now = _now()
+    unset_paths(paths, now)
+    with _file_lock():
+        current = _read_file() or {}
+        for path in paths:
+            node: Any = current
+            *parents, leaf = path.split(".")
+            for key in parents:
+                node = node.get(key) if isinstance(node, dict) else None
+            if isinstance(node, dict):
+                node.pop(leaf, None)
+        current["updated_at"] = now
+        STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STORE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(current, indent=2, default=json_default), encoding="utf-8")
+        tmp.replace(STORE_PATH)
+
+
 def _save_section(path: str, value: Any) -> None:
     """Persist only ``path`` (e.g. ``pilot.engine``): never another writer's section."""
     _save_paths({path: value})
@@ -666,7 +689,7 @@ def delete_ai_provider_key(provider: str) -> dict[str, Any]:
 
     if provider not in _CLOUD_PROVIDERS:
         raise ValueError(f"{provider} has no cloud key to remove")
-    _save_section(f"ai_providers.{provider}.api_key", "")
+    _delete_paths([f"ai_providers.{provider}.api_key"])
     env_key = _KEY_ENV[provider]
     if env_key in _HYDRATED_ENV:
         os.environ.pop(env_key, None)

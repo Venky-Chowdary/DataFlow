@@ -22,6 +22,11 @@ COLLECTION = "workspace_integrations"
 DOC_ID = "integrations"
 #: Sections of the integrations document that live here.
 SECTIONS = ("sso", "ai_providers", "pilot", "mcp_policy", "updated_at")
+#: Set once a node's local file has been copied up in full. The copy is a
+#: one-time migration, not a sync: once set, no file is ever copied again, so
+#: a setting deleted on one node is not brought back by another node's stale
+#: file (review round 5).
+HEAL_MARKER = "file_heal_done"
 
 
 def _collection() -> Any | None:
@@ -56,7 +61,7 @@ def read_document() -> tuple[str, dict[str, Any] | None]:
         return "error", None
     if not isinstance(doc, dict):
         return "absent", None
-    return "ok", {k: doc[k] for k in SECTIONS if k in doc}
+    return "ok", {k: doc[k] for k in (*SECTIONS, HEAL_MARKER) if k in doc}
 
 
 def _control_plane_configured() -> bool:
@@ -96,19 +101,20 @@ def _heal_paths(data: dict[str, Any], doc: dict[str, Any] | None) -> dict[str, A
 
 
 def save_sections(data: dict[str, Any], doc: dict[str, Any] | None = None) -> bool:
-    """Copy up what the local file has and the database document lacks.
+    """Copy up what the local file has and the database document lacks — once.
 
     Missing-only: each section (each entry of a keyed section) is set only
-    where the document does not have it, so a database value — a concurrent
-    writer's upsert, before or after this — is never overwritten. ``doc`` is
-    the document as just read (``None``: there was none). Called on every
-    read that finds the file ahead of the database, so a heal cut short, or
-    a document another node created first, is finished by the next read
-    (review rounds 4-5).
+    where the document does not have it, so a database value (a concurrent
+    writer's upsert, before or after this) is never overwritten. ``doc`` is
+    the document as just read (``None``: there was none). Runs while the
+    document has no :data:`HEAL_MARKER`, which is set only after every path
+    of this copy succeeded: a heal cut short, or a document another node
+    created first, is finished by a later read, and after the marker no file
+    is copied again, so a deletion is never undone (review rounds 4-5).
     """
-    paths = _heal_paths(data, doc)
-    if doc is not None and not paths:
+    if doc is not None and doc.get(HEAL_MARKER):
         return True
+    paths = _heal_paths(data, doc)
     coll = _collection()
     if coll is None:
         return False
@@ -121,7 +127,8 @@ def save_sections(data: dict[str, Any], doc: dict[str, Any] | None = None) -> bo
             )
         for path, value in paths.items():
             coll.update_one({"_id": DOC_ID, path: {"$exists": False}}, {"$set": {path: value}})
-    except Exception as exc:  # noqa: BLE001 - the next read tries again
+        coll.update_one({"_id": DOC_ID}, {"$set": {HEAL_MARKER: True}})
+    except Exception as exc:  # noqa: BLE001 - no marker: the next read tries again
         logger.warning("integrations settings heal not finished: %s", exc)
         return False
     return True
@@ -149,6 +156,25 @@ def save_paths(paths: dict[str, Any], updated_at: str) -> bool | None:
         coll.update_one({"_id": DOC_ID}, {"$set": {**paths, "updated_at": updated_at}}, upsert=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("integrations settings write failed; local file kept: %s", exc)
+        return False
+    return True
+
+
+def unset_paths(paths: list[str], updated_at: str) -> bool | None:
+    """``$unset`` these dotted paths (a deletion: no tombstone) and set ``updated_at``."""
+    paths = [k for k in paths if k.split(".", 1)[0] in SECTIONS]
+    if not paths:
+        return None
+    coll = _collection()
+    if coll is None:
+        return None
+    try:
+        coll.update_one(
+            {"_id": DOC_ID},
+            {"$unset": {k: "" for k in paths}, "$set": {"updated_at": updated_at}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("integrations settings delete failed; local file updated: %s", exc)
         return False
     return True
 
