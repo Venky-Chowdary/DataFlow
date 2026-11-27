@@ -34,7 +34,7 @@ after(() => dom.window.close());
 const gates = [
   { id: "g1_source", status: "pass", message: "ok" },
   { id: "g2_destination", status: "pass", message: "ok" },
-  { id: "g3_schema_contract", status: "block", message: "3 columns narrow", details: { issue_texts: ["a: too long", "b: too long"] } },
+  { id: "g3_schema_contract", status: "block", message: "3 columns narrow", details: { errors: [{ column: "a", message: "Too long" }, { column: "b", message: "Too long" }] } },
   { id: "g13_source_coverage", status: "skip", message: "Source coverage check could not run: the service that runs it did not answer.", details: { unmeasured: true } },
   { id: "g22_dest_referential_integrity", status: "skip", message: "No foreign keys were declared on this route.", details: { declared: false } },
 ];
@@ -45,7 +45,6 @@ async function mount(onRerun?: () => void) {
   const root = createRoot(host);
   await act(async () => root.render(createElement(GateChecklist, {
     gates,
-    findingsOf: (g: { details?: Record<string, unknown> | null }) => (g.details?.issue_texts as string[]) ?? [],
     onRerun,
     note: "confidence floor 85%",
   })));
@@ -105,12 +104,12 @@ describe("GateChecklist", () => {
 
 describe("GateChecklist accessibility (review UI2 #11)", () => {
   it("Show all is a real, focusable button and the tab stop survives a collapse", async () => {
-    const many = [{ id: "g3_schema_contract", status: "block", message: "narrow", details: { issue_texts: ["a: x", "b: x", "c: x", "d: x", "e: x"] } },
+    const many = [{ id: "g3_schema_contract", status: "block", message: "narrow", details: { errors: ["a", "b", "c", "d", "e"].map((column) => ({ column, message: "X" })) } },
       { id: "g13_source_coverage", status: "skip", details: { unmeasured: true } }];
     const host = document.createElement("div");
     document.body.appendChild(host);
     const root = createRoot(host);
-    await act(async () => root.render(createElement(GateChecklist, { gates: many, findingsOf: (g: { details?: Record<string, unknown> | null }) => (g.details?.issue_texts as string[]) ?? [] })));
+    await act(async () => root.render(createElement(GateChecklist, { gates: many })));
     const more = host.querySelector<HTMLButtonElement>(".df2-check-more")!;
     assert.notEqual(more.tabIndex, -1);
     assert.equal(more.getAttribute("aria-expanded"), "false");

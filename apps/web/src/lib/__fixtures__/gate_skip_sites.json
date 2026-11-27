@@ -1,0 +1,135 @@
+{
+ "generated_by": "apps/api/tests/test_gate_skip_sites_are_structured.py",
+ "sites": [
+  {
+   "fields": {
+    "declared": false,
+    "rule_id": ".undeclared"
+   },
+   "site": "apps/api/services/code_crosswalk.py::build_code_crosswalk_gate"
+  },
+  {
+   "fields": {
+    "declared": false,
+    "rule_id": ".undeclared"
+   },
+   "site": "apps/api/services/control_totals.py::build_control_totals_gate"
+  },
+  {
+   "fields": {
+    "declared": true,
+    "remediation_kind": "review_mappings",
+    "rule_id": ".post_write"
+   },
+   "site": "apps/api/services/control_totals.py::build_control_totals_gate"
+  },
+  {
+   "fields": {
+    "applicable": false
+   },
+   "site": "apps/api/services/dest_schema_replacement.py::build_dest_schema_replacement_gate"
+  },
+  {
+   "fields": {
+    "dest_recreated": false,
+    "destination_table_exists": null
+   },
+   "site": "apps/api/services/dest_schema_replacement.py::build_dest_schema_replacement_gate"
+  },
+  {
+   "fields": {
+    "remediation_kind": "retry_validate",
+    "rule_id": ".unmeasured",
+    "unmeasured": true
+   },
+   "site": "apps/api/services/destination_requirements_gate.py::build_destination_requirements_gate"
+  },
+  {
+   "fields": {
+    "remediation_kind": "retry_validate",
+    "rule_id": ".unmeasured_partial",
+    "unmeasured": true
+   },
+   "site": "apps/api/services/destination_requirements_gate.py::build_destination_requirements_gate"
+  },
+  {
+   "fields": {
+    "declared": false,
+    "rule_id": ".undeclared"
+   },
+   "site": "apps/api/services/destination_ri_probe.py::build_dest_ri_gate"
+  },
+  {
+   "fields": {
+    "applicable": false,
+    "declared": true,
+    "rule_id": "."
+   },
+   "site": "apps/api/services/destination_ri_probe.py::build_dest_ri_validate_gate"
+  },
+  {
+   "fields": {
+    "declared": false,
+    "rule_id": ".undeclared"
+   },
+   "site": "apps/api/services/destination_ri_probe.py::build_dest_ri_validate_gate"
+  },
+  {
+   "fields": {
+    "declared": true,
+    "rule_id": ".post_write"
+   },
+   "site": "apps/api/services/destination_ri_probe.py::build_dest_ri_validate_gate"
+  },
+  {
+   "fields": {
+    "applicable": false
+   },
+   "site": "apps/api/services/reversibility.py::gate_for"
+  },
+  {
+   "fields": {
+    "applicable": false,
+    "remediation_kind": null,
+    "rule_id": "."
+   },
+   "site": "apps/api/services/shape_contract.py::build_shape_gate"
+  },
+  {
+   "fields": {
+    "unmeasured": true
+   },
+   "site": "packages/preflight/src/preflight/gates.py::gate_g13_source_coverage"
+  },
+  {
+   "fields": {
+    "applicable": false
+   },
+   "site": "packages/preflight/src/preflight/gates.py::gate_g14_destination_requirements"
+  },
+  {
+   "fields": {
+    "unmeasured": true
+   },
+   "site": "packages/preflight/src/preflight/gates.py::gate_g14_destination_requirements"
+  },
+  {
+   "fields": {
+    "unmeasured": true
+   },
+   "site": "packages/preflight/src/preflight/gates.py::gate_g15_dest_exists_shape"
+  },
+  {
+   "fields": {
+    "schemaless": true
+   },
+   "site": "packages/preflight/src/preflight/gates.py::gate_g3_schema_contract"
+  },
+  {
+   "fields": {
+    "unmeasured": true
+   },
+   "site": "packages/preflight/src/preflight/gates.py::gate_g9_sync_contract"
+  }
+ ]
+}

@@ -65,40 +65,65 @@ export interface FindingGroup {
   count: number;
 }
 
-function sentence(text: string): string {
-  const t = text.trim().replace(/\s+/g, " ");
-  return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+/** One finding: what is wrong, and the object it is on when the engine named one in a field. */
+export interface Finding {
+  cause: string;
+  object?: string;
+}
+
+function text(v: unknown): string {
+  return typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : "";
+}
+
+/** A finding from one structured entry ({column, message} and the engine's aliases). */
+function fromEntry(entry: unknown): Finding | null {
+  if (typeof entry === "string") return entry.trim() ? { cause: entry.trim() } : null;
+  if (!entry || typeof entry !== "object") return null;
+  const e = entry as Record<string, unknown>;
+  const object = text(e.column) || text(e.source) || text(e.field) || text(e.table) || undefined;
+  const cause = text(e.message) || text(e.error) || text(e.reason) || text(e.issue) || text(e.detail);
+  if (!cause) return object ? { cause: "Needs a look", object } : null;
+  return object ? { cause, object } : { cause };
 }
 
 /**
- * Group "object: cause" lines by cause. A line with no object prefix is its
- * own cause. Order follows the first occurrence of each cause.
+ * A gate's findings from its structured fields only (re-review G): objects
+ * come from fields such as `column` / `source`, never parsed out of message
+ * text; a plain string finding is shown exactly as the engine wrote it.
  */
-/** Labels the engine puts before a colon that are not objects ("Probe: …", "Error: …"). */
-const NOT_OBJECTS = new Set([
-  "probe", "error", "errors", "engine", "warning", "note", "reason", "hint", "status", "detail", "details",
-  "message", "cause", "fix", "privilege status", "copy staging", "info", "action", "sample", "rule",
-]);
+export function findingsFromDetails(details: Record<string, unknown> | null | undefined): Finding[] {
+  if (!details) return [];
+  const out: Finding[] = [];
+  const take = (list: unknown) => {
+    if (!Array.isArray(list)) return;
+    for (const item of list.slice(0, 200)) {
+      const f = fromEntry(item);
+      if (f) out.push(f);
+    }
+  };
+  for (const key of ["issues_detail", "errors", "issues", "issue_texts", "low_confidence", "ambiguous_mappings", "unmapped",
+    "sample_duplicates", "encoding_issues"]) {
+    take(details[key]);
+  }
+  if (Array.isArray(details.unmeasured_columns)) {
+    for (const col of details.unmeasured_columns) {
+      const c = text(col);
+      if (c) out.push({ cause: "Required-column coverage not measured", object: c });
+    }
+  }
+  return out;
+}
 
-/**
- * Group "object: cause" lines by cause. A line with no object prefix (or a
- * label prefix such as "Probe:") is its own cause. Order follows the first
- * occurrence of each cause.
- */
-export function groupFindingsByCause(lines: string[]): FindingGroup[] {
+/** Group findings that share the same cause text; order follows first occurrence. */
+export function groupFindingsByCause(findings: (Finding | string)[]): FindingGroup[] {
   const groups = new Map<string, FindingGroup>();
-  for (const raw of lines) {
-    const line = String(raw || "").trim();
-    if (!line) continue;
-    // "email: value too long" / "column email: ..." / "orders.email — ..."
-    const m = /^(?:column\s+)?([A-Za-z_][\w.$"`[\]]{0,80}(?: [a-z]+)?)\s*(?::|—|–)\s+(.+)$/.exec(line);
-    const isObject = Boolean(m) && !NOT_OBJECTS.has(m![1].toLowerCase()) && !/\s/.test(m![1]);
-    const object = isObject ? m![1].replace(/["`[\]]/g, "") : "";
-    const cause = sentence(isObject ? m![2] : line).replace(/\.$/, "");
-    const key = cause.toLowerCase();
-    const group = groups.get(key) ?? { cause, objects: [], count: 0 };
+  for (const raw of findings) {
+    const f = typeof raw === "string" ? { cause: raw.trim() } : raw;
+    if (!f.cause) continue;
+    const key = f.cause;
+    const group = groups.get(key) ?? { cause: f.cause, objects: [], count: 0 };
     group.count += 1;
-    if (object && !group.objects.includes(object)) group.objects.push(object);
+    if (f.object && !group.objects.includes(f.object)) group.objects.push(f.object);
     groups.set(key, group);
   }
   return [...groups.values()];
@@ -183,7 +208,7 @@ function ruleFor(id: string): string {
  */
 export function buildChecklist(
   gates: GateLike[] | null | undefined,
-  findingsOf: (gate: GateLike) => string[] = () => [],
+  findingsOf: (gate: GateLike) => (Finding | string)[] = (gate) => findingsFromDetails(gate.details),
   order: (a: string, b: string) => number = () => 0,
 ): Checklist {
   const counts: Record<CheckOutcome, number> = {

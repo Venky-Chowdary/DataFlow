@@ -4,13 +4,15 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildChecklist, checklistSummary, findingGroupLine, gateOutcome, groupFindingsByCause, scopeLine } from "./gateChecklist.ts";
+import { buildChecklist, checklistSummary, findingGroupLine, findingsFromDetails, gateOutcome, groupFindingsByCause, scopeLine } from "./gateChecklist.ts";
 import { explainGate, explainVerdict } from "./explainCatalog.ts";
 import { compareGateDisplayOrder } from "./preflightGates.ts";
 
 const gates = [
   { id: "g1_source", status: "pass", message: "Source readable — 5 columns", details: { evidence_scope: { coverage: "sample", sample_rows: 5 } } },
-  { id: "g3_schema_contract", status: "block", message: "3 columns narrow", details: { issue_texts: ["email: value too long for VARCHAR(120)", "name: value too long for VARCHAR(120)", "city: Value too long for VARCHAR(120).", "zip: not a number"] } },
+  { id: "g3_schema_contract", status: "block", message: "3 columns narrow", details: { errors: [
+    { column: "email", message: "Value too long for VARCHAR(120)" }, { column: "name", message: "Value too long for VARCHAR(120)" },
+    { column: "city", message: "Value too long for VARCHAR(120)" }, { column: "zip", message: "Not a number" }] } },
   { id: "g13_source_coverage", status: "skip", message: "Source coverage check could not run: the service that runs it did not answer.", details: { unmeasured: true } },
   { id: "g14_destination_requirements", status: "skip", message: "Destination requirements do not apply to this route.", details: { applicable: false } },
   { id: "g22_dest_referential_integrity", status: "skip", message: "No foreign keys were declared on this route — destination referential integrity was not asked.", details: { declared: false } },
@@ -41,8 +43,7 @@ describe("gateOutcome: structured fields only (review UI2 #4)", () => {
 });
 
 describe("buildChecklist", () => {
-  const issues = (g: { details?: Record<string, unknown> | null }) => (g.details?.issue_texts as string[] | undefined) ?? [];
-  const list = buildChecklist(gates, issues, compareGateDisplayOrder);
+  const list = buildChecklist(gates, undefined, compareGateDisplayOrder);
 
   it("ranks Blocking, Could not run, Needs review, Passed; not-applicable apart", () => {
     assert.deepEqual(list.groups.map((g) => g.title), ["Blocking", "Could not run", "Needs review", "Passed"]);
@@ -74,18 +75,29 @@ describe("buildChecklist", () => {
   });
 });
 
-describe("groupFindingsByCause (review UI2 #8)", () => {
-  it("keeps causes without an object as their own line, and counts repeats", () => {
-    const groups = groupFindingsByCause(["Duplicate key 7", "Duplicate key 7", "column id: null in a required column"]);
-    assert.deepEqual(groups.map((g) => findingGroupLine(g)), ["Duplicate key 7 (2 times)", "Null in a required column: id"]);
+describe("findings come from structured fields only (re-review G)", () => {
+  it("counts repeats of the same text", () => {
+    const groups = groupFindingsByCause(["Duplicate key 7", "Duplicate key 7"]);
+    assert.deepEqual(groups.map((g) => findingGroupLine(g)), ["Duplicate key 7 (2 times)"]);
   });
-  it("never reads a label as an object", () => {
-    const groups = groupFindingsByCause(["Probe: information_schema", "Error: connection refused", "Privilege status: unavailable"]);
-    assert.deepEqual(groups.map((g) => findingGroupLine(g)), ["Probe: information_schema", "Error: connection refused", "Privilege status: unavailable"]);
+  it("shows a message exactly as the engine wrote it, never parsing an object out of it", () => {
+    const groups = groupFindingsByCause(findingsFromDetails({ issue_texts: ["Table: orders missing", "Probe: information_schema", "Error: connection refused"] }));
+    assert.deepEqual(groups.map((g) => findingGroupLine(g)), ["Table: orders missing", "Probe: information_schema", "Error: connection refused"]);
+  });
+  it("takes objects from the engine's fields", () => {
+    const found = findingsFromDetails({
+      issues_detail: [{ column: "email", message: "Value too long" }],
+      low_confidence: [{ source: "cust_nm", reason: "Low confidence" }],
+      unmeasured_columns: ["created_at"],
+    });
+    assert.deepEqual(found, [
+      { cause: "Value too long", object: "email" },
+      { cause: "Low confidence", object: "cust_nm" },
+      { cause: "Required-column coverage not measured", object: "created_at" },
+    ]);
   });
   it("names every object, cutting a long list behind 'and N more'", () => {
-    const lines = ["a", "b", "c", "d", "e", "f"].map((c) => `${c}: value too long`);
-    const [group] = groupFindingsByCause(lines);
+    const [group] = groupFindingsByCause(["a", "b", "c", "d", "e", "f"].map((c) => ({ cause: "Value too long", object: c })));
     assert.equal(findingGroupLine(group), "Value too long: a, b, c, d and 2 more");
     assert.equal(findingGroupLine(group, true), "Value too long: a, b, c, d, e, f");
   });
@@ -110,5 +122,47 @@ describe("explain catalog (deterministic, never a model)", () => {
     assert.equal(v.title, "Verdict: No difference found");
     assert.match(v.result, /sample or a read-back, not every row/);
     assert.match(explainVerdict("unexplained").next, /Open the Trust Report/);
+  });
+});
+
+describe("every gate skip site is classified by its structured field (re-review B)", () => {
+  it("matches what each site's field means; none falls to the default", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { sites } = JSON.parse(readFileSync(new URL("./__fixtures__/gate_skip_sites.json", import.meta.url), "utf8")) as {
+      sites: { site: string; fields: Record<string, unknown> }[];
+    };
+    assert.ok(sites.length >= 15);
+    for (const { site, fields } of sites) {
+      const meant = fields.unmeasured === true || fields.remediation_kind === "retry_validate"
+        ? "could_not_run"
+        : String(fields.rule_id || "").endsWith(".post_write") ? "after_run" : "not_applicable";
+      const details = { ...fields, ...(typeof fields.rule_id === "string" ? { rule_id: `gx${fields.rule_id}` } : {}) };
+      assert.equal(gateOutcome({ id: "gx", status: "skip", details }), meant, `${site} ${JSON.stringify(fields)}`);
+    }
+  });
+
+  it("G15 on a create-new table is Not applicable, not Could not run", () => {
+    assert.equal(gateOutcome({ id: "g15_dest_exists_shape", status: "skip",
+      details: { shape: "create_new", applicable: false, rule_id: "g15_dest_exists_shape.create_new_table", remediation_kind: "review_map" } }), "not_applicable");
+  });
+
+  it("the browser's own local skips say why too", async () => {
+    const { runLocalPreflight } = await import("./localPreflight.ts");
+    const pf = runLocalPreflight({
+      columns: ["id", "name"],
+      rowCount: 10,
+      mappings: [
+        { source: "id", target: "id", confidence: 0.95, transform: "none", approved: true, requiresReview: false, isPii: false },
+        { source: "name", target: "name", confidence: 0.9, transform: "none", approved: true, requiresReview: false, isPii: false },
+      ],
+      sampleRows: [{ id: 1, name: "a" }],
+      destKind: "file_export",
+    } as Parameters<typeof runLocalPreflight>[0]);
+    const skips = pf.gates.filter((g) => g.status === "skip");
+    assert.ok(skips.length > 0);
+    const outcomes = Object.fromEntries(skips.map((g) => [g.id, gateOutcome(g)]));
+    assert.equal(outcomes.g2_destination, "not_applicable", "file export needs no remote destination");
+    assert.equal(outcomes.g8_reconciliation, "after_run");
+    assert.equal(outcomes.g13_source_coverage, "could_not_run", "needs the API");
   });
 });

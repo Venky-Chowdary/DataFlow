@@ -17,6 +17,7 @@ import {
   OUTCOME_WORD,
   type CheckOutcome,
   type ChecklistRow,
+  type Finding,
   type GateLike,
 } from "../../lib/gateChecklist";
 import { explainGate } from "../../lib/explainCatalog";
@@ -156,7 +157,7 @@ export function GateChecklist({
   note,
 }: {
   gates: GateLike[];
-  findingsOf?: (gate: GateLike) => string[];
+  findingsOf?: (gate: GateLike) => (Finding | string)[];
   order?: (a: string, b: string) => number;
   onRerun?: () => void;
   /** Muted text after the counts, e.g. "confidence floor 85%". */

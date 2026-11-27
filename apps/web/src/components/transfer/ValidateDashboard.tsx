@@ -172,11 +172,6 @@ function issueTextsFromDetails(details?: Record<string, unknown> | null): string
   return extras.filter(Boolean).slice(0, 12);
 }
 
-/** The checklist's finding lines: the same extraction the gate panel used. */
-function checklistFindings(gate: { details?: Record<string, unknown> | null }): string[] {
-  return issueTextsFromDetails(gate.details);
-}
-
 type PrivilegeProbeMeta = {
   status?: string;
   method?: string;
@@ -2972,7 +2967,6 @@ export function ValidateDashboard({
       {!running && preflight && (
         <GateChecklist
           gates={preflight.gates ?? []}
-          findingsOf={checklistFindings}
           order={compareGateDisplayOrder}
           onRerun={onRunPreflight ? () => { void onRunPreflight(); } : undefined}
           note={`confidence floor ${(confidenceThreshold * 100).toFixed(0)}%`}
