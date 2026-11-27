@@ -943,8 +943,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           }}
                         />
                         <p className="df2-label-hint" data-testid="verification-snapshot-hint">
-                          The deployment-wide default: each workspace can turn it on or off for its own runs (its
-                          workspace settings), and a schedule can too. Holds an open read-only transaction on both
+                          Deployment-wide, and a ceiling: off here is off for every workspace. Where it is on, each
+                          workspace can turn it off or on for its own runs (its workspace settings), and a schedule
+                          can too. Holds an open read-only transaction on both
                           databases while every row is compared — needed for a proven result; it delays clean-up on
                           the source while held and is let go at once if another session waits on the table.
                         </p>

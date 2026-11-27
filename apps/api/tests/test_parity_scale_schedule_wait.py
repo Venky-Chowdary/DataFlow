@@ -206,3 +206,31 @@ def test_the_mongo_sweeper_lists_a_lease_written_without_expires_epoch(monkeypat
     monkeypatch.setattr(service, "get_database", lambda: {"transfer_jobs": _FakeCollection(docs)}, raising=False)
     found = service.list_job_ids_where({"parity_scale.state": ("running", "queued")}, lease_expired_before=now)
     assert sorted(found) == ["lapsed", "no-lease", "old-lease"]
+
+
+def test_the_deployment_setting_is_a_ceiling(monkeypatch) -> None:
+    """Review 3b, item 6: with pinning off for the deployment, a workspace or schedule cannot turn it on."""
+    import services.workspace_store as workspace_store
+
+    from services.parity_scale import verification
+
+    deployment = {"verification_snapshot": False, "verification_snapshot_max_minutes": 30}
+    monkeypatch.setattr(workspace_store, "get_workspace_settings", lambda: deployment)
+
+    class Tenant:
+        verification_snapshot = True
+        verification_snapshot_max_minutes = None
+
+    class Sched:
+        verification_snapshot = True
+        verification_snapshot_max_minutes = None
+
+    monkeypatch.setattr(verification, "_tenant_of", lambda job: Tenant())
+    monkeypatch.setattr(verification, "_schedule_of", lambda job: Sched())
+    assert verification.snapshot_policy({})["enabled"] is False
+    assert verification.snapshot_policy({})["source"] == "deployment"
+    deployment["verification_snapshot"] = True
+    Tenant.verification_snapshot = False
+    assert verification.snapshot_policy({}) == {"enabled": True, "max_hold_s": 1800.0, "source": "schedule"}
+    Sched.verification_snapshot = None
+    assert verification.snapshot_policy({})["enabled"] is False  # the workspace may turn it off

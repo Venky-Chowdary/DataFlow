@@ -135,12 +135,15 @@ comparing every row inside both databases (see
 - **What a held snapshot costs.** The setting "Consistent snapshot during
   verification" keeps one read-only transaction open on each database for
   the whole comparison, for at most "Longest snapshot hold". The
-  deployment-wide default (on, 30 minutes) is a platform admin's, under
-  Settings, General; each workspace can turn it on or off for its own runs
-  and set a shorter hold (Settings, workspace enterprise settings), and a
-  schedule can do the same. The hold used is the shortest one set: a
-  workspace or schedule can never hold a snapshot longer than the
-  deployment's cap. While it is open:
+  deployment-wide setting (on, 30 minutes) is a platform admin's, under
+  Settings, General, and it is a ceiling: off there is off for every
+  workspace and schedule. Where it is on, each workspace can turn it off or
+  on for its own runs and set a shorter hold (Settings, workspace enterprise
+  settings), and a schedule can do the same. The hold used is the shortest
+  one set. On MySQL / MariaDB the scan's login must be able to see other
+  sessions (the PROCESS privilege, or on MySQL 8 a readable
+  `performance_schema` with the metadata-lock instrument on); otherwise
+  nothing is pinned and the result says why. While it is open:
   - PostgreSQL cannot vacuum rows deleted or updated after the snapshot (the
     xmin horizon is held back), so tables with heavy writes grow until it
     ends;

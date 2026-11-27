@@ -329,6 +329,10 @@ def test_the_snapshot_setting_turns_pinning_off_and_a_schedule_overrides_it(tabl
         verification_snapshot_max_minutes = 5
 
     monkeypatch.setattr(verification, "_schedule_of", lambda job: Sched())
+    # Review 3b, item 6: the deployment's "off" is a ceiling; a schedule may only shorten the hold.
+    assert verification.snapshot_policy({}) == {"enabled": False, "max_hold_s": 300.0, "source": "deployment"}
+    monkeypatch.setattr(workspace_store, "get_workspace_settings",
+                        lambda: {"verification_snapshot": True, "verification_snapshot_max_minutes": 30})
     assert verification.snapshot_policy({}) == {"enabled": True, "max_hold_s": 300.0, "source": "schedule"}
 
 

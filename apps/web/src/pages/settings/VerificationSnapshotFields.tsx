@@ -27,7 +27,8 @@ export function VerificationSnapshotFields({ mode, minutes, onMode, onMinutes }:
         <p className="df2-settings-hint">
           Verification of this workspace&apos;s runs reads each database from one snapshot (needed for a proven
           result). It holds an open read-only transaction while every row is compared, and lets it go at once if
-          another session waits on the table. A schedule can override this.
+          another session waits on the table. A schedule can override this. If the deployment turns it off, it
+          stays off here.
         </p>
       </div>
       <div className="df2-settings-field">

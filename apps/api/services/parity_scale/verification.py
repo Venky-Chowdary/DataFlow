@@ -231,8 +231,9 @@ def snapshot_policy(job: dict[str, Any]) -> dict[str, Any]:
     """Whether to hold one snapshot per side while verifying, and for how long at most.
 
     "Consistent snapshot during verification": the deployment's setting (platform admins)
-    is the default and the cap; the job's workspace may turn it on or off and lower the cap
-    (its own settings); the job's schedule may do the same. A longer hold than the cap above
+    is the default and the ceiling — off there is off for every workspace and schedule; where
+    it is on, the job's workspace may turn it on or off and lower the cap (its own settings),
+    and the job's schedule may do the same. A longer hold than the cap above
     it is never used: the hold is the least of the caps set.
     """
     enabled, minutes, source = True, 30, "default"
@@ -245,13 +246,14 @@ def snapshot_policy(job: dict[str, Any]) -> dict[str, Any]:
         source = "deployment"
     except Exception:  # noqa: BLE001 — settings unavailable: the defaults
         logger.warning("Deployment settings unavailable; verification uses the default snapshot policy")
+    allowed = enabled  # the deployment's setting is a ceiling: off there is off everywhere
     tenant = _tenant_of(job)
-    if tenant is not None and getattr(tenant, "verification_snapshot", None) is not None:
+    if allowed and tenant is not None and getattr(tenant, "verification_snapshot", None) is not None:
         enabled, source = bool(tenant.verification_snapshot), "workspace"
     if tenant is not None and getattr(tenant, "verification_snapshot_max_minutes", None):
         minutes = min(minutes, int(tenant.verification_snapshot_max_minutes))
     sched = _schedule_of(job)
-    if sched is not None and getattr(sched, "verification_snapshot", None) is not None:
+    if allowed and sched is not None and getattr(sched, "verification_snapshot", None) is not None:
         enabled, source = bool(sched.verification_snapshot), "schedule"
     if sched is not None and getattr(sched, "verification_snapshot_max_minutes", None):
         minutes = min(minutes, int(sched.verification_snapshot_max_minutes))
