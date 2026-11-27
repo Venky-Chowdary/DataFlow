@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -744,6 +745,8 @@ def count_missed_windows(
 
 #: Most runs one preview lists.
 PREVIEW_MAX_RUNS = 10
+#: Wall-clock budget for one preview (next_run itself is milliseconds).
+PREVIEW_TIME_BUDGET_SECONDS = 1.0
 
 
 def preview_next_runs(
@@ -778,9 +781,12 @@ def preview_next_runs(
             validate_cron(cron)
             runs: list[datetime] = []
             cursor = current
+            deadline = time.monotonic() + PREVIEW_TIME_BUDGET_SECONDS
             for _ in range(count):
                 cursor = _cron_next_run(cron, cursor, tz or "UTC")
                 runs.append(cursor)
+                if time.monotonic() > deadline:
+                    break  # a hard budget: list what was found in time
             return {"kind": "clock", "timezone": tz or "UTC", "runs": [r.isoformat() for r in runs]}
     except CronError as exc:
         return {"kind": "invalid", "message": str(exc), "runs": []}

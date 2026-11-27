@@ -56,3 +56,20 @@ def test_route_is_a_read():
 
     assert _required_permission("POST", "/api/v1/schedules/preview") == Permission.SCHEDULE_READ
     assert _required_permission("POST", "/api/v1/schedules/") == Permission.SCHEDULE_MANAGE
+
+
+def test_the_preview_is_fast_even_for_rare_dates_and_runs_off_the_event_loop():
+    """Review: the route ran next_run's minute walk on the event loop (21 s for Feb 29 x 10)."""
+    import inspect
+    import time
+
+    from src.routers.schedules_router import preview_schedule_next_runs
+
+    assert not inspect.iscoroutinefunction(preview_schedule_next_runs), "sync: FastAPI runs it on the thread pool"
+    for zone in ("UTC", "Africa/Casablanca", "Australia/Lord_Howe"):
+        start = time.perf_counter()
+        out = preview_next_runs("daily", "0 0 29 2 *", zone, count=10, now=NOW)
+        assert out["kind"] == "clock" and len(out["runs"]) == 10
+        assert time.perf_counter() - start < 0.5, zone
+    refused = preview_next_runs("daily", "0 0 31 2 *", "UTC", count=10, now=NOW)
+    assert refused["kind"] == "invalid" and "can never fire" in refused["message"]

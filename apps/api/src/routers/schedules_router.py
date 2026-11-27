@@ -551,7 +551,9 @@ class NextRunsPreviewBody(BaseModel):
 
 
 @router.post("/preview")
-async def preview_schedule_next_runs(body: NextRunsPreviewBody):
+def preview_schedule_next_runs(body: NextRunsPreviewBody):
+    # Sync on purpose: FastAPI runs it on the worker thread pool, never on the
+    # event loop; next_run is milliseconds and the service caps count and time.
     """The next runs the scheduler will use for a cadence (the schedule form's preview).
 
     Pure computation with the scheduler's own functions: reads no schedule

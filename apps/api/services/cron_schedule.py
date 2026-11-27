@@ -180,11 +180,58 @@ def next_run(expr: str, after: datetime, tz: str | ZoneInfo = "UTC") -> datetime
     if after.tzinfo is None:
         after = after.replace(tzinfo=timezone.utc)
     # Advance to the start of the next minute (cron has minute resolution).
-    candidate = (after.astimezone(timezone.utc) + timedelta(minutes=1)).replace(
+    start = (after.astimezone(timezone.utc) + timedelta(minutes=1)).replace(
         second=0, microsecond=0
     )
-    for _ in range(_MAX_MINUTES):
-        if cron.matches(candidate.astimezone(zone)):
-            return candidate
-        candidate += timedelta(minutes=1)
-    raise CronError(f"No matching time found for cron '{expr}' within horizon")
+    found = _first_match_from(cron, zone, start)
+    if found is None:
+        raise CronError(f"No matching time found for cron '{expr}' within horizon")
+    return found
+
+
+def _instants_on_day(cron: CronExpression, zone: ZoneInfo, day: date) -> list[datetime]:
+    """Every real UTC instant on local ``day`` whose wall clock matches the time fields.
+
+    A wall time a DST change skips names no instant; one it repeats names two
+    (fold 0 and fold 1). Each candidate is checked by converting back, so the
+    result is exactly the instants the minute-by-minute definition accepts.
+    """
+    out: set[datetime] = set()
+    for hour in sorted(cron.hours):
+        for minute in sorted(cron.minutes):
+            for fold in (0, 1):
+                local = datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone, fold=fold)
+                utc = local.astimezone(timezone.utc)
+                back = utc.astimezone(zone)
+                if (back.year, back.month, back.day, back.hour, back.minute) == (
+                    day.year, day.month, day.day, hour, minute
+                ):
+                    out.add(utc)
+    return sorted(out)
+
+
+def _first_match_from(cron: CronExpression, zone: ZoneInfo, start: datetime) -> datetime | None:
+    """The earliest instant >= ``start`` whose wall clock in ``zone`` matches ``cron``.
+
+    Jumps day by day over the calendar fields (month, day of month, day of
+    week) and only expands the hour x minute grid on days that match, so any
+    expression resolves in milliseconds (the minute-by-minute walk took 21 s
+    for "0 0 29 2 *"). Same answer, same horizon: an instant counts only
+    within _MAX_MINUTES of ``start``.
+    """
+    limit = start + timedelta(minutes=_MAX_MINUTES)
+    day = start.astimezone(zone).date() - timedelta(days=1)
+    best: datetime | None = None
+    days_after_hit = -1
+    for _ in range(FIRE_HORIZON_DAYS + 3):
+        if cron.matches_day(day):
+            for instant in _instants_on_day(cron, zone, day):
+                if start <= instant < limit and (best is None or instant < best):
+                    best = instant
+        if best is not None:
+            # Offsets can move a few hours across midnight: look one more day, then stop.
+            days_after_hit += 1
+            if days_after_hit >= 1:
+                return best
+        day += timedelta(days=1)
+    return best
