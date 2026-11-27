@@ -3742,8 +3742,11 @@ def source_rewrites_needed(
 ) -> bool:
     """Whether the ladder's source rows must be mapped to the written image.
 
-    A re-read always is the pre-image. In-memory rows are when they still
-    carry a renamed column under its source name and not its target name.
+    A re-read always is the pre-image. In-memory rows are too, unless a
+    renamed column already carries its target name and not its source name.
+    D414 — the engine's buffered records are the raw read (Gate-8 maps them
+    for its own source digest); a value transform with no rename (hash_pii on
+    ``payload``) left them raw, so L2 graded source JSON against the hashes.
     """
     if not rewrites:
         return False
@@ -3755,9 +3758,12 @@ def source_rewrites_needed(
     for m in mappings or []:
         src = str((m or {}).get("source") or "").strip()
         tgt = str((m or {}).get("target") or "").strip()
-        if src and tgt and src.casefold() != tgt.casefold() and src in first and tgt not in first:
-            return True
-    return False
+        if src and tgt and src.casefold() != tgt.casefold():
+            if src in first and tgt not in first:
+                return True
+            if tgt in first and src not in first:
+                return False
+    return True
 
 
 def _run_sub_summary(dest_summary: Any) -> dict[str, Any]:
