@@ -2175,12 +2175,15 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         sync_mode = _validate_cadence(interval, cron, tz, sync_mode, check_zone=cadence_changed)
         data = {**data, "sync_mode": sync_mode}
         merged = {**s.to_dict(), **data, "id": schedule_id}
-        if "dedupe_key" in data and "stream_contracts" not in data:
+        if "dedupe_key" in data:
             from services.dedupe_equality import refuse_dedupe_key_edit
+
+            # The next beat must be able to write what the edit asks for (D402),
+            # whether or not the same PATCH also replaces the stream contracts.
+            refuse_dedupe_key_edit(s, data.get("dedupe_key"))
+        if "dedupe_key" in data and "stream_contracts" not in data:
             from services.duplicate_policy import follow_dedupe_key_edit
 
-            # The next beat must be able to write what the edit asks for (D402).
-            refuse_dedupe_key_edit(s, data.get("dedupe_key"))
             merged["stream_contracts"], merged["primary_key"] = follow_dedupe_key_edit(
                 s.stream_contracts, s.dedupe_key, data.get("dedupe_key"),
                 primary_key=merged.get("primary_key"),

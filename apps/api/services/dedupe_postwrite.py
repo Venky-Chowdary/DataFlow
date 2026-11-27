@@ -82,10 +82,33 @@ def stamp_dedupe_request(dest_summary: dict[str, Any], request: Any) -> None:
         dict(getattr(getattr(request, "destination", None), "extra", None) or {}),
     )
     dest_summary["dedupe_key_equality"] = DESTINATION if choice == DESTINATION else EXACT
-    for extra in (getattr(getattr(request, "source", None), "extra", None),
-                  getattr(getattr(request, "destination", None), "extra", None)):
-        if isinstance(extra, dict) and extra.get(OPT_IN_KEY):
-            dest_summary[OPT_IN_KEY] = True
+    if billed_scan_opted_in(request):
+        dest_summary[OPT_IN_KEY] = True
+
+
+def _opt_in_values(request: Any) -> list[Any]:
+    return [
+        extra[OPT_IN_KEY]
+        for extra in (getattr(getattr(request, "source", None), "extra", None),
+                      getattr(getattr(request, "destination", None), "extra", None))
+        if isinstance(extra, dict) and OPT_IN_KEY in extra
+    ]
+
+
+def billed_scan_opted_in(request: Any) -> bool:
+    """Only a JSON ``true`` asks for the scan; the string "false" never does."""
+    return any(value is True for value in _opt_in_values(request))
+
+
+def billed_scan_opt_in_refusal(request: Any) -> str:
+    """Why the route's ``dedupe_check_billed_scan`` is not a boolean, or ""."""
+    bad = [value for value in _opt_in_values(request) if not isinstance(value, bool)]
+    if not bad:
+        return ""
+    return (
+        f"{OPT_IN_KEY} must be true or false (a JSON boolean), not {bad[0]!r}. It decides "
+        "whether a billed warehouse is scanned to prove the dedupe."
+    )
 
 
 def _mongo_duplicate_keys(cfg: dict[str, Any], table: str, keys: list[str]) -> int:
@@ -121,7 +144,10 @@ def _key_expr(dialect: str, quoted: str, exact: bool) -> str:
         return f"CAST({quoted} AS VARBINARY(8000))"
     if dialect == "sqlite":
         return f"{quoted} COLLATE BINARY"
-    return quoted  # PostgreSQL and the warehouses compare text exactly by default
+    if dialect == "postgresql":
+        # A column can carry a nondeterministic (ICU) collation: "C" is bytes.
+        return f'CAST({quoted} AS TEXT) COLLATE "C"'
+    return quoted  # the warehouses compare text exactly by default
 
 
 def _set_timeout(conn: Any, dialect: str) -> None:

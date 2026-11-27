@@ -1443,6 +1443,11 @@ async def execute_transfer_json(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
     )
+    from services.dedupe_postwrite import billed_scan_opt_in_refusal
+
+    opt_in_refusal = billed_scan_opt_in_refusal(request_obj)
+    if opt_in_refusal:
+        raise HTTPException(status_code=422, detail=opt_in_refusal)
     from services.body_id_ownership import assert_body_ids as _assert_body_ids
 
     # The plan and recipe a run uses must be the caller's (review 3, body routes).

@@ -76,12 +76,43 @@ def read_column_collation(
         ).fetchone()
         if not row or not row[0]:
             return None
-        name = str(row[0])
-        # Non-binary SQL Server collations pad trailing spaces. Binary ones
-        # compare every byte, including trailing spaces. Neither pads a tab.
-        binary = name.upper().endswith("_BIN") or name.upper().endswith("_BIN2")
-        return ColumnCollation(name=name, pad="NO PAD" if binary else "PAD SPACE")
+        return sqlserver_collation_fact(str(row[0]))
+    if kind in {"postgresql", "postgres"}:
+        return postgres_collation_fact(conn, schema=schema, table=table, column=column)
     return None
+
+
+def sqlserver_collation_fact(name: str) -> ColumnCollation:
+    """SQL Server pads trailing spaces in ``=`` under every collation.
+
+    ``_BIN`` and ``_BIN2`` included: ANSI padding makes ``'b' = 'b '`` true
+    whatever the collation, and a unique index rejects the pair. Tabs are not
+    padded.
+    """
+    return ColumnCollation(name=name, pad="PAD SPACE")
+
+
+def postgres_collation_fact(conn: Any, *, schema: str, table: str, column: str) -> ColumnCollation | None:
+    """A nondeterministic (ICU) column collation, or ``None`` when equality is exact.
+
+    PostgreSQL's deterministic collations compare by bytes, so distinct text
+    is never one key. A nondeterministic one (``und-u-ks-level2``) can call
+    ``'a'`` and ``'A'`` equal (``pg_collation.collisdeterministic``).
+    """
+    import sqlalchemy as sa
+
+    row = conn.execute(sa.text(
+        "SELECT c.collname, n.nspname, c.collisdeterministic FROM pg_attribute a "
+        "JOIN pg_class t ON a.attrelid = t.oid "
+        "JOIN pg_namespace tn ON t.relnamespace = tn.oid "
+        "JOIN pg_collation c ON c.oid = a.attcollation "
+        "JOIN pg_namespace n ON c.collnamespace = n.oid "
+        "WHERE tn.nspname = :s AND t.relname = :t AND a.attname = :c"
+    ), {"s": schema or "public", "t": table, "c": column}).fetchone()
+    if not row or row[2]:
+        return None
+    quoted = ".".join('"' + str(part).replace('"', '""') + '"' for part in (row[1], row[0]))
+    return ColumnCollation(name=quoted, pad="NO PAD")
 
 
 def mysql_collation_fact(conn: Any, name: str) -> ColumnCollation:
@@ -166,12 +197,15 @@ def group_key_values(
     The representative is the value with the lowest input index in its group.
     Two values that share a representative compare equal under ``collation``.
     """
-    import sqlalchemy as sa
-
     if not values:
         return {}
-    name = _safe_ident(collation.name)
     kind = str(dialect or "").lower()
+    if kind in {"postgresql", "postgres"}:
+        # The name is the catalog's own, already quoted (postgres_collation_fact).
+        ddl = f"CREATE TEMPORARY TABLE df_eq_keys (id INT NOT NULL PRIMARY KEY, k TEXT COLLATE {collation.name})"
+        drop = "DROP TABLE IF EXISTS pg_temp.df_eq_keys"
+        return _group_in_temp_table(conn, ddl, drop, "df_eq_keys", values)
+    name = _safe_ident(collation.name)
     if kind in {"mysql", "mariadb"}:
         charset = _safe_ident(collation.charset or "utf8mb4")
         ddl = (
@@ -190,6 +224,12 @@ def group_key_values(
     else:
         return {value: value for value in values}
     table = "df_eq_keys" if kind in {"mysql", "mariadb"} else "#df_eq_keys"
+    return _group_in_temp_table(conn, ddl, drop, table, values)
+
+
+def _group_in_temp_table(conn: Any, ddl: str, drop: str, table: str, values: list[str]) -> dict[str, str]:
+    import sqlalchemy as sa
+
     conn.execute(sa.text(drop))
     try:
         conn.execute(sa.text(ddl))

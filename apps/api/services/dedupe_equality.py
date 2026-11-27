@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 CHOICE_KEY = "dedupe_key_equality"
 EXACT, DESTINATION = "exact", "destination"
-_ASKED = frozenset({"mysql", "mariadb", "sqlserver", "mssql", "azure_sql"})
+_ASKED = frozenset({"mysql", "mariadb", "sqlserver", "mssql", "azure_sql", "postgresql"})
 
 
 class DedupeEqualityRefused(ValueError):
@@ -55,11 +55,17 @@ def _column_facts(conn: Any, kind: str, *, schema: str, table: str, columns: lis
     """The collation each key column compares with, or None for a non-text column."""
     import sqlalchemy as sa
 
-    from services.collation_equality import ColumnCollation, read_column_collation
+    from services.collation_equality import (
+        ColumnCollation,
+        read_column_collation,
+        sqlserver_collation_fact,
+    )
 
     if table_exists:
         return [read_column_collation(conn, kind, schema=schema, table=table, column=c)
                 for c in columns]
+    if kind == "postgresql":
+        return [None for _ in columns]  # a database default collation is always deterministic
     mysql = kind in {"mysql", "mariadb"}
     name = created_collation
     if not name:
@@ -73,8 +79,7 @@ def _column_facts(conn: Any, kind: str, *, schema: str, table: str, columns: lis
 
         fact = mysql_collation_fact(conn, name)
     else:
-        binary = name.upper().endswith(("_BIN", "_BIN2"))
-        fact = ColumnCollation(name=name, pad="NO PAD" if binary else "PAD SPACE")
+        fact = sqlserver_collation_fact(name)
     return [fact for _ in columns]
 
 
@@ -111,8 +116,13 @@ def destination_key_groups(
     from src.transfer.adapters import resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
 
+    from src.transfer.models import EndpointConfig
+
     # Only an engine with collations is asked; everything else compares exactly.
-    if resolve_driver_type(str(getattr(destination, "format", "") or "")).lower() not in _ASKED:
+    # A caller without an endpoint (no connection to ask) collapses exactly.
+    if not isinstance(destination, EndpointConfig) or resolve_driver_type(
+        str(getattr(destination, "format", "") or "")
+    ).lower() not in _ASKED:
         return None
     cfg = resolve_connector_config(destination)
     kind = resolve_driver_type(str(cfg.get("type") or getattr(destination, "format", "") or "")).lower()
@@ -123,7 +133,8 @@ def destination_key_groups(
 
     # MySQL's schema is the connection's database; SQL Server's defaults to dbo.
     schema = "" if kind in {"mysql", "mariadb"} else str(
-        getattr(destination, "schema", "") or cfg.get("schema") or "dbo")
+        getattr(destination, "schema", "") or cfg.get("schema")
+        or ("public" if kind == "postgresql" else "dbo"))
     with warehouse_sql_engine(kind, cfg) as engine:
         with engine.connect() as conn:
             exists = bool(sa.inspect(conn).has_table(table, schema=schema or None))
@@ -275,6 +286,14 @@ def refuse_dedupe_key_edit(sched: Any, new_key: Any) -> None:
                          workspace_id=str(getattr(sched, "workspace_id", "") or "") or None)
     if conn is None:
         return  # the save's own connector checks answer for a missing destination
+    from src.transfer.connector_capabilities import resolve_driver_type
+    from src.transfer.reconcile_step import _unique_check_dialect
+
+    kind = resolve_driver_type(str(getattr(conn, "type", "") or "")).lower()
+    if _unique_check_dialect(kind) is None:
+        # Files, objects and document stores hold no SQL key that could reject
+        # the next beat; the run's own dedupe and its post-write check decide.
+        return
     endpoint = EndpointConfig(
         kind="database", format=str(getattr(conn, "type", "") or ""), connector_id=conn.id,
         table=str(getattr(sched, "dest_table", "") or ""),
@@ -283,16 +302,19 @@ def refuse_dedupe_key_edit(sched: Any, new_key: Any) -> None:
     try:
         key_sets = _destination_key_sets(endpoint)
     except Exception as exc:  # noqa: BLE001 - an unread destination cannot clear the edit
+        logger.warning("dedupe_key edit: destination keys unread: %s", type(exc).__name__)
         raise DuplicatePolicyError(
-            f"dedupe_key {new!r} was not saved: the destination's keys could not be read "
-            f"to check the next run can write it ({type(exc).__name__})."
+            f"dedupe_key {new!r} was not saved: Datawrap could not connect to the destination "
+            f"{getattr(conn, 'name', '') or conn.id} to read the keys of "
+            f"{getattr(sched, 'dest_table', '')}, so it cannot tell whether the next run could "
+            "write this key. Test the destination connection, then save again."
         ) from exc
     if not key_sets:
         return
     wanted = {t.lower() for t in _target_names(new.split(","), getattr(sched, "mappings", None))}
-    blocking = [s for s in key_sets if not wanted <= s]
+    blocking = sorted({tuple(sorted(s)) for s in key_sets if not wanted <= s})
     if blocking:
-        shown = ", ".join("(" + ", ".join(sorted(s)) + ")" for s in blocking)
+        shown = ", ".join("(" + ", ".join(cols) + ")" for cols in blocking)
         raise DuplicatePolicyError(
             f"dedupe_key {new!r} was not saved: {getattr(sched, 'dest_table', '')} is keyed on "
             f"{shown}, so the next run would be refused when two rows share that key but differ "
