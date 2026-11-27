@@ -335,7 +335,7 @@ def test_types_without_exact_equality_stay_out_of_the_guard_and_the_repair_says_
             "timestamptz '2024-01-01 00:00+00' + g * interval '1 hour' FROM generate_series(1, 50) g")
     _sql(f'CREATE TABLE "{src}" ({ddl})', f'INSERT INTO "{src}" {fill}',
          f'CREATE TABLE "{dst}" ({ddl})', f'INSERT INTO "{dst}" {fill}',
-         f"UPDATE \"{dst}\" SET f = 0.5, t = timestamptz '2000-01-01 00:00+00' WHERE id = 7",
+         f"UPDATE \"{dst}\" SET name = 'WRONG', f = 0.5, t = timestamptz '2000-01-01 00:00+00' WHERE id = 7",
          f"INSERT INTO \"{dst}\" VALUES (-1, 'extra', 1.1, '{{\"k\": -1}}', '<v>-1</v>', point(1, 2), "
          f"timestamptz '2024-01-01 00:00+00')")
     try:
@@ -354,7 +354,14 @@ def test_types_without_exact_equality_stay_out_of_the_guard_and_the_repair_says_
         statements = _statements(repair["sql"])
         assert [s.split(" ")[0] for s in statements] == ["DELETE", "UPDATE"], repair["sql"]
         assert "-- The guard does not compare f, j, p, t, x" in repair["sql"]
+        # Review 3b: an unguardable column is not SET (a newer value could be overwritten); listed instead.
+        update = next(s for s in statements if s.startswith("UPDATE"))
+        assert "SET \"name\" = 'n7' WHERE" in update and '"f" =' not in update and '"t" =' not in update
+        assert "-- Not set, review by hand: f differs for key(s) 7" in repair["sql"]
+        assert "-- Not set, review by hand: t differs for key(s) 7" in repair["sql"]
         _sql(*statements)  # never an erroring statement
+        assert _verify(job_id, only_table=dst, force=True)["state"] == "failed"  # f and t: by hand
+        _sql(f"UPDATE \"{dst}\" d SET f = s.f, t = s.t FROM \"{src}\" s WHERE d.id = s.id AND d.id = 7")
         assert _verify(job_id, only_table=dst, force=True)["state"] == "passed"
     finally:
         _sql(f'DROP TABLE IF EXISTS "{src}"', f'DROP TABLE IF EXISTS "{dst}"')

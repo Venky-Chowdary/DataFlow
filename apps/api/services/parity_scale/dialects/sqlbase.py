@@ -167,7 +167,7 @@ class SqlSide(Side):
         """Sessions waiting on a lock ``session`` holds, in words (never a query's text)."""
         return []
 
-    def watch_refusal(self, monitor: Any) -> str:
+    def watch_refusal(self, monitor: Any, session: Any = None) -> str:
         """``""`` when the watch can see other sessions' lock waits, else why not (then no pin)."""
         return ""
 
@@ -202,7 +202,7 @@ class SqlSide(Side):
                 session = self.session_id()
             monitor = self._monitor_connect()
             self.prepare_monitor(monitor)
-            blind = self.watch_refusal(monitor)
+            blind = self.watch_refusal(monitor, session)
             if not blind:
                 self.lock_waiters(monitor, session)  # the watch works on this server
         except Exception as exc:  # noqa: BLE001 — cannot watch: the caller does not hold the snapshot

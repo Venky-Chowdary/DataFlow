@@ -306,18 +306,24 @@ class MySQLSide(SqlSide):
     #: How the watch sees waits: "performance_schema" (MySQL 8) or "processlist" (PROCESS).
     _watch_via = ""
 
-    def watch_refusal(self, monitor: Any) -> str:
-        """The watch must see *other* logins' sessions, or a writer could wait on the snapshot
-        unseen: MySQL 8's metadata-lock instrument, or the PROCESS privilege for the process list."""
+    def watch_refusal(self, monitor: Any, session: Any = None) -> str:
+        """Prove, from the watch's own connection, that it sees other logins' lock waits; if it
+        cannot be proven the snapshot is not held. MySQL 8: performance_schema's metadata locks,
+        readable, with the mdl instrument on. Otherwise the PROCESS privilege, probed by using it
+        (SHOW ENGINE INNODB STATUS needs exactly PROCESS; SUPER alone does not grant it on
+        MariaDB 10.5+), and the scan's own pinned session must show in the process list."""
         with monitor.cursor() as cur:
             if self.server == "mysql" and self._metadata_locks_visible(cur):
                 self._watch_via = "performance_schema"
                 return ""
-            cur.execute(
-                "SELECT COUNT(*) FROM information_schema.USER_PRIVILEGES WHERE PRIVILEGE_TYPE IN "
-                "('PROCESS', 'SUPER') AND GRANTEE = CONCAT(CHAR(39), SUBSTRING_INDEX(CURRENT_USER(), '@', 1), "
-                "CHAR(39), '@', CHAR(39), SUBSTRING_INDEX(CURRENT_USER(), '@', -1), CHAR(39))")
-            if int(cur.fetchone()[0] or 0) > 0:
+            try:
+                cur.execute("SHOW ENGINE INNODB STATUS")
+                cur.fetchall()
+                cur.execute("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = %s", (int(session),))
+                sees_scan = int(cur.fetchone()[0] or 0) == 1
+            except Exception:  # noqa: BLE001 — no PROCESS: other logins' sessions are invisible
+                sees_scan = False
+            if sees_scan:
                 self._watch_via = "processlist"
                 return ""
         return ("the scan's login cannot see other sessions (no PROCESS privilege"

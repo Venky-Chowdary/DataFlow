@@ -141,9 +141,11 @@ comparing every row inside both databases (see
   on for its own runs and set a shorter hold (Settings, workspace enterprise
   settings), and a schedule can do the same. The hold used is the shortest
   one set. On MySQL / MariaDB the scan's login must be able to see other
-  sessions (the PROCESS privilege, or on MySQL 8 a readable
-  `performance_schema` with the metadata-lock instrument on); otherwise
-  nothing is pinned and the result says why. While it is open:
+  sessions (the PROCESS privilege — SUPER alone is not enough — or on
+  MySQL 8 a readable `performance_schema` with the metadata-lock
+  instrument on). This is probed from the watching connection before the
+  snapshot is held; if it cannot be proven, nothing is pinned and the
+  result says why. While it is open:
   - PostgreSQL cannot vacuum rows deleted or updated after the snapshot (the
     xmin horizon is held back), so tables with heavy writes grow until it
     ends;
@@ -211,7 +213,10 @@ quarantined rows, rows outside the run and protected columns, and says so.
 Each UPDATE and DELETE carries the destination row's values as read when
 the statements were generated, so a row changed since is left alone; an
 extra row is deleted only if the source still does not hold its key when
-the statements are generated. MySQL / MariaDB string literals that hold a
+the statements are generated. A changed column of a type with no exact
+equality (floats, JSON, XML, geometric, time-zone timestamps) is not set
+by an UPDATE, since a newer value could not be detected: it is listed for
+review by hand with its keys. MySQL / MariaDB string literals that hold a
 quote or backslash are written in hex, so they mean the same with or
 without `NO_BACKSLASH_ESCAPES`. Datawrap never runs them.
 

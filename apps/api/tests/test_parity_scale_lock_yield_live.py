@@ -215,8 +215,9 @@ def test_mysql_ddl_waiting_on_a_pinned_snapshot_proceeds_within_seconds() -> Non
         conn.close()
 
 
-def _least_privileged_login():
-    """A login that may only read this database (no PROCESS): created here, dropped after."""
+def _least_privileged_login(*extra: str):
+    """A login that may only read this database (no PROCESS), plus ``extra`` global privileges:
+    created here, dropped after."""
     import secrets
 
     c = parity_engines.cfg("mysql")
@@ -227,6 +228,8 @@ def _least_privileged_login():
             for host in ("127.0.0.1", "localhost"):
                 cur.execute(f"CREATE USER '{name}'@'{host}' IDENTIFIED BY %s", (password,))
                 cur.execute(f"GRANT SELECT ON `{c['database']}`.* TO '{name}'@'{host}'")
+                for privilege in extra:
+                    cur.execute(f"GRANT {privilege} ON *.* TO '{name}'@'{host}'")
         admin.commit()
     except Exception as exc:  # noqa: BLE001 — the test login may not manage users
         admin.close()
@@ -249,7 +252,8 @@ def _least_privileged_login():
 
 
 @pytest.mark.skipif(not _mysql_usable(), reason="MySQL not usable (DATAFLOW_TEST_MYSQL_*)")
-def test_a_login_that_cannot_see_other_sessions_never_pins() -> None:
+@pytest.mark.parametrize("extra", [(), ("SUPER",)])
+def test_a_login_that_cannot_see_other_sessions_never_pins(extra) -> None:
     """Review 3b, item 1: without PROCESS the watch saw only its own login's sessions: an ALTER
     from another login waited out its lock timeout while the side stayed pinned."""
     from services.parity_scale.dialects.mysql import MySQLSide
@@ -264,7 +268,8 @@ def test_a_login_that_cannot_see_other_sessions_never_pins() -> None:
             cur.execute(f"CREATE TABLE `{table}` (id BIGINT PRIMARY KEY, v INT) ENGINE=InnoDB")
             cur.execute(f"INSERT INTO `{table}` VALUES (1, 1), (2, 2), (3, 3)")
     admin.commit()
-    connect, drop = _least_privileged_login()
+    # Final check: SUPER was taken as proof, but on MariaDB 10.5+ it does not include PROCESS.
+    connect, drop = _least_privileged_login(*extra)
     try:
         types = {"id": "bigint", "v": "int"}
         plan = build_plan([{"source": "id", "target": "id"}, {"source": "v", "target": "v"}],

@@ -464,6 +464,7 @@ def repair_sql(job: dict[str, Any], table: str) -> dict[str, Any]:
                 notes.append(f"-- {_rows(back, 'extra row')} left alone: the source holds that key now (or the "
                              "destination no longer does); re-verify the table.")
         changed = [decode_key(k) for k in (diff.get("changed_keys") or [])[:REPAIR_KEYS_MAX]]
+        by_hand: dict[str, list[str]] = {}
         if changed:
             s_rows, d_rows = src.fetch_rows(changed), dst.fetch_rows(changed)
             for key in changed:
@@ -479,6 +480,11 @@ def repair_sql(job: dict[str, Any], table: str) -> dict[str, Any]:
                             continue
                         if fingerprint(srow[i], col, engine, source=True, number_locale=number_locale,
                                        date_locale=date_locale) != fingerprint(drow[i], col, engine, source=False):
+                            if drow[i] is not None and not guardable(engine, col.dest_type):
+                                # No exact = to guard it: an UPDATE could overwrite a newer value, so
+                                # the column is listed for review by hand instead of being set.
+                                by_hand.setdefault(col.target, []).append(key_text(plan, key))
+                                continue
                             sets.append(f"{_quote(engine, col.target)} = "
                                         f"{literal(engine, written(srow[i], col))}")
                             set_cols.append(i)
@@ -489,6 +495,10 @@ def repair_sql(job: dict[str, Any], table: str) -> dict[str, Any]:
                     # Old-value guard: a value changed in the destination since the comparison is kept.
                     lines.append(f"UPDATE {dest_ref} SET {', '.join(sets)} WHERE {guarded(key, drow, set_cols)};")
                     counts["update"] += 1
+        for column, keys_ in sorted(by_hand.items()):
+            shown = ", ".join(keys_[:20]) + (f" and {len(keys_) - 20:,} more" if len(keys_) > 20 else "")
+            notes.append(f"-- Not set, review by hand: {_comment(column)} differs for key(s) {_comment(shown)}; "
+                         "its type has no exact equality to guard an UPDATE, which could overwrite a newer value.")
         if unguarded:
             notes.append("-- The guard does not compare " + _comment(", ".join(sorted(unguarded)))
                          + " (no exact equality for that type here): a change made since to only those "
