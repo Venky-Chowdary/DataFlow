@@ -458,16 +458,12 @@ def _test_connection_blocking(request: TestConnectionRequest, op):
 
 
 def _refuse_unsafe_egress(data: dict[str, Any]) -> None:
-    """Refuse to persist a connector whose dial targets break the egress policy.
+    """The egress part of the shared save check, as a 400 (kept for its callers)."""
+    from services.connector_save_policy import as_http, egress_refusal
 
-    Audit-first for private hosts and never applied to an unchanged target
-    (``connector_save_refusal``); metadata and link-local always refuse.
-    """
-    from services.egress_guard import connector_save_refusal
-
-    refusal = connector_save_refusal(data)
-    if refusal:
-        raise HTTPException(status_code=400, detail=refusal)
+    refused = egress_refusal(data)
+    if refused is not None:
+        raise as_http(refused)
 
 
 @router.post("/", response_model=ConnectorResponse)
@@ -477,7 +473,7 @@ def create_connector(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    """Create and save a new connector configuration (file store + MongoDB when available)."""
+    """Create and save a new connector configuration in the configured connector store."""
     workspace_id = resolve_write_workspace(request, workspace_id)
     require_admin_connector_access(request, config.type)
     from src.transfer.connector_capabilities import unproven_wire_brand_refusal
@@ -512,76 +508,41 @@ def create_connector(
         "workspace_id": workspace_id,
         "status": "configured",
     }
-    _refuse_unsafe_egress(connector_data)
-    from services.api_errors import ApiError
-    from services.connector_store import ConnectorRefused, connector_config_refusal
+    from services.connector_save_policy import ConnectorRefused, as_http, connector_save_refusal
 
-    # U1/D425: the store's refusal is checked here, for both stores below. It
-    # used to be raised inside the file-store save, logged as suppressed, and
-    # the connector then saved to MongoDB without the check.
-    from services.local_file_policy import sqlite_connector_field_error
+    # U1: the same save check as every other create and update path. It used to
+    # be only the egress guard here; the store's refusal was then logged as
+    # suppressed and the connector saved to MongoDB without it.
+    refused = connector_save_refusal(connector_data)
+    if refused is not None:
+        raise as_http(refused)
+    from services.connector_store import ConnectorStoreError
+    from services.connector_store import create_connector as fs_create
 
-    refused = connector_config_refusal(connector_data) or sqlite_connector_field_error(
-        str(config.type or ""), str(config.database or ""), str(config.connection_string or "")
-    )
-    if refused:
-        raise HTTPException(status_code=ConnectorRefused.status_code, detail=refused)
-
-    # Canonical persistence: file-backed store (always works without MongoDB)
+    # One store, no fallback: the configured connector store (file or MongoDB)
+    # is the system of record. A refusal is a 4xx with the store's text, a store
+    # failure is the app's 503 (ConnectorStoreError); neither falls through to
+    # another collection, which saved what the store had refused.
     try:
-        import sys
-        from pathlib import Path
-        _api_root = Path(__file__).resolve().parents[2]
-        if str(_api_root) not in sys.path:
-            sys.path.insert(0, str(_api_root))
-        from services.connector_store import create_connector as fs_create
-        try:
-            saved = fs_create(connector_data)
-        except ValueError as exc:
-            status = getattr(exc, "status_code", None)  # ConnectorRefused
-            if status is None and "ssl_mode" not in str(exc):
-                raise
-            raise HTTPException(status_code=int(status or 422), detail=str(exc)) from exc
-        return ConnectorResponse(
-            id=saved.id,
-            name=saved.name,
-            type=saved.type,
-            host=saved.host,
-            port=saved.port,
-            database=saved.database,
-            status="configured",
-            created_at=saved.created_at,
-            workspace_id=saved.workspace_id or "",
-            role=getattr(saved, "role", None) or connector_data.get("role") or "both",
-        )
-    except (HTTPException, ApiError):
-        raise  # a refusal: nothing is saved anywhere
-    except Exception as exc:
-        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-
-    try:
-        mongo = get_mongodb_service()
-
-        # Persist topology role + ssl — dropping them made every DB look like a source.
-        mongo_data = dict(connector_data)
-        connector_id = mongo.save_connector(mongo_data)
-        connector = mongo.get_connector(connector_id)
-
-        return ConnectorResponse(
-            id=connector["_id"],
-            name=connector["name"],
-            type=connector["type"],
-            host=connector["host"],
-            port=connector["port"],
-            database=connector["database"],
-            status=connector["status"],
-            created_at=connector["created_at"].isoformat(),
-            workspace_id=connector.get("workspace_id", ""),
-            role=connector.get("role") or connector_data.get("role") or "both",
-        )
-
+        saved = fs_create(connector_data)
+    except (ConnectorRefused, ConnectorStoreError):
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as e:
         raise safe_http_exception(e, event="connectors.create_connector.failed", public_message="Couldn't save the connection.", status_code=500)
+    return ConnectorResponse(
+        id=saved.id,
+        name=saved.name,
+        type=saved.type,
+        host=saved.host,
+        port=saved.port,
+        database=saved.database,
+        status="configured",
+        created_at=saved.created_at,
+        workspace_id=saved.workspace_id or "",
+        role=getattr(saved, "role", None) or connector_data.get("role") or "both",
+    )
 
 
 @router.get("/")

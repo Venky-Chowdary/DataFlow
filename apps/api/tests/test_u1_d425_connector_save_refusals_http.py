@@ -78,8 +78,9 @@ def _detail(response) -> str:
     return str(body)
 
 
-def _assert_refused(response, words: str) -> None:
-    assert 400 <= response.status_code < 500, (response.status_code, response.text)
+def _assert_refused(response, words: str, status: int) -> None:
+    """The exact code is the contract: 400 from the egress guard, 422 from the store / SQLite."""
+    assert response.status_code == status, (response.status_code, response.text)
     text = _detail(response)
     assert words in text, text
     assert "unexpected error" not in text.lower(), text
@@ -111,7 +112,7 @@ def _pg_body(name: str, connection_string: str, extra: dict) -> dict:
 @pytest.mark.parametrize("conn_str,extra,words", REFUSED)
 def test_saved_create_refuses_server_file_read_with_4xx_and_saves_nothing(client, conn_str, extra, words):
     r = client.post("/api/v1/connectors/saved", json=_pg_body("u1-saved", conn_str, extra))
-    _assert_refused(r, words)
+    _assert_refused(r, words, 400)
     assert _saved_rows() == []
 
 
@@ -120,7 +121,7 @@ def test_legacy_create_refuses_server_file_read_and_saves_nothing(client, conn_s
     body = _pg_body("u1-legacy", conn_str, extra)
     body.pop("extra")
     r = client.post("/api/v1/connectors/", json=body)
-    _assert_refused(r, words)
+    _assert_refused(r, words, 400)
     assert _saved_rows() == []
 
 
@@ -130,7 +131,7 @@ def test_legacy_and_saved_create_give_the_same_refusal_text(client):
     body = _pg_body("u1-b", conn_str, {})
     body.pop("extra")
     b = client.post("/api/v1/connectors/", json=body)
-    assert a.status_code == b.status_code and 400 <= a.status_code < 500, (a.text, b.text)
+    assert a.status_code == b.status_code == 400, (a.text, b.text)
     assert a.json()["detail"] == b.json()["detail"]
 
 
@@ -142,7 +143,7 @@ def test_pilot_confirm_create_names_the_refusal_and_saves_nothing(client):
         payload=_pg_body("u1-pilot", REFUSED[0][0], {}),
     )
     r = client.post("/api/v1/copilot/confirm", json={"ack_id": ack_id})
-    _assert_refused(r, "service")
+    _assert_refused(r, "service", 400)
     assert _saved_rows() == []
 
 
@@ -161,7 +162,7 @@ def test_saved_put_refuses_server_file_read_and_keeps_the_saved_settings(client,
 
     cid = _saved_good(client)
     r = client.put(f"/api/v1/connectors/saved/{cid}", json=_pg_body("u1-good", conn_str, extra))
-    _assert_refused(r, words)
+    _assert_refused(r, words, 400)
     after = get_connector(cid)
     assert after is not None and not after.connection_string and not after.extra
 
@@ -173,7 +174,7 @@ def test_saved_patch_refuses_server_file_read_and_keeps_the_saved_settings(clien
     cid = _saved_good(client)
     patch = {"connection_string": conn_str} if conn_str else {"extra": extra}
     r = client.patch(f"/api/v1/connectors/saved/{cid}", json=patch)
-    _assert_refused(r, words)
+    _assert_refused(r, words, 400)
     after = get_connector(cid)
     assert after is not None and not after.connection_string and not after.extra
 
@@ -186,7 +187,7 @@ def test_rotate_secrets_refuses_a_server_file_read_connection_string(client):
         f"/api/v1/connectors/saved/{cid}/rotate-secrets",
         json={"connection_string": REFUSED[0][0]},
     )
-    _assert_refused(r, "service")
+    _assert_refused(r, "service", 400)
     assert not get_connector(cid).connection_string
 
 
@@ -201,7 +202,7 @@ def test_pilot_confirm_update_names_the_refusal_and_keeps_the_saved_settings(cli
                  "changes": {"connection_string": REFUSED[1][0]}},
     )
     r = client.post("/api/v1/copilot/confirm", json={"ack_id": ack_id})
-    _assert_refused(r, "service")
+    _assert_refused(r, "service", 400)
     assert not get_connector(cid).connection_string
 
 
@@ -233,7 +234,7 @@ def test_hosted_sqlite_create_is_a_4xx_with_the_reason_never_500(client, monkeyp
     _hosted(monkeypatch)
     body = {"name": "d425-sqlite", "type": "sqlite", "role": "both", **variant}
     r = client.post("/api/v1/connectors/saved", json=body)
-    _assert_refused(r, "SQLite isn't available")
+    _assert_refused(r, "SQLite isn't available", 422)
     text = _detail(r)
     # AC-2: the user is told the cloud service cannot read their file, and what to do.
     assert "self-hosted" in text and "PostgreSQL" in text, text
@@ -246,7 +247,7 @@ def test_hosted_sqlite_legacy_create_is_refused_and_saves_nothing(client, monkey
     body = {"name": "d425-legacy", "type": "sqlite", "role": "both", "database": "/tmp/qa.db",
             "host": "", "port": 0}
     r = client.post("/api/v1/connectors/", json=body)
-    _assert_refused(r, "SQLite isn't available")
+    _assert_refused(r, "SQLite isn't available", 422)
     assert _saved_rows() == []
 
 
@@ -258,7 +259,7 @@ def test_hosted_sqlite_update_into_sqlite_is_refused(client, monkeypatch):
     _hosted(monkeypatch)
     body = {"name": "u1-good", "type": "sqlite", "role": "source", "database": "/tmp/qa.db"}
     r = client.put(f"/api/v1/connectors/saved/{cid}", json=body)
-    _assert_refused(r, "SQLite isn't available")
+    _assert_refused(r, "SQLite isn't available", 422)
     assert get_connector(cid).type == "postgresql"
 
 
@@ -294,7 +295,7 @@ def test_legacy_create_never_falls_through_to_the_document_store_on_a_refusal(cl
     body = {"name": "u1-fallthrough", "type": db_type, "host": host, "port": 1521,
             "database": "app", "username": "app", "password": "dummy-password"}
     r = client.post("/api/v1/connectors/", json=body)
-    _assert_refused(r, words)
+    _assert_refused(r, words, 422)
     assert _saved_rows() == []
 
 
@@ -304,7 +305,7 @@ def test_saved_create_store_refusal_is_a_422_not_a_500(client, db_type, host, wo
             "database": "app", "username": "app", "password": "dummy-password"}
     r = client.post("/api/v1/connectors/saved", json=body)
     assert r.status_code == 422, r.text
-    _assert_refused(r, words)
+    _assert_refused(r, words, 422)
     assert _saved_rows() == []
 
 
@@ -314,7 +315,7 @@ def test_saved_create_extra_option_refused_by_the_store_is_a_422(client):
             "extra": {"Driver": "/tmp/evil.so"}}
     r = client.post("/api/v1/connectors/saved", json=body)
     assert r.status_code == 422, r.text
-    _assert_refused(r, "Driver")
+    _assert_refused(r, "Driver", 422)
     assert _saved_rows() == []
 
 
@@ -359,3 +360,29 @@ def test_self_hosted_sqlite_missing_file_saves_and_its_test_names_the_missing_fi
     assert out["success"] is False
     assert out["error"]["code"] == "object.file_not_found", out
     assert "couldn't identify the cause" not in out["message"], out
+
+
+# --------------------------------------- the store itself (no router in front)
+
+
+def test_store_update_into_hosted_sqlite_is_refused_without_the_router(client, monkeypatch):
+    """connector_store.update_connector refuses on its own: a caller that skips the routes."""
+    import services.connector_store as store
+    from services.connector_save_policy import ConnectorRefused
+
+    conn = store.create_connector({**_pg_body("u1-store", "", {}), "workspace_id": ""})
+    _hosted(monkeypatch)
+    with pytest.raises(ConnectorRefused, match="SQLite isn't available") as refused:
+        store.update_connector(conn.id, {"type": "sqlite", "database": "/tmp/qa.db"})
+    assert refused.value.status_code == 422
+    assert store.get_connector(conn.id).type == "postgresql"
+
+
+def test_store_backfill_of_a_saved_hosted_sqlite_connector_still_applies(client, monkeypatch):
+    """Only an edit of what it dials is refused: a workspace backfill still lands."""
+    import services.connector_store as store
+
+    conn = store.create_connector({"name": "u1-old-lite", "type": "sqlite", "database": "/tmp/old.db",
+                                   "workspace_id": ""})
+    _hosted(monkeypatch)
+    assert store.update_connector(conn.id, {"workspace_id": "ws-backfill"}) is not None

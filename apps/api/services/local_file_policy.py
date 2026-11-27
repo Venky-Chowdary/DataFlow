@@ -271,8 +271,21 @@ def _is_sqlite_destination(dest_type: str, connection_string: str = "") -> bool:
     driver = resolve_driver_type(raw)
     if raw in _SQLITE_DRIVERS or driver in _SQLITE_DRIVERS:
         return True
-    # A generic SQL connector pointed at a ``sqlite:`` URL writes the same local file.
-    return driver == "generic_sql" and (connection_string or "").strip().lower().startswith("sqlite:")
+    # A generic SQL connector pointed at a SQLite URL writes the same local file,
+    # whatever DBAPI the URL names (``sqlite+pysqlite:``, ``sqlite+aiosqlite:``).
+    return driver == "generic_sql" and _is_sqlite_url(connection_string)
+
+
+def _is_sqlite_url(connection_string: str) -> bool:
+    text = (connection_string or "").strip()
+    if not text:
+        return False
+    try:
+        from sqlalchemy.engine import make_url
+
+        return make_url(text).get_backend_name().lower() == "sqlite"
+    except Exception:  # noqa: BLE001 - not a URL SQLAlchemy can parse: judge the scheme
+        return text.lower().startswith(("sqlite:", "sqlite+"))
 
 
 def sqlite_hosted_refusal(conn_type: str, connection_string: str = "") -> str | None:

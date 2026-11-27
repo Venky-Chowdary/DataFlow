@@ -61,16 +61,9 @@ class ConnectorStoreError(RuntimeError):
     """The configured connector store failed a write; nothing was saved."""
 
 
-class ConnectorRefused(ValueError):
-    """The store will not save this connector configuration; nothing was saved.
-
-    A server-side file read (U1: libpq ``service=``, ODBC ``Driver=<path>`` /
-    ``DSN=`` / ``FILEDSN=``) or SQLite on the hosted cloud (D276). The message
-    is plain and says what to do; every route returns it as a 422 (D425), and
-    none falls back to another store.
-    """
-
-    status_code = 422
+# A server-side file read (U1), hosted SQLite (D276) or an unhonourable TLS
+# mode: plain text, a 422 from every route, never a fall-through save (D425).
+from services.connector_save_policy import ConnectorRefused  # noqa: E402
 
 
 def _mongo_write_failed(op: str, connector_id: str, exc: Exception) -> ConnectorStoreError:
@@ -252,11 +245,11 @@ def validate_ssl_mode(conn_type: str, data: Mapping[str, Any]) -> None:
     if mode is None:
         return
     if mode not in SSL_MODES:
-        raise ValueError(
+        raise ConnectorRefused(
             f"ssl_mode '{mode}' is not one of require, prefer, disable (or empty for unset)."
         )
     if mode == "disable" and not _is_mysql_family(conn_type):
-        raise ValueError(
+        raise ConnectorRefused(
             "ssl_mode 'disable' is supported for MySQL-family connectors only; "
             f"a {conn_type} connector cannot promise a plaintext session."
         )
@@ -346,10 +339,10 @@ def dial_connection_string(
             current = mysql_tls_plan(ssl=False, connection_string=raw, options=dict(options or {}))
             from_dsn = mysql_tls_plan(ssl=False, connection_string=raw, options={})
         except TlsModeError as exc:
-            raise ValueError(f"ssl_mode 'disable' contradicts the connection's TLS settings: {exc}") from exc
+            raise ConnectorRefused(f"ssl_mode 'disable' contradicts the connection's TLS settings: {exc}") from exc
         if current.mode != TLS_DISABLED:
             if from_dsn.must_encrypt:
-                raise ValueError(
+                raise ConnectorRefused(
                     f"ssl_mode 'disable' contradicts ssl-mode={from_dsn.mode.upper()} in the "
                     "connection string; keep one of them."
                 )
@@ -359,7 +352,7 @@ def dial_connection_string(
                 # an encrypted session. Name those options, not the DSN.
                 named = ", ".join(k for k in _MYSQL_TLS_OPTION_KEYS
                                   if (options or {}).get(k) not in (None, "", False))
-                raise ValueError(
+                raise ConnectorRefused(
                     f"ssl_mode 'disable' contradicts this connector's TLS options ({named}); "
                     f"they ask for an encrypted ({current.mode.upper()}) session. Remove them, "
                     "or set ssl_mode to require."

@@ -302,53 +302,21 @@ def _persist_form_test_status(connector_id: str, last_test_ok: bool | None) -> N
 
 
 def _refuse_unsafe_egress(data: dict[str, Any], existing: Any = None) -> None:
-    """Refuse to persist a connector whose dial targets break the egress policy.
+    """The egress part of the shared save check, as a 400 (kept for its callers)."""
+    from services.connector_save_policy import as_http, egress_refusal
 
-    Audit-first for private hosts and never applied to an unchanged target
-    (``connector_save_refusal``); metadata and link-local always refuse.
-    """
-    from services.egress_guard import connector_save_refusal
-
-    refusal = connector_save_refusal(data, existing)
-    if refusal:
-        raise HTTPException(status_code=400, detail=refusal)
-    from connectors.sftp_common import sftp_edit_port_error
-
-    # D208: a URL-shaped SFTP host and a port field that disagree.
-    conflict = sftp_edit_port_error(
-        data.get("type") or getattr(existing, "type", ""),
-        data.get("host"),
-        data.get("port"),
-        getattr(existing, "port", None) if existing is not None else None,
-    )
-    if conflict:
-        raise HTTPException(status_code=400, detail=conflict)
+    refused = egress_refusal(data, existing)
+    if refused is not None:
+        raise as_http(refused)
 
 
-def _refuse_unusable_sqlite(data: dict[str, Any], existing: Any = None) -> None:
-    """D425: a SQLite connector is saved, or refused (422) naming the field and the reason."""
-    from services.local_file_policy import sqlite_connector_field_error
+def _refuse_unsavable(data: dict[str, Any], existing: Any = None) -> None:
+    """The one save check every create and update path runs (U1): 400 egress, 422 store/SQLite."""
+    from services.connector_save_policy import as_http, connector_save_refusal
 
-    sqlite_error = sqlite_connector_field_error(
-        str(data.get("type") or getattr(existing, "type", "") or ""),
-        str(data.get("database") or ""),
-        str(data.get("connection_string") or ""),
-    )
-    if sqlite_error:
-        raise HTTPException(status_code=422, detail=sqlite_error)
-
-
-def _store_write(write: Any, *args: Any, **kwargs: Any) -> Any:
-    """Run a connector-store write; a refusal is a 422 with its own text, never a 500 (U1/D425)."""
-    try:
-        return write(*args, **kwargs)
-    except ValueError as exc:
-        # ConnectorRefused carries its status; read it off the instance so a
-        # reloaded store module's class is still recognised.
-        status = getattr(exc, "status_code", None)
-        if status is None and "ssl_mode" not in str(exc):
-            raise
-        raise HTTPException(status_code=int(status or 422), detail=str(exc)) from exc
+    refused = connector_save_refusal(data, existing)
+    if refused is not None:
+        raise as_http(refused)
 
 
 @router.post("")
@@ -371,8 +339,7 @@ def save_connector(
             break
     if existing is not None:
         data = _preserve_masked_secrets(data, existing)
-    _refuse_unsafe_egress(data, existing)
-    _refuse_unusable_sqlite(data, existing)
+    _refuse_unsavable(data, existing)
     if existing is None:
         from src.transfer.connector_capabilities import planned_driver_message
 
@@ -380,7 +347,7 @@ def save_connector(
         # could never connect; refuse it instead of saving a dead connector.
         if not_installed := planned_driver_message(str(data.get("type") or "")):
             raise HTTPException(status_code=422, detail=f"{not_installed} Nothing was saved.")
-    conn = _store_write(create_connector, data)
+    conn = create_connector(data)
     _persist_form_test_status(conn.id, form_test)
     refreshed = get_connector(conn.id, workspace_id=workspace_id) or conn
     return _to_ui(refreshed)
@@ -401,9 +368,8 @@ def update_saved_connector(
     require_admin_connector_access(request, body.type, existing.type)
     data = _preserve_masked_secrets(data, existing)
     data["workspace_id"] = existing.workspace_id or workspace_id
-    _refuse_unsafe_egress(data, existing)
-    _refuse_unusable_sqlite(data, existing)
-    updated = _store_write(update_connector, connector_id, data, workspace_id=workspace_id)
+    _refuse_unsavable(data, existing)
+    updated = update_connector(connector_id, data, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
     _persist_form_test_status(connector_id, form_test)
@@ -449,10 +415,9 @@ def patch_saved_connector(
     require_admin_connector_access(request, merged.get("type"), existing.type)
     if not patch:
         return _to_ui(existing)
-    _refuse_unsafe_egress(merged, existing)
-    _refuse_unusable_sqlite(merged, existing)
+    _refuse_unsavable(merged, existing)
     patch["workspace_id"] = existing.workspace_id or workspace_id
-    updated = _store_write(update_connector, connector_id, patch, workspace_id=workspace_id)
+    updated = update_connector(connector_id, patch, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
     refreshed = get_connector(connector_id, workspace_id=workspace_id) or updated
@@ -513,6 +478,9 @@ def rotate_saved_connector_secrets(
                 detail=f"{key} looks masked; send the new secret value, not ****",
             )
 
+    # The new secret is checked as the connector it makes (a rotated
+    # connection string is a new dial target): the shared save check (U1).
+    _refuse_unsavable({**existing.to_dict(), **payload}, existing)
     rotated_at = datetime.now(timezone.utc).isoformat()
     payload["credentials_rotated_at"] = rotated_at
     # Invalidate pooled engines keyed by the *pre-rotation* credentials first —
@@ -525,7 +493,7 @@ def rotate_saved_connector_secrets(
     except Exception:
         pool_invalidated = False
 
-    updated = _store_write(update_connector, connector_id, payload, workspace_id=workspace_id)
+    updated = update_connector(connector_id, payload, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
 

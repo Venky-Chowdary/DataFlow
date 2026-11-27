@@ -128,3 +128,37 @@ def test_a_run_failure_with_the_vendor_code_is_classified_as_credentials(raw, co
     found = classify(exc, side="destination", phase="connect")
     assert found.code == code, (found.code, found.message)
     assert found.action["ui"] == "open_connection"
+
+
+@pytest.mark.parametrize("raw,replace", [
+    ("394401 (08001): Programmatic access token is expired", True),
+    ("390318 (08001): OAuth access token expired. [1172527951366]", True),
+    # The session's own token: renewed by connecting again, not a saved credential.
+    ("390112 (08001): Authentication token has expired.  The user must authenticate again.", False),
+    ("Authentication token has expired for user QA_USER", False),
+])
+def test_the_connection_test_copy_tells_a_saved_token_from_the_session_token(raw, replace):
+    from src.transfer.connector_registry import humanize_connection_error
+
+    msg = humanize_connection_error("snowflake", raw, auth_mode="pat")
+    assert (EXPIRED in msg and "replace the token" in msg) is replace, msg
+
+
+@pytest.mark.parametrize("raw,expired", [
+    ("394401 (08001): Programmatic access token is expired", True),
+    ("390318 (08001): OAuth access token expired. [1172527951366]", True),
+    ("390112 (08001): Authentication token has expired.  The user must authenticate again.", False),
+])
+def test_the_snowflake_classifier_reads_the_saved_token_expiry(raw, expired):
+    """The Query page and the connector's own test read this classifier before the taxonomy."""
+    from connectors.snowflake_conn import SNOWFLAKE_TOKEN_EXPIRED_MSG, classify_snowflake_connect_error
+
+    assert (classify_snowflake_connect_error(raw, auth_mode="pat") == SNOWFLAKE_TOKEN_EXPIRED_MSG) is expired
+
+
+def test_a_revoked_or_invalid_pat_names_the_pat_not_an_unknown_cause():
+    """Edge: revoked vs expired. A refused PAT says which credential to replace."""
+    from src.transfer.connector_registry import humanize_connection_error
+
+    msg = humanize_connection_error("snowflake", "Programmatic access token is invalid.", auth_mode="pat")
+    assert "programmatic access token (PAT)" in msg and "couldn't identify" not in msg, msg
