@@ -33,8 +33,9 @@ cannot change a value: `smallint` → `integer` → `bigint`, `varchar(n)` →
 `timestamp(p)` / `time(p)` → a higher precision of the same zone kind. Every
 other difference (`json`/`jsonb`, `text` → `varchar`, arrays, domains, enums,
 `char(n)`) still takes the row path. Append and overwrite COPY into the
-destination itself, so they need exact types and exact names; append checks
-them under the same lock, overwrite inside its swap transaction.
+destination itself, so they need exact types and exact names, checked after
+the lock is taken (overwrite: the lock its TRUNCATE or DELETE takes anyway) and
+held until the COPY commits.
 A destination that is not an ordinary table (a foreign table, a view) takes
 the row path: the copy is proven for ordinary tables only, and `LOCK TABLE`
 refuses a foreign table.

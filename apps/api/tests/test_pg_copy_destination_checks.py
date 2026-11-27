@@ -261,3 +261,84 @@ def test_foreign_table_destination_takes_the_row_path(mode):
             for t in (src, base):
                 cur.execute(f'DROP TABLE IF EXISTS "{t}"')
         conn.close()
+
+
+def test_overwrite_holds_the_lock_from_type_check_to_copy(monkeypatch):
+    """An ALTER tried right after the overwrite's type check (a hook on the check)
+    must wait for the job's lock — it cannot change the column the binary COPY
+    is about to load."""
+    import psycopg2
+
+    import services.dest_overwrite_swap as dos
+
+    conn, c = _live()
+    sfx = uuid.uuid4().hex[:8]
+    src, dst = f"ovl_s_{sfx}", f"ovl_d_{sfx}"
+    docs = ['{"a": 1}', '{"b": [1, 2]}', "[]"]
+    real_check = dos.pg_decline_live_type_drift
+    tried = []
+
+    def check_then_alter(cur, live_ref, column_types, *, action):
+        real_check(cur, live_ref, column_types, action=action)
+        if action == "overwrite" and dst in live_ref and not tried:
+            other = psycopg2.connect(host=c["host"], port=c["port"], user=c["username"],
+                                     password=c["password"], dbname=c["database"])
+            other.autocommit = True
+            try:
+                with other.cursor() as oc:
+                    oc.execute("SET lock_timeout = '500ms'")
+                    oc.execute(f'ALTER TABLE "{dst}" ALTER COLUMN doc TYPE text USING doc::text')
+                tried.append("altered")
+            except psycopg2.errors.LockNotAvailable:
+                tried.append("blocked")
+            finally:
+                other.close()
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'CREATE TABLE "{src}" (id bigint PRIMARY KEY, doc jsonb)')
+            for i in range(1, 31):
+                cur.execute(f'INSERT INTO "{src}" VALUES (%s, %s::jsonb)', (i, docs[i % 3]))
+            cur.execute(f'CREATE TABLE "{dst}" (id bigint PRIMARY KEY, doc jsonb)')
+            cur.execute(f'INSERT INTO "{dst}" VALUES (999, \'{{"old": 1}}\')')
+        monkeypatch.setattr(dos, "pg_decline_live_type_drift", check_then_alter)
+        method = _summary_method(c, src, dst, "full_refresh_overwrite")
+        assert tried == ["blocked"], tried
+        assert "copy_binary" in method, method
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT id, doc::text FROM "{dst}" ORDER BY id')
+            got = cur.fetchall()
+            cur.execute(f'SELECT id, doc::text FROM "{src}" ORDER BY id')
+            want = cur.fetchall()
+        assert got == want
+    finally:
+        with conn.cursor() as cur:
+            for t in (src, dst):
+                cur.execute(f'DROP TABLE IF EXISTS "{t}"')
+        conn.close()
+
+
+@pytest.mark.parametrize("referenced", [False, True])
+def test_overwrite_type_mismatch_releases_the_lock_and_takes_the_row_path(referenced):
+    """The lock is taken before the type check; a mismatch must roll it back so
+    the row path (a new connection) can write the table."""
+    conn, c = _live()
+    sfx = uuid.uuid4().hex[:8]
+    src, dst, child = f"ovm_s_{sfx}", f"ovm_d_{sfx}", f"ovm_c_{sfx}"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'CREATE TABLE "{src}" (id bigint PRIMARY KEY, name text)')
+            cur.execute(f'INSERT INTO "{src}" SELECT g, \'n\' || g FROM generate_series(1, 20) g')
+            cur.execute(f'CREATE TABLE "{dst}" (id bigint PRIMARY KEY, name varchar(10))')
+            if referenced:
+                cur.execute(f'CREATE TABLE "{child}" (pid bigint REFERENCES "{dst}"(id))')
+        method = _summary_method(c, src, dst, "full_refresh_overwrite")
+        assert "copy" not in method, method
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT id, name FROM "{dst}" ORDER BY id')
+            assert cur.fetchall() == [(i, f"n{i}") for i in range(1, 21)]
+    finally:
+        with conn.cursor() as cur:
+            for t in (child, src, dst):
+                cur.execute(f'DROP TABLE IF EXISTS "{t}"')
+        conn.close()

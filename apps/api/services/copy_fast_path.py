@@ -1470,8 +1470,17 @@ def pg_assignment_safe(source_type: str, live_type: str) -> bool:
     return False
 
 
-def pg_lock_ordinary_table(cur: Any, dest_schema: str, dest_table: str) -> None:
-    """``LOCK TABLE ... IN ROW EXCLUSIVE MODE`` on an ordinary or partitioned table.
+_PG_LOCK_SQL = {
+    "ROW EXCLUSIVE": "LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE",
+    "ACCESS EXCLUSIVE": "LOCK TABLE {}.{} IN ACCESS EXCLUSIVE MODE",
+}
+
+
+def pg_lock_ordinary_table(
+    cur: Any, dest_schema: str, dest_table: str, mode: str = "ROW EXCLUSIVE"
+) -> None:
+    """``LOCK TABLE ... IN <mode> MODE`` (default ROW EXCLUSIVE) on an ordinary or
+    partitioned table. Both modes conflict with ``ALTER TABLE``.
 
     Any other relation (foreign table, view, materialized view) cannot be
     locked that way — and is not a target this copy path proves — so the
@@ -1493,7 +1502,7 @@ def pg_lock_ordinary_table(cur: Any, dest_schema: str, dest_table: str) -> None:
             "the row path writes it"
         )
     cur.execute(
-        sql.SQL("LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE").format(
+        sql.SQL(_PG_LOCK_SQL[mode]).format(
             sql.Identifier(dest_schema or "public"), sql.Identifier(dest_table)
         )
     )
