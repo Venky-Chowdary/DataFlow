@@ -301,3 +301,48 @@ def test_live_pg_held_overwrite_salvage_splits_and_keeps_the_transaction(monkeyp
         finally:
             conn.close()
         drop("postgresql", table)
+
+
+def test_mysql_split_safety_is_probed_once_per_table_and_sees_temporary_tables():
+    """The engine probe runs through the session (SHOW CREATE TABLE): InnoDB is
+    safe, MyISAM is not, a TEMPORARY table shadowing an InnoDB table is not, and
+    the answer is cached per table for the run."""
+    import pymysql
+
+    from connectors.mysql_writer import _split_salvage_safe
+
+    c = _my()
+    conn = pymysql.connect(host=c["host"], port=c["port"], user=c["username"],
+                           password=c["password"], database=c["database"], autocommit=True)
+    sfx = uuid.uuid4().hex[:8]
+    inno, myi = f"bsx_i_{sfx}", f"bsx_m_{sfx}"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE `{inno}` (id INT PRIMARY KEY) ENGINE=InnoDB")
+            cur.execute(f"CREATE TABLE `{myi}` (id INT PRIMARY KEY) ENGINE=MyISAM")
+            cache: dict[str, bool] = {}
+            assert _split_salvage_safe(cur, inno, cache) is True
+            assert _split_salvage_safe(cur, myi, cache) is False
+            assert _split_salvage_safe(cur, f"bsx_absent_{sfx}", cache) is False
+            assert cache == {inno: True, myi: False, f"bsx_absent_{sfx}": False}
+            # Cached: the run does not probe the same table again.
+            calls = {"n": 0}
+            real_execute = cur.execute
+
+            def counting(sql, *a, **k):
+                calls["n"] += 1
+                return real_execute(sql, *a, **k)
+
+            cur.execute = counting
+            assert _split_salvage_safe(cur, inno, cache) is True
+            assert calls["n"] == 0
+            cur.execute = real_execute
+            # A temporary table shadowing the InnoDB one is judged, and is not safe.
+            cur.execute(f"CREATE TEMPORARY TABLE `{inno}` (id INT PRIMARY KEY) ENGINE=InnoDB")
+            assert _split_salvage_safe(cur, inno) is False
+            cur.execute(f"DROP TEMPORARY TABLE `{inno}`")
+            assert _split_salvage_safe(cur, inno) is True
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{inno}`, `{myi}`")
+        conn.close()

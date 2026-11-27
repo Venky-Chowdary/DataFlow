@@ -23,7 +23,10 @@ A PostgreSQL → PostgreSQL table with a `jsonb` column now takes the binary
 copy when the destination column is `jsonb` too or does not exist yet
 (`jsonb` → `jsonb` is a plain carry; the copy moves the stored datum). Into an
 existing `text` or `json` column the cast decides the stored text, so that
-route stays on the row path in every mode.
+route stays on the row path in every mode. The incremental and upsert copies
+also re-check every live destination column type (exact names: `"Doc"` and
+`"doc"` are two columns) inside their merge transaction, under a lock, and
+fall back to the row path if a column changed after the route was chosen.
 Before, the `json` cast the mapper stamps on JSON columns sent every such
 table down the row path. A `json` (text) column still takes the row path.
 
@@ -111,8 +114,10 @@ What changed, with no change to any result:
   (about `2k·log2(n/k)` attempts for `k` bad rows in `n`, instead of `n`).
   Rows land or are held out exactly as before, in the same order, each with
   its own error. SQL Server and the generic SQL writer still salvage row by
-  row, and so does MySQL into a non-transactional table (MyISAM, Aria,
-  MEMORY): a failed multi-row INSERT there keeps the rows before its bad row.
+  row, and so does MySQL into a non-transactional or temporary table
+  (MyISAM, Aria, MEMORY; judged once per table per run through the session's
+  `SHOW CREATE TABLE`): a failed multi-row INSERT there keeps the rows before
+  its bad row.
   On such a table a chunk with a refused row already fails the run today
   (the chunk INSERT wrote those rows before the per-row salvage retried
   them; measured on 70cb4669c too) — an open gap, not changed here. A cancel is polled before every attempt: nothing lands after the poll
@@ -150,12 +155,15 @@ The report holds rows/s over the whole engine call, the engine's phase
 profile, verification seconds (Gate-8 reconciliation plus the in-stream
 checksum), peak RSS of the process, and the independent check.
 
-- CI: the `throughput-smoke` job in `.github/workflows/ci.yml` runs 100k
-  rows on the row path (PostgreSQL → PostgreSQL and PostgreSQL → MySQL) on
-  every PR against the floors in `apps/api/benchmarks/throughput_floors.json`,
-  scaled to the runner by a CPU calibration (never below 75% of a floor). It
-  is report-only — not in the Required PR gate — until it has five
-  consecutive green runs.
+- CI: the `throughput-smoke` job in `.github/workflows/ci.yml` runs, on
+  every PR, 100k rows on the row path (PostgreSQL → PostgreSQL and
+  PostgreSQL → MySQL) and 20k rows on the PostgreSQL → PostgreSQL binary copy
+  that carries `jsonb` (its load method is checked), against the floors in
+  `apps/api/benchmarks/throughput_floors.json`, scaled to the runner by a CPU
+  calibration (never below 75% of a floor). It is report-only — not in the
+  Required PR gate — until it has five consecutive green runs. The other
+  floors (copy at 200k, MySQL → PostgreSQL) are checked by the dispatch
+  workflow's `check_floors` step.
 - 10M / 100M: the manual **Throughput benchmark** workflow
   (`.github/workflows/throughput-benchmark.yml`). A hosted runner fits 10M
   rows of this table on disk; 100M needs a self-hosted runner, and on the row

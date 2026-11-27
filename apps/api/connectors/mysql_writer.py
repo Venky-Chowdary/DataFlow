@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -658,26 +659,40 @@ def _mysql_materialize_mapped_batch(
 
 
 _SPLIT_SAFE_ENGINES = frozenset({"INNODB"})
+_ENGINE_CLAUSE = re.compile(r"\)\s*ENGINE\s*=\s*([A-Za-z0-9_]+)", re.I)
 
 
-def _split_salvage_safe(cur: Any, table_name: str) -> bool:
+def _split_salvage_safe(cur: Any, table_name: str, cache: dict[str, bool] | None = None) -> bool:
     """True when a failed multi-row INSERT into ``table_name`` leaves nothing behind.
 
     Only a transactional engine (InnoDB) rolls a failed statement back whole;
-    MyISAM / Aria / MEMORY keep the rows before the bad one. Unknown → False.
+    MyISAM / Aria / MEMORY keep the rows before the bad one. Read through the
+    session's own view (``SHOW CREATE TABLE``), so a temporary table shadowing
+    the permanent one is what is judged — and any temporary table counts as not
+    safe. Unknown → False. ``cache`` holds the answer per table for one run.
     """
+    if cache is not None and table_name in cache:
+        return cache[table_name]
+    safe = False
     try:
-        cur.execute(
-            "SELECT ENGINE FROM information_schema.TABLES "
-            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
-            (table_name,),
-        )
+        cur.execute("SHOW CREATE TABLE `" + str(table_name).replace("`", "``") + "`")
         row = cur.fetchone()
+        if isinstance(row, dict):
+            ddl = str(row.get("Create Table") or "")
+        else:
+            ddl = str(row[1]) if row and len(row) > 1 else ""
+        engine = _ENGINE_CLAUSE.search(ddl)
+        safe = (
+            "CREATE TEMPORARY TABLE" not in ddl.upper()
+            and engine is not None
+            and engine.group(1).upper() in _SPLIT_SAFE_ENGINES
+        )
     except Exception:  # noqa: BLE001 - an unknown engine salvages row by row
         logger.debug("table engine probe failed", exc_info=True)
-        return False
-    engine = (row[0] if row and not isinstance(row, dict) else (row or {}).get("ENGINE")) or ""
-    return str(engine).upper() in _SPLIT_SAFE_ENGINES
+        safe = False
+    if cache is not None:
+        cache[table_name] = safe
+    return safe
 
 
 @writer_restore_guard
@@ -1713,6 +1728,9 @@ def write_mapped_rows(
                 )
                 return ok
 
+            # Per run: is a split salvage safe for this table (engine probe once).
+            split_safe_cache: dict[str, bool] = {}
+
             def _land_dense_chunk(batch, chunk_idx, row_numbers):
                 nonlocal written, rows_skipped, rejected_details, transform_errors
                 nonlocal load_data_chunks, load_data_fallbacks
@@ -1889,7 +1907,7 @@ def write_mapped_rows(
                                 chunk_written += hi - lo
                                 return True
 
-                            if _split_salvage_safe(cur, table_name):
+                            if _split_salvage_safe(cur, table_name, split_safe_cache):
                                 # Split the failed chunk until the bad rows stand alone
                                 # (connectors.batch_salvage): good halves commit as
                                 # batches, bad rows take the per-row path above.
