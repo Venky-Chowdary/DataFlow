@@ -17,16 +17,21 @@ records of one workspace into counts and rates; ``GET /ops/validate-execute``
 serves it and the process counters ``dataflow_validate_execute_*_total`` are
 scraped at ``GET /metrics``.
 
-Outcome classes (the verdict that predicted the run is the separate Validate
-when linked, else Execute's own preflight):
+Outcome classes. The rule is explicit so it cannot bias the rate: a run is
+classified only when Execute ran its own preflight; the predicting verdict is
+then the linked Validate run when there is one, else that preflight.
 
+``unvalidated``   Execute ran no preflight, whatever the outcome
+``cancelled``     the run was cancelled (not counted for prediction)
 ``agreed_pass``   predicted pass, the write completed
 ``missed``        predicted pass, the write failed (a preflight miss)
 ``drift``         a linked Validate passed, Execute's own preflight refused
-``agreed_block``  predicted block, the run was refused before writing
-``over_block``    a linked Validate blocked, the run then completed
-``cancelled``     the run was cancelled (not counted for prediction)
-``unvalidated``   no verdict to compare (preflight skipped, nothing linked)
+``agreed_block``  predicted block, and the run did not complete
+``over_block``    predicted block (a linked Validate), the run then completed
+
+One record per job (deterministic id, so concurrent terminal writes cannot
+record it twice); a job that is resumed and reaches a new terminal outcome
+updates its record. Retention is per workspace (``MAX_PER_WORKSPACE``).
 """
 
 from __future__ import annotations
@@ -44,13 +49,18 @@ from services.value_serializer import json_default
 from services.workspace_filter import WorkspaceFilter
 
 logger = logging.getLogger(__name__)
-MAX_RECORDS = 5000
+MAX_PER_WORKSPACE = 2000
 _LOCK = threading.Lock()
 OUTCOME_CLASSES = (
     "agreed_pass", "missed", "drift", "agreed_block", "over_block", "cancelled", "unvalidated",
 )
-_COMPLETED = frozenset({"completed", "completed_with_quarantine", "success", "succeeded"})
 _CANCELLED = frozenset({"cancelled", "canceled"})
+
+
+def _completed(status: str) -> bool:
+    from services.job_status import COMPLETED_STATUSES
+
+    return status in COMPLETED_STATUSES
 
 
 def _path() -> Path:
@@ -92,31 +102,20 @@ def _verification(job: dict[str, Any]) -> str | None:
 
 
 def classify(validate_verdict: str | None, execute_preflight: str | None, status: str) -> tuple[str, str | None]:
-    """``(outcome_class, failed_at)`` for one run."""
+    """``(outcome_class, failed_at)`` for one run (see the module docstring)."""
     st = (status or "").strip().lower()
-    completed = st in _COMPLETED
-    failed_at: str | None = None
-    if not completed and st not in _CANCELLED:
-        failed_at = "preflight" if execute_preflight == "blocked" else (
-            "write" if execute_preflight == "passed" else "unknown"
-        )
     if st in _CANCELLED:
         return "cancelled", None
-    predicted = validate_verdict or (execute_preflight if execute_preflight in ("passed", "blocked") else None)
-    if predicted is None:
-        return "unvalidated", failed_at
+    completed = _completed(st)
+    if execute_preflight not in ("passed", "blocked"):
+        return "unvalidated", None if completed else "unknown"
+    failed_at = None if completed else ("preflight" if execute_preflight == "blocked" else "write")
+    predicted = validate_verdict if validate_verdict in ("passed", "blocked") else execute_preflight
     if predicted == "passed":
         if completed:
             return "agreed_pass", None
-        if validate_verdict == "passed" and failed_at == "preflight":
-            return "drift", failed_at
-        if failed_at == "write":
-            return "missed", failed_at
-        return "unvalidated", failed_at
-    # predicted == "blocked"
-    if completed:
-        return "over_block", None
-    return "agreed_block", failed_at
+        return ("drift" if failed_at == "preflight" else "missed"), failed_at
+    return ("over_block" if completed else "agreed_block"), failed_at
 
 
 def build_record(job_id: str, status: str, job: dict[str, Any]) -> dict[str, Any]:
@@ -154,39 +153,100 @@ def build_record(job_id: str, status: str, job: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _doc_id(job_id: str) -> str:
+    return f"validate_execute_runs:{job_id}"
+
+
+def _merge(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any] | None:
+    """A later terminal write for the same job: keep it only if the outcome changed
+    (a failed or cancelled job resumed to completion)."""
+    if (old.get("outcome"), old.get("execute_status")) == (new.get("outcome"), new.get("execute_status")):
+        return None
+    return {**new, "recorded_at": old.get("recorded_at") or new["recorded_at"], "updated_at": _now(),
+            "attempts": int(old.get("attempts") or 1) + 1}
+
+
 def record_run_outcome(job_id: str, status: str, job: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """Record a terminal run once; a later terminal write for the same job is ignored."""
+    """Record a terminal run; returns the stored record, or None when nothing changed."""
     if not job_id:
         return None
     if job is None:
         from services.mongodb_service import get_mongodb_service
 
         job = get_mongodb_service().get_job(job_id) or {}
-    record = build_record(job_id, status, job)
-    coll = _LOG.backend()
-    if coll is not None:
-        if _LOG.get(coll, record["job_id"]) is not None:
-            return None
-        _LOG.append(coll, json.loads(json.dumps(record, default=json_default)))
-        _LOG.trim(coll, MAX_RECORDS)
-    else:
-        path = _path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with _LOCK:
-            if any(r.get("job_id") == record["job_id"] for r in _read_file(path)):
-                return None
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, default=json_default) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            _trim_locked(path)
-    try:
-        from services.ops_metrics import record_validate_execute
+    record = {**build_record(job_id, status, job), "attempts": 1}
+    stored = _store(record)
+    if stored is not None:
+        try:
+            from services.ops_metrics import record_validate_execute
 
-        record_validate_execute(record["outcome"])
-    except Exception:  # noqa: BLE001 - a counter must not fail the transfer
-        logger.debug("validate/execute counter not updated", exc_info=True)
-    return record
+            record_validate_execute(stored["outcome"])
+        except Exception:  # noqa: BLE001 - a counter must not fail the transfer
+            logger.debug("validate/execute counter not updated", exc_info=True)
+    return stored
+
+
+def _store(record: dict[str, Any]) -> dict[str, Any] | None:
+    coll = _LOG.backend()
+    body = json.loads(json.dumps(record, default=json_default))
+    if coll is not None:
+        doc = _LOG._doc(body, doc_id=_doc_id(record["job_id"]))
+        doc["workspace"] = record["workspace_id"]
+        try:
+            coll.insert_one(doc)
+        except Exception as exc:  # noqa: BLE001 - only a duplicate id is expected here
+            if "duplicate" not in str(exc).lower() and "E11000" not in str(exc):
+                raise
+            return _LOG.update(coll, record["job_id"], lambda old: _merge(old, body))
+        _trim_workspace_mongo(coll, record["workspace_id"])
+        return body
+    path = _path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _LOCK:
+        rows = _read_file(path)
+        idx = next((i for i, r in enumerate(rows) if r.get("job_id") == record["job_id"]), None)
+        if idx is None:
+            rows.append(body)
+            stored: dict[str, Any] | None = body
+        else:
+            stored = _merge(rows[idx], body)
+            if stored is None:
+                return None
+            rows[idx] = stored
+        _write_file(path, _trim_workspaces(rows))
+    return stored
+
+
+def _trim_workspaces(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the newest MAX_PER_WORKSPACE records of each workspace, in order."""
+    seen: dict[str, int] = {}
+    keep: list[dict[str, Any]] = []
+    for row in reversed(rows):
+        ws = str(row.get("workspace_id") or "")
+        seen[ws] = seen.get(ws, 0) + 1
+        if seen[ws] <= MAX_PER_WORKSPACE:
+            keep.append(row)
+    keep.reverse()
+    return keep
+
+
+def _trim_workspace_mongo(coll: Any, workspace_id: str) -> None:
+    query = {"store": _LOG.name, "workspace": workspace_id}
+    if coll.count_documents(query) <= MAX_PER_WORKSPACE:
+        return
+    edge = list(coll.find(query).sort([("seq", -1), ("_id", -1)]).skip(MAX_PER_WORKSPACE).limit(1))
+    if edge:
+        coll.delete_many({**query, "seq": {"$lte": edge[0]["seq"]}})
+
+
+def _write_file(path: Path, rows: list[dict[str, Any]]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, default=json_default) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    tmp.replace(path)
 
 
 def _read_file(path: Path) -> list[dict[str, Any]]:
@@ -202,18 +262,10 @@ def _read_file(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _trim_locked(path: Path) -> None:
-    rows = path.read_text(encoding="utf-8").splitlines()
-    if len(rows) > MAX_RECORDS:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text("\n".join(rows[-MAX_RECORDS:]) + "\n", encoding="utf-8")
-        tmp.replace(path)
-
-
 def list_records(workspace_filter: WorkspaceFilter | None = None) -> list[dict[str, Any]]:
     coll = _LOG.backend()
     if coll is not None:
-        rows = _LOG.records(coll, limit=MAX_RECORDS)
+        rows = _LOG.records(coll)
     else:
         with _LOCK:
             rows = _read_file(_path())
