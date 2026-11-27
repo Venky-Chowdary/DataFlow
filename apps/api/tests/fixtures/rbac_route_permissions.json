@@ -332,6 +332,7 @@
   "POST /api/v1/ops/cdc-retention/probe": "job.run",
   "POST /api/v1/ops/source-ha/probe": "job.run",
   "POST /api/v1/preflight/explain": "connector.write",
+  "POST /api/v1/preflight/oracle-empty/sign": "job.plan",
   "POST /api/v1/preflight/preview-cells": "connector.write",
   "POST /api/v1/preflight/run": "job.plan",
   "POST /api/v1/preflight/schema-drift": "connector.write",
