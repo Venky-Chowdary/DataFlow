@@ -1328,15 +1328,24 @@ def _parse_sql_redo(sql_redo: str, *, op: str) -> dict[str, str]:
         chunks.extend(_split_sql_csv_aware(set_m.group(1)))
     if chunks:
         for chunk in chunks:
-            m = re.match(r'"?(\w+)"?\s*=\s*(.+)$', chunk.strip(), re.I | re.S)
+            m = re.match(r'(")?(\w+)"?\s*=\s*(.+)$', chunk.strip(), re.I | re.S)
             if not m:
                 continue
-            col = m.group(1).upper()
-            out[col] = _unquote_sql_literal(m.group(2).strip())
+            col = m.group(2).upper()
+            if col == "ROWID" and not m.group(1):
+                # LogMiner adds the row address, unquoted (``... and ROWID =
+                # 'AAAS...'``), to UPDATE/DELETE redo. It is not a column: as
+                # one it reached the buffer-off CDC path as a source column
+                # "added after capture started" and stopped the run (oracle-live
+                # CI, LOB and CSF tables). V$LOGMNR_CONTENTS.ROW_ID carries it.
+                continue
+            out[col] = _unquote_sql_literal(m.group(3).strip())
         if out:
             return out
     for m in _SET_RE.finditer(text):
         col = m.group(1).upper()
+        if col == "ROWID" and not m.group(0).startswith('"'):
+            continue  # the row address, not a column (see above)
         val = m.group(2) if m.group(2) is not None else m.group(3)
         out[col] = wire_cell(None) if val is None or str(val).upper() == "NULL" else str(val)
     if out:

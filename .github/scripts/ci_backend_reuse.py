@@ -27,6 +27,8 @@ BACKEND_CHECKS = (
     *(f"api-tests ({i}/6)" for i in range(1, 7)),
     "cdc-sqlserver (pymssql)",
     "cdc-sqlserver (pyodbc)",
+    "oracle-live",
+    "kafka-live",
     "no-config-transfer",
     "mysql-forced-pk",
     "mapping-evidence",

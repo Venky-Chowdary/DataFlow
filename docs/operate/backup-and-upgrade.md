@@ -421,6 +421,37 @@ Changed shapes:
   kept per route: workspace, both connectors, host, port, SID or service
   name, connection string, schema and table.
 
+#### Keyed risk approvals (Oracle '' gate round)
+
+**Every risk approval made before this release must be re-approved in
+Validate before its schedules resume.** Risk contracts are now signed with
+the deployment's key. A contract approved before this release carries an
+older signature that anyone could compute, and nothing recorded at the time
+can tell one the server signed from one an API caller wrote. So none of them
+counts any more. A run that relies on one stops with "re-approve this risk
+once"; a lossy column is refused, and an Oracle column approved as NULL-able
+is blocked again.
+
+How to see the list (rebuilt at every start of the API from stored
+schedules, plans and jobs):
+
+- the start log: `[!] N risk approval(s) made before this release must be
+  re-approved …`, naming the first few schedules, plans or jobs and their
+  routes;
+- `GET /api/v1/ops/risk-contract-upgrade-report`, for workspace admins:
+  every entry, with its kind, id, name, route, risk id and the original
+  approver;
+- a `risk_contract_reapprove` warning in Validate for that route.
+
+What to do: pause schedules, then for each listed route run Validate and
+approve the risk again (or send `risk_acceptance` again over MCP or the
+API), then resume. The new approval is keyed and needs nothing further.
+
+**Upgrade every replica before resuming schedules.** An older replica that
+is still running signs contracts the old way, and they are refused too.
+Drain or stop the old API and worker processes, or keep schedules paused,
+until every process runs this build.
+
 ## Not covered
 
 - Tested restore times or recovery objectives. No restore has been rehearsed

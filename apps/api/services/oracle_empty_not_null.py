@@ -1,0 +1,1693 @@
+"""Oracle stores ``''`` as NULL: a NOT NULL text column cannot take an empty string.
+
+Owner decision 4 (D210) writes ``''`` to Oracle as NULL. Into a NOT NULL
+column that is ORA-01400, and it used to surface only at Execute, after
+Validate had passed (oracle-live CI, ``test_postgresql_to_oracle_typed_preflight_on``).
+No value may change silently (docs/migration-rules.md), so Validate decides,
+the same way on every entry point (REST and Studio Validate, MCP, Execute):
+
+* the candidates are the text mappings into an Oracle destination whose column
+  will be NOT NULL: on create-new, a source column the source catalog proves
+  NOT NULL (the gate reads the catalog itself when its caller did not pass
+  it, and the source primary key with it); on an existing table, a
+  destination column the catalog proves NOT NULL. Each mapping is its own
+  candidate, keyed by (source, target);
+* the empty strings are counted exactly where that is possible: a SQL source
+  with no transform on the column is asked ``COUNT(*) WHERE col = ''``
+  (bounded by a statement timeout); otherwise the rows Execute will read are
+  walked (the fit scan's scope: incremental window, row filter, shape recipe,
+  stored upload, the batch Execute already holds), after the mapping's
+  transform, bounded by rows and time;
+* none, exactly: no gate. Some, or a count that could not be made exact (a
+  preview-only source, a scan that stopped, a read error): on a create-new
+  NOT NULL column the run is blocked, named in plain words ("could not rule
+  out empty strings"). A scan error never crashes Validate.
+
+On create-new there is one approvable option, "Create <col> as NULL-able;
+empty strings land as NULL", recorded as a signed Migration Risk Contract on
+the mapping (``empty_as_null_contract``; ``risk_acceptance`` with ``option``
+:data:`OPTION`), bound to its workspace, destination table and (source,
+target) pair. The table is then created with that column NULL-able, Gate-8
+reports the rows this run wrote as explained by the contract
+(:func:`explain_empty_as_null`), and the signed proof pack lists the
+contract. A key column (contract, destination or source primary key) is never
+approvable. An existing NOT NULL column is never altered: the gate blocks
+and suggests a DEFAULT on the column or a transform that writes a non-empty
+value.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from collections.abc import Iterable, Mapping
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+GATE_ID = "g3o_oracle_empty_not_null"
+OPTION = "oracle_empty_as_null"
+RISK_KIND = "oracle_empty_string_as_null"
+CONTRACT_KEY = "empty_as_null_contract"
+#: Bounds of the walk, like the other population walks Validate runs.
+SCAN_MAX_ROWS = 1_000_000
+SCAN_MAX_SECONDS = 60.0
+#: Statement timeout of the SQL ``COUNT(*) WHERE col = ''`` push-down.
+PUSHDOWN_TIMEOUT_SECONDS = 30.0
+_RUN_SCOPES = {"table_written_by_run", "run_keys"}
+
+
+def is_oracle(db_type: str | None) -> bool:
+    return "oracle" in str(db_type or "").strip().lower()
+
+
+def _lookup(mapping: Mapping[str, Any] | None, name: str) -> Any:
+    if not mapping or not name:
+        return None
+    if name in mapping:
+        return mapping[name]
+    lower = name.lower()
+    return next((v for k, v in mapping.items() if str(k).lower() == lower), None)
+
+
+def _bare(table: Any) -> str:
+    return str(table or "").strip().rsplit(".", 1)[-1].strip().strip('"').lower()
+
+
+def pair_key(source: str, target: str) -> str:
+    """One mapping's bookkeeping key: the same source may feed two targets."""
+    return f"{source}->{target}"
+
+
+def _is_text(mapping: Mapping[str, Any], column_types: Mapping[str, str] | None) -> bool:
+    from services.type_system import normalize_logical_type
+
+    declared = str(mapping.get("target_type") or "").strip()
+    if not declared:
+        declared = str(_lookup(column_types, str(mapping.get("source") or "")) or "")
+    return normalize_logical_type(declared) in {"string", "text"} if declared else False
+
+
+#: Logical types that provably cannot be ``''`` (a number, a date or time, a
+#: boolean, a uuid). Everything else (an enum, a domain over text, citext,
+#: name, bpchar, tsvector, sql_variant, MySQL ENUM/SET, json, user-defined or
+#: unknown types) may hold ``''`` and is checked.
+NEVER_EMPTY_LOGICAL_TYPES = frozenset({
+    "integer", "decimal", "float", "boolean", "date", "datetime", "time", "interval", "uuid",
+})
+
+
+def _source_can_hold_text(source_type: Any) -> bool:
+    if not str(source_type or "").strip():
+        return True
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(str(source_type)) not in NEVER_EMPTY_LOGICAL_TYPES
+
+
+def _no_transform(transform: str) -> bool:
+    return not transform or transform.strip().lower() in {"none", "identity"}
+
+
+def current_workspace() -> str:
+    try:
+        from services.transform_engine import _current_workspace
+
+        return str(_current_workspace() or "")
+    except Exception:  # noqa: BLE001 - no bound workspace is "unknown", never a refusal
+        return ""
+
+
+def candidates(
+    *,
+    destination_db_type: str,
+    mappings: Iterable[Mapping[str, Any]] | None,
+    column_nullability: Mapping[str, bool] | None,
+    destination_table_exists: bool | None,
+    destination_column_nullability: Mapping[str, bool] | None,
+    column_types: Mapping[str, str] | None = None,
+    key_columns: Iterable[str] = (),
+    native_source_types: bool = False,
+) -> list[dict[str, Any]]:
+    """Text mappings whose Oracle column will be NOT NULL, with ``kind`` and ``approvable``.
+
+    ``native_source_types``: ``column_types`` are a SQL catalog's own types, so
+    a number, date, boolean or uuid column is skipped (it can never be ``''``).
+    Inferred types (files, documents) are never trusted for that: a column
+    inferred as a number can still hold an empty cell.
+    """
+    if not is_oracle(destination_db_type):
+        return []
+    keys = {str(k).strip().lower() for k in key_columns or () if str(k).strip()}
+    out: list[dict[str, Any]] = []
+    for m in mappings or []:
+        if not isinstance(m, Mapping):
+            continue
+        source, target = str(m.get("source") or ""), str(m.get("target") or "")
+        if not source or not target or not _is_text(m, column_types):
+            continue
+        if native_source_types and not _source_can_hold_text(_lookup(column_types, source)):
+            continue  # a uuid, json, array, date or number is never ''
+        if destination_table_exists is False:
+            if _lookup(column_nullability, source) is not False:
+                continue
+            kind = "create_new"
+        elif destination_table_exists and _lookup(destination_column_nullability, target) is False:
+            kind = "existing"
+        else:
+            continue
+        out.append({
+            "key": pair_key(source, target),
+            "source": source,
+            "target": target,
+            "transform": str(m.get("transform") or ""),
+            "kind": kind,
+            # A key column stays NOT NULL whatever is approved.
+            "approvable": kind == "create_new"
+            and source.lower() not in keys and target.lower() not in keys,
+        })
+    return out
+
+
+def _written(cell: Any, transform: str) -> Any:
+    if _no_transform(transform):
+        return cell
+    from services.transform_engine import apply_transform
+    from services.value_serializer import is_reader_null_cell, wire_cell_text
+
+    if is_reader_null_cell(cell):
+        return None
+    value, err = apply_transform(wire_cell_text(cell), transform)
+    return None if err is not None else value
+
+
+def count_empty_strings(
+    rows: Iterable[Mapping[str, Any]] | None,
+    targets: list[dict[str, Any]],
+    *,
+    max_rows: int | None = None,
+    max_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Empty strings each target will be sent, over at most ``max_rows`` rows.
+
+    A read error mid-walk (the walk is lazy) ends the scan with ``truncated``
+    ``"error"``: Validate reports "could not check", it never crashes.
+    """
+    counts = {t["key"]: 0 for t in targets}
+    scanned = 0
+    truncated = ""
+    error = ""
+    max_rows = SCAN_MAX_ROWS if max_rows is None else max_rows
+    deadline = time.monotonic() + (SCAN_MAX_SECONDS if max_seconds is None else max_seconds)
+    try:
+        for row in rows or ():
+            if scanned >= max_rows:
+                truncated = "rows"
+                break
+            if scanned % 1000 == 0 and time.monotonic() > deadline:
+                truncated = "time"
+                break
+            scanned += 1
+            for t in targets:
+                value = _written(_lookup(row, t["source"]), t["transform"])
+                if isinstance(value, str) and value == "":
+                    counts[t["key"]] += 1
+    except Exception as exc:  # noqa: BLE001 - an unreadable source is "could not check"
+        logger.warning("Oracle empty-string scan stopped: %s", exc, exc_info=exc)
+        truncated, error = "error", f"{type(exc).__name__}: {str(exc)[:200]}"
+    return {"counts": counts, "rows_scanned": scanned, "truncated": truncated, "error": error}
+
+
+def destination_binding(*, connector_id: Any = "", config: Any = None, table: Any = "") -> dict[str, str]:
+    """What an approval or a Check-now request is bound to: connector, schema, table.
+
+    ``connector`` is the saved destination connector's id, or ``host:port/database``
+    for an inline one; ``schema`` the configured (or table-qualified) schema;
+    ``table`` the bare table name. All lower case.
+    """
+    cfg = config if isinstance(config, Mapping) else {}
+    conn = str(connector_id or cfg.get("connector_id") or "").strip()
+    if not conn and (cfg.get("host") or cfg.get("database")):
+        conn = f"{cfg.get('host') or ''}:{cfg.get('port') or ''}/{cfg.get('database') or ''}"
+    raw_table = str(table or "").strip()
+    schema = str(cfg.get("schema") or "").strip()
+    if "." in raw_table and not schema:
+        schema = raw_table.rsplit(".", 1)[0]
+    return {"connector": conn.lower(), "schema": schema.strip('"').lower(), "table": _bare(raw_table)}
+
+
+def binding_matches(bound: Any, here: Mapping[str, str] | None) -> bool:
+    """Same connector and table; same schema when both name one."""
+    if here is None:
+        return True
+    if not isinstance(bound, Mapping):
+        return False
+    if str(bound.get("table") or "") != here["table"] or str(bound.get("connector") or "") != here["connector"]:
+        return False
+    a, b = str(bound.get("schema") or ""), here["schema"]
+    return not (a and b and a != b)
+
+
+def contract_refusal(
+    mapping: Mapping[str, Any] | None,
+    *,
+    table: str = "",
+    workspace: str | None = None,
+    destination: Mapping[str, str] | None = None,
+) -> str:
+    """Why the mapping's empty-as-NULL contract is not an approval here ("" when it is, or none)."""
+    raw = (mapping or {}).get(CONTRACT_KEY) if isinstance(mapping, Mapping) else None
+    if not isinstance(raw, dict):
+        return ""
+    from services.migration_risk_contract import REAPPROVE_MESSAGE, verify_risk_contract
+
+    if str(raw.get("loss_classification") or "") != RISK_KIND or not verify_risk_contract(raw):
+        return REAPPROVE_MESSAGE
+    source, target = str(mapping.get("source") or ""), str(mapping.get("target") or "")
+    if str(raw.get("column") or "").lower() != source.lower() \
+            or str(raw.get("target") or "").lower() != (target or source).lower():
+        return "the approval was signed for another column; re-approve this risk"
+    if table and str(raw.get("table") or "") and _bare(raw.get("table")) != _bare(table):
+        return "the approval was signed for another table; re-approve this risk"
+    meta = raw.get("metadata") or {}
+    here = current_workspace() if workspace is None else str(workspace or "")
+    if str(meta.get("workspace_id") or "") != here:
+        return "the approval was signed in another workspace; re-approve this risk"
+    bound = meta.get("destination")
+    if destination is not None and not binding_matches(bound, destination):
+        return "the approval was signed for another destination; re-approve this risk"
+    return ""
+
+
+def approved_contract(
+    mapping: Mapping[str, Any] | None,
+    *,
+    table: str = "",
+    workspace: str | None = None,
+    destination: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """The mapping's server-signed, intact empty-as-NULL contract, or ``None``.
+
+    The contract is bound to what it was signed for: the (source, target)
+    pair, the destination (connector, schema, table) and the workspace,
+    exactly (an empty workspace binds only where there is none). One pasted
+    onto another column, signed for another table or connector, carried into
+    another workspace, or not signed by this server is not an approval.
+    """
+    if contract_refusal(mapping, table=table, workspace=workspace, destination=destination):
+        return None
+    raw = (mapping or {}).get(CONTRACT_KEY) if isinstance(mapping, Mapping) else None
+    return raw if isinstance(raw, dict) else None
+
+
+def written_value_is_never_empty(transform: str) -> bool:
+    """True when the mapping's transform can never send ``''``.
+
+    ``default:<value>`` writes ``<value>`` for an empty, blank or NULL cell and
+    leaves every other cell (non-blank text) unchanged, so with a non-empty
+    ``<value>`` the written value is never ``''`` (services.transform_engine).
+    """
+    t = str(transform or "").strip()
+    return t.lower().startswith("default:") and t.split(":", 1)[1] != ""
+
+
+#: Engines that bill a full scan: Validate never scans them unasked.
+BILLED_SCAN_ENGINES = frozenset({"snowflake", "bigquery", "databricks", "clickhouse", "trino", "presto"})
+#: SQLAlchemy dialects whose "exactly ''" predicate is proven (see _empty_predicate).
+_EXACT_DIALECTS = frozenset({"postgresql", "mysql", "mariadb", "mssql", "sqlite", "duckdb"})
+#: One total time budget per check, across every column (existence first,
+#: then counts, then the walk); what is not answered in it is "could not check".
+VALIDATE_BUDGET_SECONDS = 60.0
+#: "Check this column now": the stated total budget the operator asked for.
+CHECK_NOW_SECONDS = 300.0
+#: A "Check this column now" request is honoured for this long, once asked.
+CHECK_NOW_VALID_SECONDS = 3600.0
+CHECK_OPTION = "oracle_empty_check_now"
+CHECK_KEY = "empty_check_now"
+DEFAULT_TRANSFORM_HINT = "default:<value>"
+
+
+def _measured(t: Mapping[str, Any]) -> str:
+    how = t.get("how") or ""
+    if how == "pushdown":
+        return "counted by the source database"
+    if how == "transform":
+        return "its transform never writes an empty string"
+    if how in {"population", "batch"}:
+        return "every source row Execute will read"
+    return "preview rows only"
+
+
+def _unknown_why(t: Mapping[str, Any]) -> str:
+    why = str(t.get("why") or "")
+    rows = int(t.get("rows_scanned") or 0)
+    if why == "preview":
+        return "only a preview of the source could be read"
+    if why == "billed":
+        return (f"checking it scans the whole table, which {t.get('engine') or 'this engine'} bills; "
+                "Datawrap does not do that unasked")
+    if why == "rows":
+        return f"the scan stopped after {rows:,} rows"
+    if why == "time":
+        return f"the scan stopped after {t.get('seconds') or SCAN_MAX_SECONDS:g}s ({rows:,} rows)"
+    if why == "catalog":
+        return f"the source catalog could not be read ({t.get('error') or 'no detail'})"
+    if why == "timeout":
+        return f"the source did not answer within {t.get('seconds') or PUSHDOWN_TIMEOUT_SECONDS:g}s"
+    if why == "budget":
+        return (f"this check's {t.get('seconds') or VALIDATE_BUDGET_SECONDS:g}s budget ran out before "
+                "this column was reached")
+    return f"the source could not be read ({t.get('error') or why or 'unknown error'})"
+
+
+def _count_words(t: Mapping[str, Any]) -> str:
+    if int(t.get("count") or 0) > 0:
+        return f"{t['count']} empty string(s)"
+    return "at least one empty string (the count did not finish in time)"
+
+
+def _actions(blocked: list[dict[str, Any]], *, destination: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+    """At least one action that works on this source, for every blocked column.
+
+    The approval and Check-now actions carry the destination they will be
+    bound to (``risk_acceptance.destination``): send them back as given.
+    """
+    actions: list[dict[str, Any]] = []
+    bound = {"destination": dict(destination)} if destination is not None else {}
+    approvable = [b for b in blocked if b["approvable"]]
+    if approvable:
+        actions.append({
+            "id": OPTION, "kind": OPTION,
+            "label": "; ".join(f"Create {b['target']} as NULL-able; empty strings land as NULL"
+                               for b in approvable),
+            "risk_acceptance": {"option": OPTION, "columns": [b["target"] for b in approvable],
+                                "approved_by": "<who approves>", "reason": "<why>", **bound},
+        })
+    unknown = [b for b in blocked if not b.get("found") and b.get("why") != "catalog"]
+    if unknown:
+        billed = any(b.get("why") == "billed" for b in unknown)
+        actions.append({
+            "id": CHECK_OPTION, "kind": CHECK_OPTION,
+            "label": "Check " + ", ".join(b["source"] for b in unknown) + " now: Datawrap reads the "
+            f"whole column, within a total of {CHECK_NOW_SECONDS / 60:g} minutes for this check"
+            + (" (the warehouse bills the scan)" if billed else ""),
+            "budget_seconds": CHECK_NOW_SECONDS,
+            "risk_acceptance": {"option": CHECK_OPTION, "columns": [b["target"] for b in unknown],
+                                "approved_by": "<who asks>", **bound},
+        })
+    catalog = [b for b in blocked if b.get("why") == "catalog"]
+    if catalog:
+        actions.append({
+            "id": "oracle_fix_connection", "kind": "oracle_fix_connection",
+            "label": "Fix the source connection, then validate again: " + str(catalog[0].get("error") or ""),
+        })
+    for b in blocked:
+        existing = str(b.get("transform") or "")
+        if _no_transform(existing) or existing.lower().startswith("default:"):
+            actions.append({
+                "id": "oracle_default_transform", "kind": "oracle_default_transform",
+                "label": (f"Map the transform {DEFAULT_TRANSFORM_HINT} on {b['source']}: empty and blank "
+                          f"values are written as <value>, every other value is unchanged"),
+                "column": b["target"], "transform": DEFAULT_TRANSFORM_HINT,
+            })
+        else:
+            # Transforms do not chain: default:<value> would replace this one.
+            actions.append({
+                "id": "oracle_default_transform", "kind": "oracle_default_transform",
+                "label": (f"{b['source']} already maps the transform {existing}, and Datawrap applies one "
+                          f"transform per column: {DEFAULT_TRANSFORM_HINT} would stop {existing}. Change "
+                          "the transform in Map first if a default is what you want"),
+                "column": b["target"], "transform": DEFAULT_TRANSFORM_HINT, "existing_transform": existing,
+            })
+        if b.get("found"):
+            actions.append({
+                "id": "oracle_fix_source_values", "kind": "oracle_fix_source_values",
+                "label": f"Replace the empty values of {b['source']} in the source, then validate again",
+                "column": b["target"],
+            })
+    return actions
+
+
+def _fix_text(action: Mapping[str, Any]) -> str:
+    if action.get("risk_acceptance"):
+        return f"{action['label']} (risk_acceptance {json.dumps(action['risk_acceptance'])})"
+    return str(action["label"])
+
+
+def _reuse_notice(
+    reused: list[dict[str, Any]], *, destination: Mapping[str, str] | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    """The plain words and the action for "Check now" results this run reuses.
+
+    A billed warehouse's Check now result is reused for CHECK_REUSE_SECONDS so
+    a schedule does not re-bill the scan; the gate says so, with when the
+    column was checked and how to check it again. While a column's Check now
+    is cooling down (CHECK_NOW_COOLDOWN_SECONDS) the action says when it can
+    be asked again instead of offering a request that would be refused.
+    """
+    if not reused:
+        return "", None
+    parts = []
+    for t in reused:
+        seen = _count_words(t) if t.get("found") else "no empty strings"
+        billed = t["reused_check"].get("billed", True)
+        parts.append(f"{t['target']} was checked for empty strings{' by Check now' if billed else ''} at "
+                     f"{t['reused_check']['at']} ({seen}); that result is being reused until "
+                     f"{t['reused_check']['until']}" + (", so the warehouse does not bill the scan again"
+                                                       if billed else ", because this check stopped first"))
+    billed_any = any(t["reused_check"].get("billed", True) for t in reused)
+    bound = dict(destination) if destination is not None else None
+    cooling = {t["target"]: _check_now_cooldown({"workspace_id": current_workspace(), "source": t["source"],
+                                                  "target": t["target"], "destination": bound})
+               for t in reused}
+    ready = [t for t in reused if not cooling[t["target"]]]
+    if not ready:
+        later = max(cooling.values())
+        again = {
+            "id": "oracle_empty_check_again_later", "kind": "oracle_empty_check_again_later",
+            "label": "Check " + ", ".join(t["source"] for t in reused) + f" again after the {CHECK_NOW_COOLDOWN_SECONDS // 60}"
+            f"-minute pause that follows the Check now asked at {later} (a warehouse bills each scan)",
+        }
+        return "; ".join(parts) + ". " + again["label"] + ".", again
+    again = {
+        "id": "oracle_empty_check_again", "kind": CHECK_OPTION,
+        "label": "Check " + ", ".join(t["source"] for t in ready) + " again now: Datawrap reads the "
+        f"whole column, within a total of {CHECK_NOW_SECONDS / 60:g} minutes for this check"
+        + (" (the warehouse bills the scan)" if billed_any else ""),
+        "budget_seconds": CHECK_NOW_SECONDS,
+        "risk_acceptance": {"option": CHECK_OPTION, "columns": [t["target"] for t in ready],
+                            "approved_by": "<who asks>", **({"destination": bound} if bound else {})},
+    }
+    return "; ".join(parts) + ". To check again: " + _fix_text(again) + ".", again
+
+
+def build_gate(
+    targets: list[dict[str, Any]],
+    *,
+    mappings: Iterable[Mapping[str, Any]] | None,
+    table: str = "",
+    workspace: str | None = None,
+    destination: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """``(gate, blockers)`` from targets carrying ``count``, ``found``, ``exact`` and ``how``.
+
+    No gate when every column is an exact zero. A column with empty strings,
+    or one that could not be checked, is blocked unless an approved contract
+    covers it; every block names the column, what is known, and actions that
+    work on this source.
+    """
+    by_pair = {
+        pair_key(str(m.get("source") or ""), str(m.get("target") or "")): m
+        for m in mappings or [] if isinstance(m, Mapping)
+    }
+    blocked, approved = [], []
+    for t in targets:
+        t["found"] = bool(t.get("found")) or int(t.get("count") or 0) > 0
+        if not t["found"] and t.get("exact"):
+            continue
+        contract = (
+            approved_contract(by_pair.get(t["key"]), table=table, workspace=workspace, destination=destination)
+            if t["approvable"] else None
+        )
+        if not contract and (why := contract_refusal(by_pair.get(t["key"]), table=table, workspace=workspace,
+                                                     destination=destination)):
+            t["contract_refused"] = why
+        if contract:
+            approved.append({**t, "risk_id": contract.get("risk_id"),
+                             "approved_by": contract.get("approved_by")})
+        else:
+            blocked.append(t)
+    reused = [t for t in targets if t.get("reused_check")]
+    if not blocked and not approved and not reused:
+        return None, []
+    notice, again = _reuse_notice(reused, destination=destination)
+    details: dict[str, Any] = {"columns": blocked, "approved": approved, "option": OPTION}
+    if reused:
+        details["reused"] = reused
+    if not blocked:
+        message = "Oracle stores '' as NULL." + "".join(
+            f" {a['target']}: {_count_words(a) if a['found'] else 'any empty strings'} from "
+            f"{a['source']} land as NULL, created NULL-able under signed Risk Contract "
+            f"{a['risk_id']}." for a in approved) + (f" {notice}" if notice else "")
+        if again:
+            details["suggested_actions"] = [again]
+            details["recommended_fix"] = _fix_text(again)
+        # A reused result is stated, never silent: the gate warns (it does not block).
+        return {"id": GATE_ID, "status": "warn" if reused else "pass", "duration_ms": 0,
+                "details": details, "message": message}, []
+    actions = _actions(blocked, destination=destination) + ([again] if again else [])
+
+    def _part(b: Mapping[str, Any]) -> str:
+        what = "existing NOT NULL column" if b["kind"] == "existing" else (
+            "key column" if not b["approvable"] else "NOT NULL from the source")
+        refused = f" (its NULL-able approval is not honoured: {b['contract_refused']})" \
+            if b.get("contract_refused") else ""
+        if b["found"]:
+            return (f"{b['target']} ({what}) would receive {_count_words(b)} from {b['source']} "
+                    f"({_measured(b)}){refused}")
+        return (f"{b['target']} ({what}): Datawrap could not rule out empty strings in "
+                f"{b['source']}, because {_unknown_why(b)}{refused}")
+
+    message = (
+        "Oracle stores '' as NULL, so a NOT NULL column refuses it (ORA-01400): "
+        + "; ".join(_part(b) for b in blocked) + ". "
+        + "Choose one of the actions listed; an existing column is never altered."
+        + (f" {notice}" if notice else "")
+    )
+    details["recommended_fix"] = "; or ".join(_fix_text(a) for a in actions)
+    # On the gate too: Studio reads one place for a warn and a block (round 5).
+    details["suggested_actions"] = actions
+    gate = {"id": GATE_ID, "status": "block", "message": message, "duration_ms": 0, "details": details}
+    return gate, [{"id": GATE_ID, "message": message, "details": details, "suggested_actions": actions}]
+
+
+def _empty_predicate(column: Any, dialect: str, col_type: Any = None) -> Any:
+    """``column`` holds exactly the empty string, as the source's reader returns it.
+
+    Each spelling is proven against the engine (``col = ''`` keeps an index
+    usable; the length term removes what the engine's ``=`` also matches):
+
+    * PostgreSQL: ``character(n)`` is blank-padded and ``=`` ignores the
+      padding (https://www.postgresql.org/docs/current/datatype-character.html),
+      so ``''::char(5) = ''`` is true while the reader returns five spaces;
+      ``octet_length`` counts the padding (5). Checked on PostgreSQL 16.
+    * MySQL / MariaDB: PAD SPACE collations compare ``'  ' = ''`` as true
+      (https://dev.mysql.com/doc/refman/8.4/en/char.html); ``CHAR_LENGTH``
+      keeps a VARCHAR's trailing spaces (2) and a CHAR's are stripped on
+      read, as the reader returns them. Checked on MySQL 8.0.
+    * SQL Server: ``=`` ignores trailing blanks (ANSI padding, KB 316626);
+      ``DATALENGTH`` counts them
+      (https://learn.microsoft.com/en-us/sql/t-sql/functions/datalength-transact-sql).
+    * SQLite, DuckDB: ``=`` compares exactly.
+    * PostgreSQL enum (with a ``''`` label) and tsvector: ``=`` compares the
+      label / the lexemes exactly and ``octet_length`` does not apply to them,
+      so ``col = ''`` alone (checked on PostgreSQL 16).
+    """
+    import sqlalchemy as sa
+
+    d = (dialect or "").lower()
+    if d == "postgresql":
+        from sqlalchemy.dialects import postgresql as pg
+
+        if isinstance(col_type, (pg.ENUM, pg.TSVECTOR)):
+            return column == ""
+        return sa.and_(column == "", sa.func.octet_length(column) == 0)
+    if d in {"mysql", "mariadb"}:
+        return sa.and_(column == "", sa.func.char_length(column) == 0)
+    if d == "mssql":
+        return sa.and_(column == "", sa.func.datalength(column) == 0)
+    return column == ""
+
+
+def provably_never_empty(col_type: Any) -> bool:
+    """A reflected column type that can never hold ``''``: a number, date or time, boolean, uuid.
+
+    Everything else is asked or walked: a PostgreSQL enum accepts the label
+    ``''``, ``''::tsvector`` reads back as ``''``, a SQL Server sql_variant, a
+    MySQL ENUM/SET, citext, name, bpchar, json and user-defined or unknown
+    types can all hold it.
+    """
+    import sqlalchemy as sa
+
+    never = [sa.Integer, sa.Numeric, sa.Date, sa.DateTime, sa.Time, sa.Interval, sa.Boolean]
+    if hasattr(sa, "Uuid"):
+        never.append(sa.Uuid)
+    try:
+        from sqlalchemy.dialects.postgresql import UUID as PgUUID
+
+        never.append(PgUUID)
+    except ImportError:  # pragma: no cover
+        pass
+    return isinstance(col_type, tuple(never))
+
+
+def catalog_rules_out_empty(col_type: Any, dialect: str, *, mariadb: bool = False) -> str:
+    """Why the source catalog proves ``col_type`` never reads as ``''``, or ``""`` (it may).
+
+    Read from the catalog, without scanning a row, so a large table is not
+    walked for a column that cannot hold text:
+
+    * a number, date or time, boolean, uuid (:func:`provably_never_empty`);
+    * PostgreSQL: an enum whose labels do not include ``''`` (with that label
+      it is checked); json/jsonb (Execute reads the JSON text, at least
+      ``""``; ``''`` is not JSON); an array (read as ``[]`` at least);
+      inet/cidr/macaddr (``''`` is not valid input);
+    * MySQL (not MariaDB, whose JSON is LONGTEXT): JSON.
+
+    Never by type: SQLite (a declared type stores ``''`` in any column unless
+    the table is STRICT), a MySQL ENUM (non-strict mode stores ``''`` for an
+    invalid value) or SET, tsvector, xml, bit varying, hstore, bytea, citext,
+    text, char and domains over them.
+    """
+    import sqlalchemy as sa
+
+    d = (dialect or "").lower()
+    if d == "sqlite":
+        return ""
+    if provably_never_empty(col_type):
+        return f"a {col_type} column cannot hold text"
+    if d == "postgresql":
+        from sqlalchemy.dialects import postgresql as pg
+
+        if isinstance(col_type, pg.ENUM):
+            labels = [str(x) for x in getattr(col_type, "enums", None) or []]
+            if labels and "" not in labels:
+                return f"an enum whose labels ({', '.join(labels[:8])}) do not include ''"
+            return ""
+        if isinstance(col_type, (sa.JSON, sa.ARRAY, pg.INET, pg.CIDR, pg.MACADDR)):
+            return f"a {col_type} column never reads as ''"
+    if d == "mysql" and not mariadb and isinstance(col_type, sa.JSON):
+        return "a JSON column never reads as ''"
+    return ""
+
+
+def oracle_source_never_empty(col_type: Any) -> bool:
+    """An Oracle source column that cannot be read as ``''``.
+
+    A zero-length character value is NULL in Oracle, so VARCHAR2/CHAR/NVARCHAR2
+    never read as ``''``. A LOB is different: ``EMPTY_CLOB()`` is an empty LOB,
+    not NULL (Oracle SQL Reference, Nulls; DBMS_LOB), and the driver reads it
+    as ``''``, so CLOB/NCLOB columns are walked.
+    """
+    import sqlalchemy as sa
+
+    return not isinstance(col_type, (sa.Text, sa.CLOB, sa.types.NullType))
+
+
+def sql_empty_probe(
+    *,
+    source_connector_id: str,
+    source_config: Mapping[str, Any] | None,
+    source_table: str,
+    column: str,
+    timeout_seconds: float = PUSHDOWN_TIMEOUT_SECONDS,
+    check_now: bool = False,
+    count: bool = False,
+) -> dict[str, Any] | None:
+    """Whether ``column`` holds an exactly-empty string, asked of the source, bounded.
+
+    ``count=False``: ``SELECT 1 ... LIMIT 1`` (index-friendly, stops at the first
+    hit) answers zero or found. ``count=True``: the count (``None`` when it ran
+    out of time: "at least one"). Returns ``None`` when the source cannot
+    answer exactly and bounded (not SQL, an engine whose predicate is not
+    proven, no server-side timeout in force, a billed engine not asked, a type
+    the predicate does not apply to): the caller then walks or reports.
+    """
+    try:
+        import sqlalchemy as sa
+
+        from connectors.generic_sql import _engine
+        from connectors.sql_identifiers import split_qualified_table
+        from services.code_crosswalk import _normalize_source_cfg
+        from services.null_marker_probe import statement_timeout, timed_out
+        from services.procedure_source import is_callable_source
+        from services.source_duplicate_probe import is_sqlish_source
+
+        if is_callable_source(source_config) or not str(source_table or "").strip():
+            return None
+        cfg, db_type = _normalize_source_cfg(source_connector_id, source_config)
+        if not cfg or cfg.get("source_query") or cfg.get("query"):
+            return None
+        if not is_sqlish_source(db_type) or (db_type in BILLED_SCAN_ENGINES and not check_now):
+            return None
+        engine = _engine(dict(cfg))
+        dialect = str(getattr(engine.dialect, "name", "") or "")
+        schema, name = split_qualified_table(source_table, (cfg.get("schema") or "").strip() or None)
+        with engine.connect() as conn:
+            reflected = {str(c["name"]).lower(): c for c in sa.inspect(conn).get_columns(name, schema=schema)}
+            col = reflected.get(column.lower())
+            if col is None:
+                return None
+            note = catalog_rules_out_empty(col.get("type"), dialect,
+                                           mariadb=bool(getattr(engine.dialect, "is_mariadb", False)))
+            if note:
+                return {"state": "zero", "count": 0, "note": note}
+            if is_oracle(db_type) or dialect == "oracle":
+                return {"state": "zero", "count": 0} if oracle_source_never_empty(col.get("type")) else None
+            if dialect not in _EXACT_DIALECTS:
+                return None
+            tbl = sa.table(name, sa.column(str(col["name"])), schema=schema or None)
+            pred = _empty_predicate(tbl.c[str(col["name"])], dialect, col.get("type"))
+            family = {"mssql": "sqlserver"}.get(dialect, dialect)
+            with statement_timeout(conn, family, max(0.001, timeout_seconds)) as enforced:
+                if not enforced:
+                    return None
+                try:
+                    if not count:
+                        hit = conn.execute(sa.select(sa.literal(1)).select_from(tbl).where(pred).limit(1)).first()
+                        return {"state": "found", "count": None} if hit is not None else {"state": "zero", "count": 0}
+                    n = conn.execute(sa.select(sa.func.count()).select_from(tbl).where(pred)).scalar()
+                    return {"state": "found", "count": int(n or 0)} if n else {"state": "zero", "count": 0}
+                except Exception as exc:  # noqa: BLE001 - a timeout is reported, not raised
+                    if timed_out(exc):
+                        return ({"state": "found", "count": None} if count
+                                else {"state": "unknown", "why": "timeout", "seconds": timeout_seconds})
+                    raise
+    except Exception as exc:  # noqa: BLE001 - no exact answer: the walk decides
+        logger.info("Oracle empty-string push-down not used for %s.%s: %s", source_table, column, exc)
+        return None
+
+
+def measure(
+    targets: list[dict[str, Any]],
+    *,
+    population_rows: Any = None,
+    probe: Any = None,
+    whole_scope: bool = False,
+    walk: Any = None,
+    sample_rows: list[dict[str, Any]] | None = None,
+    walk_allowed: bool = True,
+    engine: str = "",
+    check_now: Iterable[str] = (),
+    budget_seconds: float | None = None,
+) -> list[dict[str, Any]]:
+    """Give each target ``count``, ``found``, ``exact`` and ``how`` (``why`` when not exact).
+
+    One total budget for the whole check (``VALIDATE_BUDGET_SECONDS``, or the
+    stated ``CHECK_NOW_SECONDS`` when the operator asked), spent in this order:
+
+    1. the columns the operator asked to check now, sharing the whole budget
+       (and the walk, when one of them needs it);
+    2. the other existence questions, the columns the preview already shows
+       empty first, each given an equal share of what is left (one more share
+       is kept for the walk when one is due); what a column does not use rolls
+       forward to the next, so one slow column cannot starve the rest;
+    3. the walk of what no question answered;
+    4. the counts of the columns found (a found column blocks whether or not
+       its count finishes).
+
+    What the budget does not reach is "could not check" (``why`` ``budget``).
+    """
+    out = [dict(t) for t in targets]
+    asked = {str(c).lower() for c in check_now}
+
+    def requested(t: Mapping[str, Any]) -> bool:
+        return t["key"].lower() in asked or t["target"].lower() in asked
+
+    long_scan = any(requested(t) for t in out)
+    budget = budget_seconds if budget_seconds is not None else (
+        CHECK_NOW_SECONDS if long_scan else VALIDATE_BUDGET_SECONDS)
+    deadline = time.monotonic() + budget
+
+    def remaining() -> float:
+        return deadline - time.monotonic()
+
+    def out_of_budget(t: dict[str, Any]) -> None:
+        t.update(count=0, found=False, exact=False, how="pushdown", why="budget", seconds=budget)
+
+    preview_empty = {
+        str(k) for r in sample_rows or [] if isinstance(r, Mapping)
+        for k, v in r.items() if isinstance(v, str) and v == ""
+    }
+    pending: list[dict[str, Any]] = []
+    asking: list[dict[str, Any]] = []
+    for t in out:
+        if t.get("why") == "catalog":
+            continue
+        if written_value_is_never_empty(t["transform"]):
+            t.update(count=0, found=False, exact=True, how="transform")
+        elif isinstance(population_rows, (list, tuple)) or probe is None or not _no_transform(t["transform"]):
+            pending.append(t)
+        else:
+            asking.append(t)
+    asking.sort(key=lambda t: (not requested(t), t["source"] not in preview_empty))
+    counting: list[dict[str, Any]] = []
+    walked: list[dict[str, Any]] = []
+
+    def ask(t: dict[str, Any], seconds: float) -> None:
+        res = probe(t["source"], requested(t), seconds, False)
+        state = (res or {}).get("state")
+        if state == "zero":
+            t.update(count=0, found=False, exact=True, how="pushdown")
+        elif state == "found" and whole_scope:
+            t.update(count=None, found=True, exact=False, how="pushdown")
+            counting.append(t)
+        elif state == "unknown" and not walk_allowed:
+            t.update(count=0, found=False, exact=False, how="pushdown", why=res.get("why"),
+                     seconds=res.get("seconds"))
+        else:
+            pending.append(t)
+
+    def walk_pending() -> None:
+        group = [t for t in pending if t not in walked]
+        walked.extend(group)
+        if group:
+            _walk_into(group, population_rows=population_rows, walk=walk, sample_rows=sample_rows,
+                       walk_allowed=walk_allowed, long_scan=long_scan, engine=engine,
+                       seconds=remaining(), out_of_budget=out_of_budget)
+
+    first = [t for t in asking if requested(t)]
+    rest = [t for t in asking if not requested(t)]
+    walk_first = any(requested(t) for t in pending)
+    for i, t in enumerate(first):
+        if remaining() <= 0:
+            out_of_budget(t)
+            continue
+        ask(t, remaining() / (len(first) - i + (1 if walk_first else 0)))
+    if any(requested(t) for t in pending):
+        walk_pending()
+    for i, t in enumerate(rest):
+        if remaining() <= 0:
+            out_of_budget(t)
+            continue
+        ask(t, remaining() / (len(rest) - i + (1 if any(p not in walked for p in pending) else 0)))
+    walk_pending()
+    counting.sort(key=lambda t: not requested(t))
+    for i, t in enumerate(counting):
+        res = probe(t["source"], requested(t), remaining() / (len(counting) - i), True) \
+            if remaining() > 0 else None
+        n = (res or {}).get("count")
+        t.update(count=n, exact=n is not None)
+    return out
+
+
+def _walk_into(
+    group: list[dict[str, Any]], *, population_rows: Any, walk: Any, sample_rows: Any,
+    walk_allowed: bool, long_scan: bool, engine: str, seconds: float, out_of_budget: Any,
+) -> None:
+    """Count ``group``'s empty strings over the rows Execute will read, within ``seconds``."""
+    if isinstance(population_rows, (list, tuple)):
+        scan = count_empty_strings(population_rows, group)
+        for t in group:
+            n = scan["counts"][t["key"]]
+            t.update(count=n, found=n > 0, exact=not scan["truncated"], how="batch",
+                     why=scan["truncated"], rows_scanned=scan["rows_scanned"], error=scan["error"])
+        return
+    if seconds <= 0:
+        for t in group:
+            out_of_budget(t)
+        return
+    rows, how, why, error = None, "population", "", ""
+    if walk_allowed or long_scan:
+        try:
+            rows = walk(sorted({t["source"] for t in group})) if walk is not None else None
+        except Exception as exc:  # noqa: BLE001 - an unreadable walk falls back to the preview
+            error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            rows = None
+    if rows is None:
+        why = "error" if error else ("preview" if walk_allowed or long_scan else "billed")
+        rows, how = list(sample_rows or []), "preview"
+    scan = count_empty_strings(rows, group, max_rows=10**12 if long_scan else None, max_seconds=seconds)
+    for t in group:
+        n = scan["counts"][t["key"]]
+        t.update(count=n, found=n > 0, how=how, rows_scanned=scan["rows_scanned"],
+                 exact=how == "population" and not scan["truncated"], engine=engine,
+                 why=scan["truncated"] or why, error=scan["error"] or error, seconds=round(seconds, 1))
+
+
+def source_catalog_facts(ctx: Mapping[str, Any]) -> tuple[dict[str, bool], list[str], str]:
+    """``(nullability, primary key columns, error)`` of the source table.
+
+    Read strictly, as Execute reads it; ``error`` is the reason in plain words
+    when the catalog could not be read (never a silent "no facts").
+    """
+    table = str(ctx.get("source_table") or "").strip()
+    try:
+        from src.transfer.endpoint_intelligence import introspect_endpoint
+        from src.transfer.models import EndpointConfig
+
+        data = dict(ctx.get("source_config") or {})
+        if ctx.get("source_connector_id"):
+            data["connector_id"] = ctx.get("source_connector_id")
+        data.setdefault("table", table)
+        fmt = str(ctx.get("source_format") or "")
+        if fmt:
+            data.setdefault("format", fmt)
+            data.setdefault("type", fmt)
+        endpoint = EndpointConfig.from_dict("database", data)
+        endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
+        info = introspect_endpoint(endpoint) or {}
+        nulls = {str(k): bool(v) for k, v in dict(info.get("schema_nullability") or {}).items()}
+        if not nulls and (info.get("connected") is False or info.get("error") or info.get("error_code")):
+            return {}, [], str(info.get("message") or info.get("error") or info.get("error_code"))[:300]
+        return nulls, [str(c) for c in info.get("primary_key_columns") or [] if str(c)], ""
+    except Exception as exc:  # noqa: BLE001 - reported as "could not check", never a pass
+        logger.info("Oracle empty-string gate: source catalog unreadable: %s", exc)
+        first = (str(getattr(exc, "orig", None) or exc).strip().splitlines() or [""])[0]
+        return {}, [], f"{type(exc).__name__}: {first[:300]}"
+
+
+def _catalog_source(ctx: Mapping[str, Any]) -> bool:
+    kind = str(ctx.get("source_kind") or "").strip().lower()
+    return (kind in {"database", "cloud"} and bool(str(ctx.get("source_table") or "").strip())
+            and bool(ctx.get("source_connector_id") or ctx.get("source_config")))
+
+
+def _recipe_of(recipe: Mapping[str, Any]) -> Any:
+    if not recipe:
+        return None
+    try:
+        from services.shape_models import ShapeRecipe
+
+        parsed = ShapeRecipe.parse(dict(recipe))
+        return parsed if parsed.enabled_steps else None
+    except Exception:  # noqa: BLE001 - an unparseable recipe is refused by its own gate
+        return None
+
+
+def _walk_rows(ctx: Mapping[str, Any], cols: list[str], maps: list[Any], column_types: dict[str, str],
+               read_scope: Any, row_filter: dict[str, Any], recipe: Any) -> Any:
+    """The fit scan's walk over ``cols`` (and what the recipe reads), or ``None``."""
+    fid = str(ctx.get("source_file_id") or "").strip()
+    if fid:
+        from services.file_parser import iter_stored_upload_rows
+
+        return iter_stored_upload_rows(fid)
+    if recipe is not None:
+        produced = {w for step in recipe.enabled_steps for w in step.writes}
+        reads = list(recipe.read_columns)
+        cols = [*reads, *[c for c in cols if c not in produced and c not in reads]]
+    from services.preflight_population import _iter_table_population_for_preflight
+
+    return _iter_table_population_for_preflight(
+        source_columns=list(cols), source_kind=str(ctx.get("source_kind") or ""),
+        source_format=str(ctx.get("source_format") or ""),
+        source_connector_id=str(ctx.get("source_connector_id") or ""),
+        source_config=ctx.get("source_config"), source_table=str(ctx.get("source_table") or ""),
+        mappings=list(maps), column_types=dict(column_types),
+        dest_types=dict(ctx.get("destination_column_types") or {}),
+        dest_db=str(ctx.get("destination_db_type") or ""), sync_mode=str(ctx.get("sync_mode") or ""),
+        read_scope=read_scope, source_filter=row_filter or None,
+    )
+
+
+def _row_filter(ctx: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+    """The run's row filter as a dict, or ``({}, error)`` when it cannot be read."""
+    cfg = ctx.get("source_config") if isinstance(ctx.get("source_config"), Mapping) else {}
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), Mapping) else {}
+    raw = ctx.get("source_filter") or cfg.get("source_filter") or extra.get("source_filter") or {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else {}
+        except ValueError as exc:
+            return {}, f"the row filter is not valid JSON ({exc})"
+    if not isinstance(raw, Mapping):
+        return {}, f"the row filter is not an object ({type(raw).__name__})"
+    return dict(raw), ""
+
+
+#: Measurements kept for reuse, bounded (LRU) and keyed by everything the
+#: answer depends on: workspace, destination, source, table, column type,
+#: mapping pair and transform, and the run's scope (filter, recipe,
+#: incremental watermark). Reused only (a) by Execute confirming an approved
+#: Validate, for EXECUTE_REUSE_SECONDS, and (b) for a billed warehouse, the
+#: result of an operator's "Check this column now", for CHECK_REUSE_SECONDS,
+#: so a schedule does not re-bill the scan on every run. Any '' that reaches
+#: the source after the measurement is refused by Oracle at write time
+#: (ORA-01400 fails that batch; nothing is written as a different value).
+_MEASURED: dict[str, dict[str, Any]] = {}
+_MEASURED_MAX = 512
+EXECUTE_REUSE_SECONDS = 3600.0
+CHECK_REUSE_SECONDS = 86400.0
+
+
+def _measure_key(ctx: Mapping[str, Any], t: Mapping[str, Any], scope: str) -> str:
+    import hashlib
+
+    def ident(cfg: Any) -> dict[str, Any]:
+        cfg = cfg if isinstance(cfg, Mapping) else {}
+        return {k: cfg.get(k) for k in ("type", "format", "host", "port", "database", "schema", "project",
+                                        "dataset", "account", "warehouse")}
+
+    raw = json.dumps([
+        current_workspace(),
+        str(ctx.get("destination_db_type") or ""), str(ctx.get("destination_table") or ""),
+        ident(ctx.get("destination_config")),
+        str(ctx.get("source_connector_id") or ""), ident(ctx.get("source_config")),
+        str(ctx.get("source_table") or ""), str(ctx.get("source_file_id") or ""),
+        str(_lookup(ctx.get("column_types") or {}, t["source"]) or ""),
+        scope, t["source"], t["target"], t["transform"],
+    ], sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _remember(key: str, result: dict[str, Any], *, checked_now: bool) -> None:
+    _MEASURED.pop(key, None)
+    _MEASURED[key] = {"at": time.time(), "result": result, "checked_now": checked_now}
+    while len(_MEASURED) > _MEASURED_MAX:
+        _MEASURED.pop(next(iter(_MEASURED)))
+
+
+def _recall(key: str, *, execute_confirm: bool, billed: bool) -> dict[str, Any] | None:
+    """A kept measurement this run may reuse, or ``None``.
+
+    A billed warehouse's "Check now" result carries ``reused_check``
+    (``at``/``until``, UTC ISO): the gate then says that the column was
+    checked at that time, that the result is being reused, and how to check
+    again (:func:`_reuse_notice`).
+    """
+    hit = _MEASURED.get(key)
+    if not hit:
+        return None
+    age = time.time() - float(hit["at"])
+    if execute_confirm and age < EXECUTE_REUSE_SECONDS:
+        return dict(hit["result"])
+    if billed and hit["checked_now"] and age < CHECK_REUSE_SECONDS:
+        return {**hit["result"], "reused_check": _reused_window(float(hit["at"]), billed=True)}
+    if age >= max(EXECUTE_REUSE_SECONDS, CHECK_REUSE_SECONDS):
+        _MEASURED.pop(key, None)
+    return None
+
+
+def _reused_window(at: float, *, billed: bool) -> dict[str, Any]:
+    from datetime import datetime, timezone
+
+    return {"at": datetime.fromtimestamp(at, timezone.utc).isoformat(timespec="seconds"),
+            "until": datetime.fromtimestamp(at + CHECK_REUSE_SECONDS, timezone.utc).isoformat(timespec="seconds"),
+            "billed": billed}
+
+
+def _recall_found(key: str) -> dict[str, Any] | None:
+    """An earlier check's "found" for this exact run scope, when this check could not finish.
+
+    A found ``''`` only ever blocks, so it is kept (CHECK_REUSE_SECONDS) rather
+    than downgraded to "could not rule out" when a later, shorter check stops
+    before reaching that row; the gate states it and offers checking again.
+    """
+    hit = _MEASURED.get(key)
+    if not hit or not hit["result"].get("found") or time.time() - float(hit["at"]) >= CHECK_REUSE_SECONDS:
+        return None
+    return {**hit["result"], "reused_check": _reused_window(float(hit["at"]), billed=False)}
+
+
+_STAMP_FIELDS = ("requested_by", "at", "expires_at", "workspace_id", "budget_seconds",
+                 "source", "target", "table", "destination", "key_id")
+_STAMP_LABEL = b"datawrap-oracle-empty-check-now\x00"
+
+
+def _stamp_mac(stamp: Mapping[str, Any], key: bytes) -> str:
+    """HMAC of the stamp's fields under a key derived from the deployment's signing key."""
+    import hashlib
+    import hmac
+
+    body = json.dumps({k: stamp.get(k) for k in _STAMP_FIELDS}, sort_keys=True,
+                      separators=(",", ":"), default=str)
+    sub = hmac.new(key, _STAMP_LABEL, hashlib.sha256).digest()
+    return hmac.new(sub, body.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _check_now_asked(
+    mapping: Mapping[str, Any], *, table: str = "", destination: Mapping[str, str] | None = None,
+) -> bool:
+    """An unexpired "Check this column now" request this server issued for this mapping.
+
+    The stamp travels with the mapping through the client, so nothing in it is
+    trusted unless its HMAC verifies under a key this deployment holds
+    (:func:`stamp_check_now`). It is honoured only for the mapping pair and
+    destination table it was issued for, in the workspace it was issued in,
+    for the user who asked (when a user is signed in), and for at most
+    CHECK_NOW_VALID_SECONDS after it was issued, whatever ``expires_at`` says.
+    """
+    import hmac
+    from datetime import datetime, timedelta, timezone
+
+    stamp = mapping.get(CHECK_KEY)
+    if not isinstance(stamp, Mapping) or not stamp.get("key_id") or not stamp.get("signature"):
+        return False
+    try:
+        from services.audit_chain_keys import server_key_for
+
+        key = server_key_for(str(stamp.get("key_id")))
+        if key is None or not hmac.compare_digest(_stamp_mac(stamp, key), str(stamp.get("signature"))):
+            return False
+        issued = datetime.fromisoformat(str(stamp.get("at") or ""))
+        expires = datetime.fromisoformat(str(stamp.get("expires_at") or ""))
+    except Exception:  # noqa: BLE001 - an unverifiable stamp is simply not honoured
+        return False
+    if str(stamp.get("source") or "").lower() != str(mapping.get("source") or "").lower() \
+            or str(stamp.get("target") or "").lower() != str(mapping.get("target") or "").lower():
+        return False
+    if _bare(stamp.get("table")) != _bare(table):
+        return False
+    if destination is not None and not binding_matches(stamp.get("destination"), destination):
+        return False
+    if str(stamp.get("workspace_id") or "") != current_workspace():
+        return False
+    from services.workspace_filter import current_actor
+
+    actor = str(current_actor() or "").strip().lower()
+    if actor and actor != str(stamp.get("requested_by") or "").strip().lower():
+        return False
+    now = datetime.now(timezone.utc)
+    try:
+        if issued > now + timedelta(seconds=60):
+            return False
+        return now < min(expires, issued + timedelta(seconds=CHECK_NOW_VALID_SECONDS))
+    except TypeError:  # a time without a zone was not issued here
+        return False
+
+
+def preflight_hook(ctx: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Validate's entry, called by ``run_file_preflight`` with its own arguments.
+
+    Never raises: anything unexpected is reported as "could not check".
+    """
+    if not is_oracle(str(ctx.get("destination_db_type") or "")):
+        return None, []
+    try:
+        return _preflight_hook(ctx)
+    except Exception as exc:  # noqa: BLE001 - Validate reports, it never crashes here
+        logger.warning("Oracle empty-string gate could not run: %s", exc, exc_info=exc)
+        message = (f"Datawrap could not check the Oracle NOT NULL text columns for empty strings "
+                   f"({type(exc).__name__}: {str(exc)[:200]}). Validate again; if it persists, "
+                   "report this message.")
+        details = {"error": str(exc)[:400]}
+        return ({"id": GATE_ID, "status": "block", "message": message, "duration_ms": 0, "details": details},
+                [{"id": GATE_ID, "message": message, "details": details, "suggested_actions": []}])
+
+
+def _preflight_hook(ctx: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    dest_db = str(ctx.get("destination_db_type") or "")
+    maps = [m for m in (ctx.get("write_maps") or ctx.get("mappings") or []) if isinstance(m, Mapping)]
+    column_types = dict(ctx.get("column_types") or {})
+    nulls = dict(ctx.get("column_nullability") or {})
+    keys = [*str(ctx.get("contract_primary_key") or "").split(","),
+            *(ctx.get("destination_pk_columns") or [])]
+    table_exists = ctx.get("dest_table_exists", ctx.get("destination_table_exists"))
+    catalog_error, pk_known = "", False
+    text_sources = [str(m.get("source") or "") for m in maps if _is_text(m, column_types)]
+    if table_exists is False and _catalog_source(ctx) and any(_lookup(nulls, s) is None for s in text_sources):
+        # REST and Studio Validate do not pass the source catalog: read it, as
+        # Execute does. An unreadable catalog is "could not check".
+        probed, source_pk, catalog_error = source_catalog_facts(ctx)
+        nulls = {**probed, **nulls}
+        keys += source_pk
+        pk_known = not catalog_error
+    from services.source_duplicate_probe import is_sqlish_source
+    from src.transfer.engine_family import family_or_kind
+
+    # SQLite's declared types are affinities, not constraints: any column can hold ''.
+    fmt = str(ctx.get("source_format") or "").strip().lower()
+    native = str(ctx.get("source_kind") or "").lower() in {"database", "cloud"} and is_sqlish_source(
+        fmt) and not family_or_kind(fmt).startswith("sqlite") and not str(ctx.get("source_file_id") or "").strip()
+    targets = candidates(
+        destination_db_type=dest_db, mappings=maps, column_nullability=nulls,
+        destination_table_exists=table_exists,
+        destination_column_nullability=ctx.get("destination_column_nullability") or {},
+        column_types=column_types, key_columns=keys, native_source_types=native,
+    )
+    if catalog_error:
+        seen = {t["key"] for t in targets}
+        for m in maps:
+            source, target = str(m.get("source") or ""), str(m.get("target") or "")
+            if source and target and _is_text(m, column_types) and _lookup(nulls, source) is None \
+                    and pair_key(source, target) not in seen:
+                targets.append({"key": pair_key(source, target), "source": source, "target": target,
+                                "transform": str(m.get("transform") or ""), "kind": "create_new",
+                                "approvable": True, "count": 0, "found": False, "exact": False,
+                                "how": "catalog", "why": "catalog", "error": catalog_error})
+    if not targets:
+        return None, []
+    from services.sync_cursor import incremental_read_narrows
+
+    sync_mode = str(ctx.get("sync_mode") or "")
+    row_filter, filter_error = _row_filter(ctx)
+    read_scope = ctx.get("read_scope") if incremental_read_narrows(sync_mode) else None
+    recipe_payload = dict(ctx.get("shape_recipe") or {})
+    recipe = _recipe_of(recipe_payload)
+    stored = bool(str(ctx.get("source_file_id") or "").strip())
+    from services.code_crosswalk import _normalize_source_cfg
+
+    _cfg, src_engine = _normalize_source_cfg(str(ctx.get("source_connector_id") or ""), ctx.get("source_config"))
+    src_engine = (src_engine or str(ctx.get("source_format") or "")).lower()
+    here = destination_binding(connector_id=ctx.get("destination_connector_id"),
+                               config=ctx.get("destination_config"), table=ctx.get("destination_table"))
+    asked_maps = [m for m in maps
+                  if _check_now_asked(m, table=str(ctx.get("destination_table") or ""), destination=here)]
+    asked = [str(m.get("target") or m.get("source") or "") for m in asked_maps]
+
+    def walk(cols: list[str]) -> Any:
+        if filter_error:
+            raise ValueError(filter_error)
+        rows = _walk_rows(ctx, cols, maps, column_types, read_scope, row_filter, recipe)
+        if rows is not None and recipe is not None:
+            from services.shape_preflight import shaped_population_rows
+
+            rows = shaped_population_rows(recipe_payload, rows) or rows
+        return rows
+
+    def probe(column: str, check_now: bool, seconds: float, count: bool) -> Any:
+        if recipe is not None or stored or filter_error:
+            return None
+        return sql_empty_probe(
+            source_connector_id=str(ctx.get("source_connector_id") or ""),
+            source_config=ctx.get("source_config"), source_table=str(ctx.get("source_table") or ""),
+            column=column, check_now=check_now, count=count,
+            timeout_seconds=min(seconds, CHECK_NOW_SECONDS if check_now else PUSHDOWN_TIMEOUT_SECONDS),
+        )
+
+    scope = json.dumps([row_filter, repr(read_scope), recipe_payload], sort_keys=True, default=str)
+    billed = src_engine in BILLED_SCAN_ENGINES
+    execute_confirm = bool(ctx.get("skip_population_fit"))
+    fresh, measured = [], []
+    for t in targets:
+        asked_here = t["target"] in asked
+        hit = (None if t.get("why") == "catalog" or asked_here
+               else _recall(_measure_key(ctx, t, scope), execute_confirm=execute_confirm, billed=billed))
+        if hit:
+            measured.append({**t, **hit, "reused": True})
+        else:
+            fresh.append(t)
+    population = ctx.get("population_rows") if ctx.get("rows_are_population") else None
+    done = measure(
+        fresh, population_rows=population, probe=probe,
+        whole_scope=not row_filter and read_scope is None and recipe is None, walk=walk,
+        sample_rows=list(ctx.get("sample_rows") or []),
+        walk_allowed=not billed, engine=src_engine, check_now=asked,
+    )
+    for i, t in enumerate(done):
+        key = _measure_key(ctx, t, scope)
+        if t.get("why") != "catalog" and (t.get("exact") or t.get("found")):
+            kept = {k: t.get(k) for k in ("count", "found", "exact", "how", "why", "rows_scanned",
+                                          "error", "seconds", "engine")}
+            _remember(key, kept, checked_now=t["target"] in asked)
+        elif t.get("why") != "catalog" and t["target"] not in asked and (earlier := _recall_found(key)):
+            done[i] = {**t, **earlier, "reused": True}
+    ran_out = {t["target"] for t in done if t["target"] in asked and not t.get("exact") and not t.get("found")
+               and t.get("why") in {"budget", "time", "timeout", "rows"}}
+    for m in asked_maps:
+        if str(m.get("target") or m.get("source") or "") in ran_out:
+            _check_now_cooldown(m.get(CHECK_KEY) or {}, clear=True)  # it may be asked again at once
+    measured += done
+    needs_decision = [t for t in measured if t["kind"] == "create_new" and t["approvable"]
+                      and (int(t.get("count") or 0) > 0 or t.get("found") or not t.get("exact"))]
+    if needs_decision and not pk_known and not catalog_error and _catalog_source(ctx):
+        # The source primary key decides what is approvable: read only when needed.
+        _n, source_pk, _err = source_catalog_facts(ctx)
+        pk = {str(c).lower() for c in source_pk}
+        for t in measured:
+            if t["source"].lower() in pk or t["target"].lower() in pk:
+                t["approvable"] = False
+    return build_gate(measured, mappings=maps, table=str(ctx.get("destination_table") or ""), destination=here)
+
+
+def preflight_gate(
+    *,
+    destination_db_type: str,
+    mappings: list[dict[str, Any]],
+    column_nullability: Mapping[str, bool] | None,
+    destination_table_exists: bool | None,
+    destination_column_nullability: Mapping[str, bool] | None,
+    column_types: Mapping[str, str] | None,
+    key_columns: Iterable[str],
+    sample_rows: list[dict[str, Any]] | None,
+    walk: Any = None,
+    population_rows: Any = None,
+    probe: Any = None,
+    whole_scope: bool = True,
+    destination_table: str = "",
+    walk_allowed: bool = True,
+    check_now: Iterable[str] = (),
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Candidates, then the measurement, then the gate (explicit inputs)."""
+    targets = candidates(
+        destination_db_type=destination_db_type, mappings=mappings,
+        column_nullability=column_nullability,
+        destination_table_exists=destination_table_exists,
+        destination_column_nullability=destination_column_nullability,
+        column_types=column_types, key_columns=key_columns,
+    )
+    if not targets:
+        return None, []
+    measured = measure(targets, population_rows=population_rows, probe=probe,
+                       whole_scope=whole_scope, walk=walk, sample_rows=sample_rows,
+                       walk_allowed=walk_allowed, check_now=check_now)
+    return build_gate(measured, mappings=mappings, table=destination_table)
+
+
+#: One Check-now request per workspace, column pair and destination in this
+#: window (a billed warehouse bills each scan), unless the last one ran out of
+#: its budget before it could answer.
+CHECK_NOW_COOLDOWN_SECONDS = 600
+#: Namespaces the cooldown keys (tests give each test its own).
+_COOLDOWN_SCOPE = ""
+
+
+def _check_now_cooldown(stamp: Mapping[str, Any], *, clear: bool = False, at: str = "") -> str:
+    """The time the cooldown key was set (``""`` when free); sets it with ``at``, clears with ``clear``."""
+    import hashlib
+
+    from services.auth_state import get_auth_state
+
+    raw = json.dumps([_COOLDOWN_SCOPE, stamp.get("workspace_id"), str(stamp.get("source") or "").lower(),
+                      str(stamp.get("target") or "").lower(), stamp.get("destination")], sort_keys=True, default=str)
+    key = "oracle-check-now:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    state = get_auth_state()
+    if clear:
+        state.clear_marker(key)
+        return ""
+    if at:
+        state.set_marker(key, at, CHECK_NOW_COOLDOWN_SECONDS)
+        return at
+    return state.get_marker(key) or ""
+
+
+def stamp_check_now(
+    mappings: list[dict[str, Any]], acceptance: Mapping[str, Any], *, table: str = "",
+    destination: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Record "Check this column now" on the named columns' mappings (not a risk: no contract).
+
+    It is asked through the same entry points, under the same permission, as a
+    risk acceptance (the calling route or tool checks it). With authentication
+    on, the request records the signed-in user, never free text, and is
+    refused without one. The stamp is issued by this server: it names the
+    mapping pair, the destination (connector, schema, ``table``: the
+    acceptance's ``destination`` as the gate listed it, else ``destination``),
+    the workspace and the user, and is signed (HMAC under the deployment's
+    signing key, services.audit_chain_keys), so a stamp written by a client is
+    never honoured (:func:`_check_now_asked`). It is honoured for
+    CHECK_NOW_VALID_SECONDS; the measurement it produces is kept and reused as
+    described at _MEASURED. A pair that already carries a valid request keeps
+    it; a new one is issued at most once per CHECK_NOW_COOLDOWN_SECONDS for
+    the same workspace, pair and destination, unless the last one ran out of
+    its budget.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    named = {str(c).strip().lower() for c in (acceptance.get("columns") or []) if str(c or "").strip()}
+    if not named:
+        raise ValueError(f"risk_acceptance option {CHECK_OPTION} needs columns. Nothing was recorded.")
+    from services.audit_chain_keys import signing_key
+    from services.workspace_filter import current_actor
+    from src.services.auth_service import auth_required
+
+    actor = str(current_actor() or "").strip()
+    if not actor:
+        if auth_required():
+            raise ValueError(f"risk_acceptance option {CHECK_OPTION} needs a signed-in user. "
+                             "Nothing was recorded.")
+        actor = "local operator (authentication is off)"
+    asked_dest = acceptance.get("destination")
+    bound = dict(asked_dest) if isinstance(asked_dest, Mapping) else dict(
+        destination or destination_binding(table=table))
+    bound = {k: str(bound.get(k) or "").lower() for k in ("connector", "schema", "table")}
+    if not bound["table"]:
+        bound["table"] = _bare(table)
+    now = datetime.now(timezone.utc)
+    key_id, key, _source = signing_key()
+    out, hit, issue = [], set(), []
+    for raw in mappings or []:
+        row = dict(raw)
+        source, target = str(row.get("source") or ""), str(row.get("target") or "")
+        name = next((n for n in (target.lower(), pair_key(source, target).lower(), source.lower())
+                     if n in named), "")
+        if name:
+            hit.add(name)
+            if not _check_now_asked(row, table=table, destination=bound):
+                issue.append(row)
+        out.append(row)
+    if mappings and named - hit:
+        raise ValueError(f"risk_acceptance option {CHECK_OPTION} named unmapped column(s) "
+                         f"{', '.join(sorted(named - hit))}. Nothing was recorded.")
+    stamps = []
+    for row in issue:
+        stamp = {
+            "requested_by": actor, "at": now.isoformat(),
+            "expires_at": (now + timedelta(seconds=CHECK_NOW_VALID_SECONDS)).isoformat(),
+            "workspace_id": current_workspace(), "budget_seconds": CHECK_NOW_SECONDS,
+            "source": str(row.get("source") or ""), "target": str(row.get("target") or ""),
+            "table": str(table or ""), "destination": bound, "key_id": key_id,
+        }
+        if (last := _check_now_cooldown(stamp)):
+            raise ValueError(
+                f"{stamp['target']} was already checked now at {last}: Datawrap reads a column this way at "
+                f"most once every {CHECK_NOW_COOLDOWN_SECONDS // 60} minutes per destination table (a "
+                "warehouse bills each scan), unless the last check ran out of time. Validate again to see "
+                "that result, or ask again later. Nothing was recorded.")
+        stamps.append((row, stamp))
+    from services.audit_log import append_audit_event
+
+    for row, stamp in stamps:
+        _check_now_cooldown(stamp, at=now.isoformat(timespec="seconds"))
+        row[CHECK_KEY] = {**stamp, "signature": _stamp_mac(stamp, key)}
+        append_audit_event(
+            action="oracle_empty.check_now.issued", resource=f"check_now:{stamp['target']}",
+            actor=actor, workspace_id=stamp["workspace_id"] or None,
+            details={"kind": CHECK_OPTION, "route": pair_key(stamp["source"], stamp["target"]),
+                     "table": stamp["table"], "destination": bound, "expires_at": stamp["expires_at"],
+                     "digest": row[CHECK_KEY]["signature"]},
+        )
+    return out
+
+
+def sign_empty_as_null(
+    mappings: list[dict[str, Any]],
+    acceptance: Mapping[str, Any],
+    *,
+    table: str,
+    destination: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Sign the empty-as-NULL contract on the named columns' mappings.
+
+    ``columns`` names targets (or ``source->target`` pairs, or a source that
+    feeds one target). Each contract is bound to its (source, target) pair,
+    ``table`` and the current workspace. Needs ``approved_by``, ``reason`` and
+    ``columns``. Raises ``ValueError`` (nothing signed) otherwise, or when a
+    named column is not mapped.
+    """
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    approved_by = str(acceptance.get("approved_by") or "").strip()
+    reason = str(acceptance.get("reason") or "").strip()
+    named = [str(c).strip() for c in (acceptance.get("columns") or []) if str(c or "").strip()]
+    if not approved_by or not reason or not named:
+        raise ValueError(
+            f"risk_acceptance option {OPTION} needs approved_by, reason and columns. "
+            "Nothing was signed."
+        )
+    wanted = {c.lower() for c in named}
+    rows = [m for m in mappings or [] if isinstance(m, Mapping)]
+    targets_named = {str(m.get("target") or "").lower() for m in rows}
+    feeds: dict[str, int] = {}
+    for m in rows:
+        feeds[str(m.get("source") or "").lower()] = feeds.get(str(m.get("source") or "").lower(), 0) + 1
+    workspace = current_workspace()
+    asked_dest = acceptance.get("destination")
+    bound = dict(asked_dest) if isinstance(asked_dest, Mapping) else dict(
+        destination or destination_binding(table=table))
+    bound = {k: str(bound.get(k) or "").lower() for k in ("connector", "schema", "table")}
+    if not bound["table"]:
+        bound["table"] = _bare(table)
+    out, signed = [], set()
+    for raw in mappings or []:
+        row = dict(raw)
+        source, target = str(row.get("source") or ""), str(row.get("target") or "")
+        pair = pair_key(source, target).lower()
+        hit = next((n for n in (pair, target.lower()) if n and n in wanted), "")
+        # A source name approves only a source that feeds one target and is
+        # not itself some target's name: note->a and note->b approve apart.
+        if not hit and source.lower() in wanted and feeds.get(source.lower()) == 1 \
+                and source.lower() not in targets_named - {target.lower()}:
+            hit = source.lower()
+        if hit and approved_contract(row, table=table, destination=bound) is None:
+            contract = create_migration_risk_contract(
+                column=source or target,
+                source_type=str(row.get("source_type") or ""),
+                destination_type=str(row.get("target_type") or "VARCHAR2"),
+                approved_by=approved_by,
+                reason=reason,
+                # Nothing else changes: a value that fails for another reason
+                # still fails the run.
+                execution_policy="FAIL_JOB",
+                root_cause=(
+                    "Oracle stores '' as NULL; the column is created NULL-able so empty "
+                    "strings land as NULL"
+                ),
+                severity="medium",
+                expected_precision_loss=False,
+                expected_nulls=True,
+                target=target or source,
+                table=table,
+                loss_classification=RISK_KIND,
+                metadata={"option": OPTION, "workspace_id": workspace, "destination": bound,
+                          "route": pair_key(source, target)},
+            )
+            row[CONTRACT_KEY] = contract.to_dict()
+        if hit:
+            signed.add(hit)
+        out.append(row)
+    if mappings and wanted - signed:
+        raise ValueError(
+            f"risk_acceptance option {OPTION} named unmapped column(s) "
+            f"{', '.join(sorted(wanted - signed))}. Nothing was signed."
+        )
+    return out
+
+
+def relax_create_plan(
+    plan: Any, mappings: Iterable[Mapping[str, Any]] | None, dest: str, *, dest_table: str = "",
+) -> Any:
+    """Create an approved column NULL-able on Oracle (never a key column)."""
+    if not is_oracle(dest):
+        return plan
+    approved = {}
+    for m in mappings or []:
+        if isinstance(m, Mapping) and (contract := approved_contract(m, table=dest_table)):
+            approved[str(m.get("target") or m.get("source") or "").lower()] = contract
+    if not approved:
+        return plan
+    keys = {str(c).lower() for c in (getattr(plan, "primary_key", None) or [])}
+    from services.schema_fidelity import SchemaFidelityItem
+
+    for col in list(getattr(plan, "not_null_columns", []) or []):
+        contract = approved.get(str(col).lower())
+        if contract is None or str(col).lower() in keys:
+            continue
+        plan.not_null_columns.remove(col)
+        suffixes = plan.column_suffixes.get(col) or []
+        plan.column_suffixes[col] = [s for s in suffixes if str(s).strip().upper() != "NOT NULL"]
+        # The carried NOT NULL is no longer the plan: left in, post-create
+        # verification would report "destination did not take NOT NULL".
+        plan.report.items[:] = [
+            i for i in plan.report.items
+            if not (getattr(i, "aspect", "") == "not_null"
+                    and str(getattr(i, "name", "")).lower() == str(col).lower())
+        ]
+        plan.report.items.append(SchemaFidelityItem(
+            aspect="not_null",
+            name=col,
+            status="relaxed_by_contract",
+            reason=(
+                "Created NULL-able: Oracle stores '' as NULL and the operator approved "
+                f"empty strings landing as NULL (Risk Contract {contract.get('risk_id')})."
+            ),
+            dest_ddl="NULL",
+        ))
+    return plan
+
+
+def destination_null_rows(
+    endpoint: Any, table: str, columns: list[str], scope: Any = None,
+) -> dict[str, int] | None:
+    """NULL cells per column of the Oracle destination table, or ``None`` if unreadable.
+
+    A ``scope`` of kind ``run_keys`` (a NULL-marker ``ProbeScope``) limits the
+    count to the rows this run wrote; otherwise the whole table is read.
+    Opened through the writer's own engine and bounded like the NULL-marker
+    probe.
+    """
+    if not table or not columns:
+        return None
+    try:
+        import sqlalchemy as sa
+
+        from connectors.sql_identifiers import split_qualified_table
+        from services.engine_pool import release_engine
+        from services.null_marker_probe import _columns, probe_engine, probe_timeout_seconds, statement_timeout
+        from src.transfer.adapters import resolve_connector_config
+
+        cfg = resolve_connector_config(endpoint)
+        schema, bare = split_qualified_table(table, str(cfg.get("schema") or "").strip() or None)
+        key = str(getattr(scope, "key_column", "") or "") if getattr(scope, "kind", "") == "run_keys" else ""
+        engine = probe_engine(cfg)
+        try:
+            with engine.connect() as conn:
+                names, _fixed, key_type, types, key_name = _columns(conn, bare, schema, columns, key)
+                if not names or (key and not key_name):
+                    return None
+                cols = [sa.column(n, types.get(n)) for n in names]
+                if key_name and key_name not in names:
+                    cols.append(sa.column(key_name, key_type))
+                tbl = sa.table(bare, *cols, schema=schema or None)
+                batches: list[list[Any] | None] = [None]
+                if key_name:
+                    keys = list(scope.keys)
+                    batches = [keys[i:i + 500] for i in range(0, len(keys), 500)]
+                totals = [0] * len(names)
+                with statement_timeout(conn, "oracle", probe_timeout_seconds()):
+                    for batch in batches:
+                        query = sa.select(*[
+                            sa.func.sum(sa.case((tbl.c[n].is_(None), 1), else_=0)) for n in names
+                        ]).select_from(tbl)
+                        if batch is not None:
+                            query = query.where(tbl.c[key_name].in_(batch))
+                        row = conn.execute(query).one()
+                        totals = [a + int(b or 0) for a, b in zip(totals, row)]
+                return {n.lower(): v for n, v in zip(names, totals)}
+        finally:
+            release_engine(engine)
+    except Exception:  # noqa: BLE001 - an unreadable count is reported as unknown, never a pass flip
+        return None
+
+
+def explain_empty_as_null(
+    recon: dict[str, Any],
+    *,
+    endpoint: Any,
+    mappings: Iterable[Mapping[str, Any]] | None,
+    records: list[Mapping[str, Any]] | None,
+    dest_summary: Mapping[str, Any] | None = None,
+    rows_written: int = 0,
+    validation_mode: str = "strict",
+) -> dict[str, Any]:
+    """Gate-8 names the rows of this run an approved contract explains (never a pass flip).
+
+    Oracle's read-back already treats ``''`` and NULL as one value
+    (services.reconciliation.destination_empty_string_is_null). This counts
+    the run's own rows: the run's records as written (after the transform)
+    when the run holds them, else the destination's NULL cells over the rows
+    this run wrote (the table an overwrite or a first load wrote, or the
+    run's keys). When the run's rows cannot be named, the table-wide NULL
+    count is stated as such and not called explained.
+    """
+    dest = str(getattr(endpoint, "format", "") or getattr(endpoint, "type", "") or "")
+    if not isinstance(recon, dict) or not is_oracle(dest):
+        return recon
+    table = str((dest_summary or {}).get("table") or getattr(endpoint, "table", "") or "")
+    approved = [
+        (m, c) for m in mappings or []
+        if isinstance(m, Mapping) and (c := approved_contract(m, table=table))
+    ]
+    if not approved:
+        return recon
+    carried = [r for r in records or [] if isinstance(r, Mapping)]
+    scope: Any = None
+    counted: dict[str, int] = {}
+    explained, unscoped = [], []
+    for m, contract in approved:
+        source = str(m.get("source") or "")
+        target = str(m.get("target") or source)
+        entry = {"column": target, "source_column": source, "kind": RISK_KIND,
+                 "risk_id": contract.get("risk_id"), "approved_by": contract.get("approved_by")}
+        if carried and any(_lookup(r, source) is not None or source in r for r in carried):
+            transform = str(m.get("transform") or "")
+            n = sum(1 for r in carried if _written(_lookup(r, source), transform) == "")
+            explained.append({**entry, "rows": n, "counted_by": "the run's records, as written"})
+            continue
+        if scope is None:
+            from services.null_marker_probe import resolve_probe_scope
+
+            scope = resolve_probe_scope(
+                dest_summary=dict(dest_summary or {}), records=carried,
+                mappings=[dict(x) for x in mappings or [] if isinstance(x, Mapping)],
+                rows_written=int(rows_written or 0), validation_mode=validation_mode,
+            )
+            counted = destination_null_rows(
+                endpoint, table, [str(x.get("target") or x.get("source") or "") for x, _ in approved],
+                scope=scope if getattr(scope, "kind", "") in _RUN_SCOPES else None,
+            ) or {}
+        n = counted.get(target.lower())
+        if getattr(scope, "kind", "") in _RUN_SCOPES and n is not None:
+            explained.append({**entry, "rows": n, "counted_by": "NULL cells in the rows this run wrote"})
+        else:
+            unscoped.append({**entry, "table_wide_null_cells": n})
+    out = dict(recon)
+    notes = []
+    if explained:
+        out["explained_changes"] = [*(recon.get("explained_changes") or []), *explained]
+        notes += [
+            f"{e['column']}: {e['rows']} empty string(s) are NULL in Oracle, explained by signed "
+            f"Risk Contract {e['risk_id']} (approved by {e['approved_by']})." for e in explained
+        ]
+    if unscoped:
+        out["unscoped_null_cells"] = unscoped
+        notes += [
+            f"{u['column']}: NULL cells in this column: "
+            f"{u['table_wide_null_cells'] if u['table_wide_null_cells'] is not None else 'not counted'} "
+            "(table-wide). The rows this run wrote cannot be named, so they are not counted as "
+            f"explained by Risk Contract {u['risk_id']}." for u in unscoped
+        ]
+    out["message"] = f"{recon.get('message') or ''} {' '.join(notes)}".strip()
+    return out

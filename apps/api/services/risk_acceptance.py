@@ -91,13 +91,21 @@ def sign_request_risk_acceptance(
         or getattr(xfer_req.destination, "collection", "")
         or ""
     )
+    from services.oracle_empty_not_null import destination_binding
+
+    dest = getattr(xfer_req, "destination", None)
+    dest_cfg = {k: getattr(dest, k, None) for k in ("host", "port", "database", "schema")}
     signed = _sign_required_risk_contracts(
-        mappings, acceptance, table=table, force_columns=named or None
+        mappings, acceptance, table=table, force_columns=named or None,
+        destination=destination_binding(connector_id=getattr(dest, "connector_id", ""), config=dest_cfg,
+                                        table=table),
     )
+    from services.oracle_empty_not_null import CHECK_KEY, CONTRACT_KEY
+
     gained = [
         str(new.get("source") or new.get("target") or "")
         for old, new in zip(mappings, signed)
-        if new.get("risk_contract") and not old.get("risk_contract")
+        if any(new.get(k) and not old.get(k) for k in ("risk_contract", CONTRACT_KEY, CHECK_KEY))
     ]
     if not gained:
         raise ValueError(

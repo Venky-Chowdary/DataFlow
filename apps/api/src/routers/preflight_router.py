@@ -86,6 +86,10 @@ class MappingItem(BaseModel):
     omit_approved_at: str | None = None
     # Migration Risk Contract draft/signed — Execute-approve authority.
     risk_contract: dict[str, Any] | None = None
+    # Signed "Oracle '' lands as NULL" approval (services.oracle_empty_not_null).
+    empty_as_null_contract: dict[str, Any] | None = None
+    # "Check this column now" (services.oracle_empty_not_null.CHECK_KEY).
+    empty_check_now: dict[str, Any] | None = None
     # G20 — operator-declared source→target code map. Extra=ignore would
     # drop this on Validate, so Execute would be the first place an unmapped
     # population code is seen. Empty dict is still a declaration.
@@ -700,6 +704,7 @@ def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
             source_config=body.source_config,
             source_table=(body.source_table or body.source_collection or ""),
             destination_table=(body.dest_table or body.dest_collection or ""),
+            destination_connector_id=str(body.connector_id or ""),
             source_filename="",
             source_file_id=source_file_id,
             population_rows=stored_population,
@@ -984,6 +989,67 @@ def explain_preflight(body: ExplainRequest):
         )
     except Exception as e:  # noqa: BLE001
         raise safe_http_exception(e, event="preflight.explain_preflight.failed", public_message="Couldn't explain the validation result.", status_code=500)
+
+
+class OracleEmptySignRequest(BaseModel):
+    """Studio's way to take an Oracle '' gate action (services.oracle_empty_not_null)."""
+
+    #: The mapping pairs to sign on (``source``, ``target``, ``target_type``, ``transform``).
+    mappings: list[dict[str, Any]] = Field(default_factory=list)
+    #: ``{"option": "oracle_empty_as_null" | "oracle_empty_check_now", "columns": [...], "reason"?}``
+    risk_acceptance: dict[str, Any] = Field(default_factory=dict)
+    #: The destination table the contract or the Check now request is bound to.
+    dest_table: str = ""
+    #: The destination binding (connector, schema, table) the gate listed in its
+    #: action's ``risk_acceptance.destination``; Studio sends it back as given.
+    destination: dict[str, str] | None = None
+
+
+_SIGN_FIELDS = ("source", "target", "target_type", "source_type", "transform")
+
+
+@router.post("/oracle-empty/sign")
+def sign_oracle_empty_action(body: OracleEmptySignRequest):
+    """Sign "Create NULL-able" or issue "Check now" for the named columns; return what was added.
+
+    The same signing ``risk_acceptance`` performs over MCP and the REST run
+    form, for Studio, which keeps the returned ``empty_as_null_contract`` /
+    ``empty_check_now`` on its mappings and sends them with the next
+    ``/preflight/run``. With a signed-in user, the approval names that user;
+    the body's ``approved_by`` is used only when authentication is off.
+    """
+    from services import oracle_empty_not_null as oe
+    from services.workspace_filter import current_actor
+
+    acceptance = dict(body.risk_acceptance or {})
+    option = str(acceptance.get("option") or "").strip()
+    if option not in {oe.OPTION, oe.CHECK_OPTION}:
+        raise HTTPException(status_code=400, detail=(
+            f"risk_acceptance.option must be {oe.OPTION} or {oe.CHECK_OPTION}. Nothing was signed."))
+    from src.services.auth_service import auth_required
+
+    actor = str(current_actor() or "").strip()
+    if actor:
+        acceptance["approved_by"] = actor
+    elif auth_required():
+        raise HTTPException(status_code=401, detail="Sign in to approve or check a column. Nothing was signed.")
+    elif not str(acceptance.get("approved_by") or "").strip():
+        acceptance["approved_by"] = "local operator (authentication is off)"
+    maps = [{k: m.get(k) for k in _SIGN_FIELDS if m.get(k) is not None}
+            for m in body.mappings if isinstance(m, dict)]
+    if not maps:
+        raise HTTPException(status_code=400, detail="Send the mappings to sign. Nothing was signed.")
+    key = oe.CONTRACT_KEY if option == oe.OPTION else oe.CHECK_KEY
+    if body.destination and not acceptance.get("destination"):
+        acceptance["destination"] = dict(body.destination)
+    try:
+        signed = (oe.sign_empty_as_null(maps, acceptance, table=body.dest_table) if option == oe.OPTION
+                  else oe.stamp_check_now(maps, acceptance, table=body.dest_table))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"option": option, "key": key, "signed": [
+        {"source": m.get("source"), "target": m.get("target"), key: m[key]} for m in signed if m.get(key)
+    ]}
 
 
 class SchemaDriftRequest(PolicyFieldsModel):

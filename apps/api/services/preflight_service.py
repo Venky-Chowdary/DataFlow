@@ -2211,6 +2211,10 @@ def run_file_preflight(
         source_table=source_table,
     )
     enriched_blockers.extend(_cursor_blockers)
+    from services.oracle_empty_not_null import preflight_hook as _oracle_empty_hook
+
+    oracle_empty_gate, _oe_blockers = _oracle_empty_hook(dict(locals()))  # Oracle '' into NOT NULL text
+    enriched_blockers.extend(_oe_blockers)
 
     # Only an operator-declared manual_review gates create-new (the default is the golden path).
     create_ddl_gate = build_create_ddl_gate(
@@ -2253,7 +2257,7 @@ def run_file_preflight(
         + ([require_pk_gate] if require_pk_gate else [])
         + ([overwrite_governance_gate] if overwrite_governance_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
-        + ([shape_route_gate] if shape_route_gate else [])
+        + ([shape_route_gate] if shape_route_gate else []) + ([oracle_empty_gate] if oracle_empty_gate else [])
     )
     extra_passed = sum(1 for g in extra_gates if g.get("status") != "block")
     total_gates = result.total_gates + len(extra_gates)
@@ -2266,7 +2270,7 @@ def run_file_preflight(
         "destination_db_type": destination_db_type or "",
         "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked
         and not null_cursor_blocked and not upsert_ddl_blocked and not pii_hash_blocked
-        and not shape_route_blocked and not overwrite_governance_blocked,
+        and not shape_route_blocked and not overwrite_governance_blocked and not _oe_blockers,
         "passed_count": passed_count,
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),
@@ -2850,6 +2854,9 @@ def run_file_preflight(
     from services.mixed_type_disclosure import mixed_type_text_warnings  # D319
 
     out.setdefault("warnings", []).extend(mixed_type_text_warnings(list(mappings or []), sample_rows))
+    from services.risk_contract_store import reapproval_warnings  # pre-upgrade approvals to re-approve
+
+    out["warnings"].extend(reapproval_warnings(mappings))
     from services.temporal_tick_disclosure import temporal_tick_warnings  # D372/R3
 
     out.setdefault("warnings", []).extend(temporal_tick_warnings(

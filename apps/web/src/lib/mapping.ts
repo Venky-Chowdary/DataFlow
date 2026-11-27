@@ -29,6 +29,7 @@ export type MappingTransform =
   | "strip_controls"
   | "identity_specialty"
   | "assume_timezone"
+  | "default_value"
   | "omit";
 
 /**
@@ -37,6 +38,14 @@ export type MappingTransform =
  * aligned with ``services.transform_engine.ASSUME_TIMEZONE_PREFIX``.
  */
 export const ASSUME_TIMEZONE_PREFIX = "assume_timezone:";
+
+/**
+ * Engine transform prefix for "write <value> for an empty, blank or NULL cell"
+ * (``services.transform_engine`` ``default:<value>``). Parameterised like the
+ * zone: the value is the operator's, never a guessed default. With a non-empty
+ * value the written value is never ``''`` (the Oracle ``''`` gate relies on it).
+ */
+export const DEFAULT_VALUE_PREFIX = "default:";
 
 export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: string }[] = [
   { id: "none", label: "None", detail: "Pass through as detected" },
@@ -63,6 +72,13 @@ export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: 
     detail:
       "Declare the zone a zoneless timestamp was recorded in, so an instant destination "
       + "(BSON date, TIMESTAMPTZ) stores an asserted instant instead of a guessed UTC one",
+  },
+  {
+    id: "default_value",
+    label: "Default for empty…",
+    detail:
+      "Write a value you name for empty, blank or NULL cells; every other value is unchanged "
+      + "(set it from Validate's Oracle empty-string action)",
   },
   {
     id: "identity_specialty",
@@ -169,6 +185,13 @@ export interface EditableMapping {
    * Execute-approve requires a continue-policy contract — boolean ack is incomplete.
    */
   riskContract?: MigrationRiskContractDraft;
+  /**
+   * Oracle '' gate: the server-signed "Create NULL-able; empty strings land as
+   * NULL" contract and the server-issued "Check now" request
+   * (POST /preflight/oracle-empty/sign). Kept as returned; the API verifies them.
+   */
+  emptyAsNullContract?: Record<string, unknown>;
+  emptyCheckNow?: Record<string, unknown>;
   /** Underscore-path collisions from STRUCT flatten — fail-closed, operator-visible. */
   flattenCollisions?: { flat: string; paths: string[][] }[];
   /**
@@ -708,6 +731,8 @@ export const UI_TO_ENGINE_TRANSFORM: Record<MappingTransform, string> = {
   // operator names one, and an empty value must never reach the engine as a
   // guessed default.
   assume_timezone: "",
+  // Complete only with the operator's value (DEFAULT_VALUE_PREFIX + value).
+  default_value: "",
   omit: "omit",
 };
 
@@ -2130,6 +2155,9 @@ export function applyTransformChange(m: EditableMapping, next: MappingTransform)
     // not a withdrawal.
     return applyDeclaredSourceZone(m, declaredSourceZone(m));
   }
+  if (next === "default_value") {
+    return applyDefaultValue(m, declaredDefaultValue(m));
+  }
   const restoring = m.transform === "omit";
   return {
     ...m,
@@ -2279,6 +2307,12 @@ export function uiTransformToEngine(t?: MappingTransform, engineTransform?: stri
     const engine = String(engineTransform || "");
     return engine.toLowerCase().startsWith(ASSUME_TIMEZONE_PREFIX) ? engine : undefined;
   }
+  if (t === "default_value") {
+    const engine = String(engineTransform || "");
+    return engine.toLowerCase().startsWith(DEFAULT_VALUE_PREFIX) && engine.length > DEFAULT_VALUE_PREFIX.length
+      ? engine
+      : undefined;
+  }
   return UI_TO_ENGINE_TRANSFORM[t];
 }
 
@@ -2364,6 +2398,8 @@ export function buildPreflightMappings(
         type_narrowing: omitted ? undefined : Boolean(safe.typeNarrowing) || undefined,
         risk_acknowledged: omitted ? undefined : Boolean(safe.riskAcknowledged) || undefined,
         risk_contract: omitted ? undefined : (safe.riskContract || undefined),
+        empty_as_null_contract: omitted ? undefined : (safe.emptyAsNullContract || undefined),
+        empty_check_now: omitted ? undefined : (safe.emptyCheckNow || undefined),
         review_kind: omitted ? undefined : (safe.reviewKind || classifyMappingReview(safe) || undefined),
         // Engine G15 only clears false-friend on this flag — not Approve / user_override.
         false_friend_confirmed: omitted ? undefined : Boolean(safe.falseFriendConfirmed) || undefined,
@@ -2407,7 +2443,28 @@ export function buildPreflightMappings(
 export function engineTransformToUi(engine?: string): MappingTransform {
   if (!engine || engine === "none" || engine === "identity") return "none";
   if (engine.toLowerCase().startsWith(ASSUME_TIMEZONE_PREFIX)) return "assume_timezone";
+  if (engine.toLowerCase().startsWith(DEFAULT_VALUE_PREFIX)) return "default_value";
   return ENGINE_TO_UI_TRANSFORM[engine] ?? "none";
+}
+
+/** The value written for empty cells on this row (``default:<value>``), if any. */
+export function declaredDefaultValue(m: EditableMapping): string {
+  const engine = String(m.engineTransform || "");
+  return engine.toLowerCase().startsWith(DEFAULT_VALUE_PREFIX) ? engine.slice(DEFAULT_VALUE_PREFIX.length) : "";
+}
+
+/**
+ * Write ``value`` for empty, blank or NULL cells of this row. An empty value
+ * leaves the row on the control with no engine transform (incomplete, never a
+ * guessed default). The value is kept exactly as typed: the engine compares it
+ * as written.
+ */
+export function applyDefaultValue(m: EditableMapping, value: string): EditableMapping {
+  return {
+    ...m,
+    transform: "default_value",
+    engineTransform: value !== "" ? `${DEFAULT_VALUE_PREFIX}${value}` : undefined,
+  };
 }
 
 /** The zone the operator declared for a zoneless source column, if any. */

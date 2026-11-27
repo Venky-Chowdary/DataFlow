@@ -444,6 +444,7 @@ _PATH_RULES: list[tuple[str, str, str]] = [
 # Exact method/path entries preserve fallback behavior on root and special
 # paths that cannot be represented safely by a prefix.
 _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
+    ("GET", "/api/v1/ops/risk-contract-upgrade-report", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/ops/cdc-cursors", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/ops/cdc-cursors/keys", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/ops/cdc-cursors/clear", Permission.WORKSPACE_MANAGE),
@@ -519,6 +520,8 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("POST", "/api/v1/transfer/plans", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/route", Permission.JOB_PLAN),
     ("POST", "/api/v1/preflight/run", Permission.JOB_PLAN),
+    # Oracle '' gate actions from Studio: the same bar as plan_transfer's risk_acceptance.
+    ("POST", "/api/v1/preflight/oracle-empty/sign", Permission.JOB_PLAN),
     ("POST", "/api/v1/repair/propose/preflight", Permission.JOB_PLAN),
     ("POST", "/api/v1/repair/propose/quarantine", Permission.JOB_PLAN),
     ("GET", "/", Permission.JOB_READ),

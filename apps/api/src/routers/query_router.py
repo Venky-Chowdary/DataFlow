@@ -2105,7 +2105,74 @@ def _is_oracle_connector(connector_type: object) -> bool:
     return _is_oracle_wire("", str(connector_type or ""))
 
 
+#: Oracle raises ORA-01466 ("unable to read data - table definition has
+#: changed") when the read-only transaction this query runs in
+#: (_apply_read_only_session) reads a table whose definition is newer than the
+#: transaction's snapshot. Oracle maps SCNs to time in steps of a few seconds,
+#: so a table created or altered seconds earlier hits it although nothing is
+#: wrong; a fresh transaction a moment later reads it. Seen on Oracle Database
+#: Free in the oracle-live CI job (a sample right after CREATE TABLE).
+_ORA_DEFINITION_CHANGED = "ORA-01466"
+_ORA_DEFINITION_RETRIES = 4
+_ORA_DEFINITION_WAIT_S = 1.0
+
+
+def _oracle_definition_changed(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if _ORA_DEFINITION_CHANGED in str(cur):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def _run_sql_query(
+    connector,
+    body,
+    *,
+    json_engine_text: bool = False,
+    apply_limit: bool = True,
+    on_row=None,
+    statement_timeout_seconds: float | None = None,
+):
+    """Run one read-only query; an Oracle ORA-01466 before any row is re-run.
+
+    The re-run is a new connection and a new read-only transaction, at most
+    ``_ORA_DEFINITION_RETRIES`` times, one second apart. Once a row has reached
+    ``on_row`` (a streamed export) nothing is re-run: rows would repeat.
+    """
+    delivered = [0]
+    counting_on_row = None
+    if on_row is not None:
+        def counting_on_row(columns, record):
+            delivered[0] += 1
+            on_row(columns, record)
+
+    attempts = 1 + (_ORA_DEFINITION_RETRIES if _is_oracle_connector(connector.type) else 0)
+    for attempt in range(attempts):
+        try:
+            return _run_sql_query_once(
+                connector,
+                body,
+                json_engine_text=json_engine_text,
+                apply_limit=apply_limit,
+                on_row=counting_on_row,
+                statement_timeout_seconds=statement_timeout_seconds,
+            )
+        except Exception as exc:
+            if attempt + 1 >= attempts or delivered[0] or not _oracle_definition_changed(exc):
+                raise
+            logging.getLogger(__name__).info(
+                "Oracle ORA-01466 on a just-defined table; re-running the read (attempt %d)",
+                attempt + 2,
+            )
+            time.sleep(_ORA_DEFINITION_WAIT_S)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _run_sql_query_once(
     connector,
     body,
     *,

@@ -813,11 +813,17 @@ def assert_mappings_executable(
         src = str(m.get("source") or "?")
         tgt = str(m.get("target") or "?")
         pending.append(f"{src} → {tgt}")
+    refused = [str(m.get("source") or "?") for m in work
+               if isinstance(m, dict) and m.get("risk_contract_refused")]
+    reapprove = (
+        f" The contract on {', '.join(refused[:8])} was not signed by this server: "
+        "re-approve this risk." if refused else ""
+    )
     if pending:
         sample = "; ".join(pending[:8])
         more = f" (+{len(pending) - 8} more)" if len(pending) > 8 else ""
         raise ValueError(
-            f"{len(pending)} mapping(s) require review before Execute: {sample}{more}"
+            f"{len(pending)} mapping(s) require review before Execute: {sample}{more}{reapprove}"
         )
 
     missing_contracts = lossy_mappings_missing_risk_contracts(work)
@@ -846,6 +852,7 @@ def assert_mappings_executable(
             "same-family column itself), or accept the loss with a signed contract: "
             "risk_acceptance on plan_transfer / start_transfer / retry_job, or a "
             "risk_contract on the schedule's mapping row (PATCH /api/v1/schedules/{id})."
+            + reapprove
         )
 
 

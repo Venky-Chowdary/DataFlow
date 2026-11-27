@@ -9807,6 +9807,13 @@ def run_reconciliation(
         records=records if isinstance(records, list) else None,
         rows_written=int(rows_written or 0), validation_mode=validation_mode,
     )
+    from services.oracle_empty_not_null import explain_empty_as_null
+
+    recon = explain_empty_as_null(
+        recon, endpoint=endpoint, mappings=mappings, dest_summary=dest_summary,
+        records=records if isinstance(records, list) else None,
+        rows_written=int(rows_written or 0), validation_mode=validation_mode,
+    )
     if isinstance(dest_summary, dict) and dest_summary.get("shape_recipe_hash"):
         # G-1: on a shaped run both digests derive from the same stream — a
         # dropped or silently skipped recipe step leaves them equally

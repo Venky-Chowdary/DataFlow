@@ -319,7 +319,12 @@ _MYSQL_TILES = [
 ]
 _MSSQL_TILES = ["sql_server", "amazon_rds_sql_server", "azure_sql_database",
                 "google_cloud_sql_sql_server", "azure_sql"]
-_ORACLE_TILES = ["amazon_rds_oracle", "oracle_autonomous_warehouse"]
+# Oracle Autonomous Data Warehouse is not in this list: it speaks Oracle's
+# wire but is another product, so an Oracle Database run does not prove it and
+# its tile is Planned (CLM-7). Its first live run on Oracle Database Free (the
+# oracle-live CI job) was refused for exactly that reason, which is right;
+# test_oracle_autonomous_warehouse_tile_is_planned_not_borrowed pins it.
+_ORACLE_TILES = ["amazon_rds_oracle"]
 
 _CASES = (
     [(t, "postgresql", "postgresql") for t in _PG_TILES]
@@ -419,3 +424,13 @@ def test_aurora_postgresql_tile_tests_green_on_postgres(client):
     })
     assert response.status_code == 200, response.text
     assert response.json().get("success") is True, response.json()
+
+
+def test_oracle_autonomous_warehouse_tile_is_planned_not_borrowed():
+    """The base Oracle engine's proof is not borrowed by a different Oracle product."""
+    from src.transfer.connector_capabilities import enrich_catalog_entry
+
+    tile = enrich_catalog_entry({"id": "oracle_autonomous_warehouse", "status": "live"})
+    assert tile["certification_tier"] == "planned"
+    assert tile["source_ready"] is False and tile["dest_ready"] is False
+    assert "oracle" in str(tile.get("planned_reason") or "").lower()

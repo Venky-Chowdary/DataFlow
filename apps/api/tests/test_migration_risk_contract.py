@@ -239,7 +239,7 @@ def test_assert_mappings_executable_signs_unsigned_draft_like_validate():
     assert_mappings_executable(mappings)
     assert mapping_has_clearing_risk_contract(mappings[0])
     assert str(mappings[0]["risk_contract"].get("signature") or "").startswith(
-        "mrc-sha256:"
+        "mrc-hmac:"
     )
 
 

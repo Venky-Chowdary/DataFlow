@@ -23,8 +23,11 @@ python docs/tools/gen_connector_matrix.py
 - **Certified means proven in CI.** A connector is Certified only when a CI
   job that proves its engine ran green with none of that engine's tests
   skipped. A connector that works but has no such run is "Implemented, not yet
-  proven". What the CI workflows are configured to start never counts. An
-  emulator run is marked as such; it is not the real cloud service.
+  proven". What the CI workflows are configured to start never counts.
+- **An emulator is not Certified.** Snowflake and BigQuery are proven in CI
+  against emulators (fakesnow and the goccy BigQuery emulator), not real cloud
+  accounts. Their tier reads "Proven on an emulator only, not on a real
+  account" here and in the product.
 - The CI evidence is the same file the product's public claims are generated
   from: `apps/api/data/connector_ci_evidence.json`. It names the CI run it came
   from (see the Counts table). A newer run changes this page only after that
@@ -61,12 +64,12 @@ These numbers count different things. Quote the first one as "connectors that ca
 | Count | Value | What it counts |
 |---|---|---|
 | Transfer-live drivers | 46 | Unique driver and file-format types that can run a transfer on this server right now (two-way, destination-only, file and first-class source-only), excluding fixture-only SDK sources. The public count. |
-| CI-proven drivers | 21 | Transfer-live drivers whose proving CI job ran green with none of their tests skipped (avro, bigquery, csv, excel, fixed_width, json, jsonl, mongodb, mysql, ndjson, orc, parquet, pgvector, postgresql, redis, snowflake, sqlite, sqlserver, tsv, xml, yaml). The other 25 are implemented but not yet proven. Evidence: CI run 43623907668, recorded 2026-11-14. |
+| CI-proven drivers | 22 | Transfer-live drivers whose proving CI job ran green with none of their tests skipped (avro, bigquery, csv, excel, fixed_width, json, jsonl, mongodb, mysql, ndjson, oracle, orc, parquet, pgvector, postgresql, redis, snowflake, sqlite, sqlserver, tsv, xml, yaml). The other 24 are implemented but not yet proven. Evidence: CI run 44932873967, recorded 2026-11-21. |
 | Transfer-ready catalog drivers | 35 | Unique drivers behind those tiles. Smaller than transfer_live_drivers because several tiles share one driver and file formats are not tiles here. |
 | Transfer-ready catalog ids | 82 | Catalog ids marked transfer-ready, hosted twins included. |
 | CDC source engines | 5 | Registry entries the Validate gate accepts as a CDC source. (mongodb, mysql, oracle, postgresql, sqlserver) |
 | Catalog tiles | 647 | All tiles in the connector catalog. By status: beta: 30, live: 111, planned: 506. |
-| Catalog tiles by tier | - | certified: 67, implemented: 41, planned: 506, source_only: 33. Tiles whose own record says transfer-ready: 108 (a per-tile answer; the frozen id list above is the shorter one). |
+| Catalog tiles by tier | - | certified: 69, implemented: 39, planned: 506, source_only: 33. Tiles whose own record says transfer-ready: 108 (a per-tile answer; the frozen id list above is the shorter one). |
 
 ### Drivers
 
@@ -76,7 +79,7 @@ These numbers count different things. Quote the first one as "connectors that ca
 | `airtable` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `asana` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `bigcommerce` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
-| `bigquery` | yes | yes | needs cursor | no | no | yes | merge | yes | Certified | proven (against an emulator) |
+| `bigquery` | yes | yes | needs cursor | no | no | yes | merge | yes | Proven on an emulator only, not on a real account | proven (against an emulator) |
 | `brevo` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `calendly` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
 | `clickup` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
@@ -108,7 +111,7 @@ These numbers count different things. Quote the first one as "connectors that ca
 | `mysql` | yes | yes | needs cursor | yes | yes | yes | insert_on_duplicate_key | yes | Certified | proven |
 | `neo4j` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
 | `notion` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
-| `oracle` | yes | yes | needs cursor | yes | yes | yes | merge | yes | Implemented, not yet proven | not proven: the proving job did not run (opt-in) |
+| `oracle` | yes | yes | needs cursor | yes | yes | yes | merge | yes | Certified | proven |
 | `pgvector` | yes | yes | needs cursor | no | yes | yes | - | yes | Certified | proven; engine `postgresql` |
 | `pinecone` | no | yes | n/a | no | no | yes | - | yes | Implemented, not yet proven | not proven: no CI job proves it |
 | `pipedrive` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
@@ -126,7 +129,7 @@ These numbers count different things. Quote the first one as "connectors that ca
 | `shopify` | yes | yes | needs cursor | no | no | no | - | no | Planned; not offered as transfer-ready | not proven: no CI job proves it |
 | `singer_tap` | yes | no | needs cursor | no | no | n/a | - | n/a | Source only | not proven: no CI job proves it |
 | `slack` | yes | no | no (declared) | no | no | n/a | - | n/a | Source only; beta, tested against fixtures | not proven: no CI job proves it |
-| `snowflake` | yes | yes | needs cursor | no | no | yes | merge | yes | Certified | proven (against an emulator) |
+| `snowflake` | yes | yes | needs cursor | no | no | yes | merge | yes | Proven on an emulator only, not on a real account | proven (against an emulator) |
 | `sqlite` | yes | yes | needs cursor | no | no | yes | insert_on_conflict | yes | Certified | proven |
 | `sqlserver` | yes | yes | needs cursor | yes | yes | yes | merge_holdlock | yes | Certified | proven |
 | `stripe` | yes | yes | needs cursor | no | no | no | - | no | Implemented, not yet proven; destination role not offered as transfer-ready | not proven: no CI job proves it |

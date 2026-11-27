@@ -51,6 +51,104 @@ truncation, nulls), what the writer must do, the quarantine and rollback
 posture, and who approved it, when and why. The default policy when a risk is
 not approved is to fail the job, never to continue silently.
 
+Only the server signs a contract: the signature is keyed with the
+deployment's signing key, so a contract written or edited by a client (for
+example one naming someone else as the approver) is refused wherever it is
+read: Validate, Execute, a schedule run and the proof pack. With a signed-in
+user, the contract names that user as the approver, whatever the request
+says. Each signing writes an audit event (who, workspace, column, table,
+kind, reason and the signature; no data values). Contracts approved before
+this release no longer count and must be re-approved: each one is listed in
+the start log, at `GET /api/v1/ops/risk-contract-upgrade-report` and as a
+`risk_contract_reapprove` warning in Validate (see
+[backup and upgrade](../operate/backup-and-upgrade.md)).
+
+**Oracle and empty strings.** Oracle stores `''` as NULL, so an empty string
+cannot go into a `NOT NULL` column (`ORA-01400`). When the destination is
+Oracle, Validate counts the empty strings in each source text column that will
+be `NOT NULL` there, the same way in Studio, over the API, in Pilot and at
+Execute. A SQL source counts them itself; otherwise Validate reads the rows the
+run will read (with its filter, incremental window and transform). If there
+are none, nothing is shown. If there are some, the run is blocked and the gate
+names the column and the count. If Validate could not count them exactly (only
+a preview could be read, the scan stopped, the time ran out, or the source or
+its catalog could not be read), the column is blocked too, and the gate says
+why empty strings could not be ruled out.
+
+A column whose type cannot hold `''` is ruled out from the source catalog,
+without reading a row, however large the table: numbers, dates and times,
+booleans and uuids; on PostgreSQL also an enum whose labels do not include
+`''`, `json`/`jsonb` (read as JSON text), arrays and `inet`/`cidr`/`macaddr`;
+on MySQL also `JSON`. A type that can hold `''` is always checked: text and
+char types, an enum with a `''` label, `tsvector`, `xml`, a MySQL `ENUM` or
+`SET`, MariaDB's `JSON` (a text column), and every SQLite column (SQLite's
+declared types do not restrict what is stored).
+
+Validate's check has 60 seconds in total. The columns you asked to check now
+go first, then the columns the preview already shows empty, then the rest,
+each with an equal share of the time left (what one column does not use goes
+to the next), so one slow column does not use up the others' time. A column
+the time does not reach is blocked with the reason and the actions below.
+
+Every block lists what you can do:
+
+- **Map `default:<value>`** on the column: empty and blank values are written
+  as `<value>`, everything else is unchanged; Validate then needs no read. A
+  mapping applies one transform, so this is not offered on a column that
+  already maps another transform (it would stop that transform). Change the
+  transform in Map first.
+- **Check this column now** (`risk_acceptance: {"option":
+  "oracle_empty_check_now", "columns": [...]}`): a longer read, within a total
+  of 5 minutes for the check, the asked columns first. Datawrap issues the
+  request itself, signed and bound to the column pair, the destination
+  (connector, schema and table), the workspace and your signed-in user; it
+  lasts at most an hour from when it was issued. A request written by hand
+  (or edited) in the API body is ignored. A column can be checked this way
+  once every 10 minutes per destination table, unless the last check ran out
+  of time; until then the gate says when it can be asked again. Not offered when the source catalog cannot be read: fix the
+  connection. On BigQuery, Snowflake, Databricks, ClickHouse and Trino this
+  is the only way Validate reads the column, because the warehouse bills the
+  scan. There, the result is reused for 24 hours so a schedule does not pay
+  for the scan again, and the gate says so (status "warn"): the column was
+  checked at `<time>`, the result is being reused until `<time>`, and how to
+  check again now.
+- **Replace the empty values in the source**, then validate again.
+
+In Studio these are listed under "Oracle empty strings" on the Validate
+screen. Map `default:<value>` asks for the value; Create NULL-able asks for
+a reason and is signed by the server in your name; Check now and Check again
+are issued by the server; Fix the connection opens Connectors. Each then runs
+Validate again. Replacing the source's values is something only you can do,
+so it is listed as text, not as a button. Over MCP, Pilot and the API, send
+the same `risk_acceptance`.
+
+A found empty string is not forgotten: when a later, shorter check stops
+before the row where an earlier check found it (within 24 hours, same
+source, scope and mapping), the column stays blocked with that finding, the
+gate says when it was checked, and Check again reads it afresh.
+
+Execute checks again unless it is confirming the Validate you approved (same
+workspace, destination, source and mapping, within an hour). An empty string
+that reaches the source after the last check is refused by Oracle at write
+time: that batch fails, and nothing is written as a different value.
+
+And, per table:
+
+- **New table:** one option, "Create `<col>` as NULL-able; empty strings land
+  as NULL". Approving it signs a risk contract (over MCP:
+  `risk_acceptance: {"option": "oracle_empty_as_null", "columns": [...],
+  "approved_by": ..., "reason": ...}`). Only that column loses `NOT NULL`. After
+  the write, Gate-8 lists the rows this run wrote under `explained_changes`
+  with the contract's id, and the proof pack lists the contract. When the
+  run's rows cannot be named (an append without a key list), Gate-8 reports
+  "NULL cells in this column: N (table-wide)" and does not call them
+  explained. A contract applies only to the column pair, the workspace, and the
+  destination connector, schema and table it was signed for.
+- **Existing table:** Datawrap never alters the column; use one of the
+  actions above, then validate again.
+- **Key column** (the run's key, or the destination's or source's primary
+  key): cannot be made NULL-able; use one of the actions above.
+
 When a route's mapping confidence is below the mode's floor, review the
 mapping in the Map step and run Validate again. Nothing is written until that
 gate passes.

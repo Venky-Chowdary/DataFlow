@@ -309,6 +309,17 @@ class SharedAuthState:
 
     # ── rate limits (fixed-window counters) ───────────────────────────────
 
+    # ── short-lived markers (shared across processes when Redis is configured) ──
+
+    def get_marker(self, key: str) -> str | None:
+        return self._b.get(f"marker:{key}")
+
+    def set_marker(self, key: str, value: str, ttl_sec: int) -> None:
+        self._b.set(f"marker:{key}", value, ttl_sec)
+
+    def clear_marker(self, key: str) -> None:
+        self._b.delete(f"marker:{key}")
+
     def rate_limit_hit(self, key: str, *, limit: int, window_sec: int) -> tuple[bool, int]:
         """Consume one unit. Returns (allowed, retry_after_sec)."""
         count = self._b.incr(f"{_RL_PREFIX}{key}", window_sec)

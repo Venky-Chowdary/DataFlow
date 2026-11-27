@@ -165,14 +165,24 @@ def test_two_pipelines_on_one_connector_run_concurrently(broker, tmp_path):
         )
         from src.transfer.engine import UniversalTransferEngine
 
-        with patch("src.transfer.engine.get_mongodb_service", return_value=_Mongo()):
-            results[i] = UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
+        results[i] = UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
 
-    threads = [threading.Thread(target=run, args=(i,)) for i in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    import services.mongodb_service as mongo_mod
+    import src.transfer.engine as engine_mod
+
+    # One patch, entered and left on this thread. A patch per worker thread
+    # restored in the wrong order: when the thread that patched first finished
+    # first, the second one "restored" the first one's fake, and every later
+    # job in the session wrote its status into that fake. Route tests then
+    # read a job that did not exist and waited out their timeout (the
+    # kafka-live hang from test_r10_d151 on, seen on 3 of 3 CI legs).
+    with patch("src.transfer.engine.get_mongodb_service", return_value=_Mongo()):
+        threads = [threading.Thread(target=run, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert engine_mod.get_mongodb_service is mongo_mod.get_mongodb_service
 
     for i in range(2):
         assert results[i].success, results[i].error
