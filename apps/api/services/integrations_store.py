@@ -131,16 +131,31 @@ def _load_raw() -> dict[str, Any]:
 
 
 def _load_raw_state() -> tuple[dict[str, Any], str]:
-    from services.integrations_persistence import read_document, save_sections
+    """The settings as served, and how the database read went.
+
+    - ``ok`` with the one-time file heal done: the database is the only
+      source; this node's file is ignored, so a section deleted (or never
+      written) in the database is not served from a stale copy (review 6).
+    - ``ok`` before the heal is done, or ``absent``: the file's missing paths
+      are copied up, then served database-first over the file.
+    - ``nodb``: the file is the store.
+    - ``error`` (configured database unreadable): served from this node's
+      file as a read-only fallback, never healed from; policy writes refuse
+      (503) on this state.
+    """
+    from services.integrations_persistence import HEAL_MARKER, read_document, save_sections
 
     file_raw = _read_file()
     state, durable = read_document()
+    if state == "ok" and (durable or {}).get(HEAL_MARKER):
+        return _normalize_raw({k: v for k, v in (durable or {}).items() if k != HEAL_MARKER}), state
     if state in ("absent", "ok") and file_raw is not None:
         # Heal: what this node's file holds and the database lacks is copied
         # up, missing paths only (never over a database value). Never on a
         # failed read: that is not an empty database.
         save_sections(file_raw, durable if state == "ok" else None)
-    return _normalize_raw({**(file_raw or {}), **(durable or {})}), state
+    durable = {k: v for k, v in (durable or {}).items() if k != HEAL_MARKER}
+    return _normalize_raw({**(file_raw or {}), **durable}), state
 
 
 def _normalize_raw(raw: dict[str, Any]) -> dict[str, Any]:

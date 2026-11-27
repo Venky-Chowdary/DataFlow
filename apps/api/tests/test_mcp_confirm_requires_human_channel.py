@@ -788,3 +788,33 @@ def test_a_deletion_is_not_undone_by_another_nodes_stale_file(app_client, monkey
     assert len(coll.writes) == writes, "nothing is copied from a file after the marker"
     assert "saml" not in coll.doc.get("sso", {})
     assert "api_key" not in coll.doc["ai_providers"]["openai"]
+
+
+def test_after_the_heal_a_section_the_database_lacks_is_not_served_from_the_file(app_client, monkeypatch):
+    """Review 6 (lead): reads merged file and database section by section, so a
+    section absent from the database was served from this node's stale file."""
+    import json
+
+    import services.integrations_persistence as persistence
+
+    store = app_client["integrations_store"]
+    coll = _FakeSettingsCollection()
+    coll.doc = {"_id": persistence.DOC_ID, "file_heal_done": True, "pilot": {"engine": "cloud"}}
+    monkeypatch.setattr(persistence, "_collection", lambda: coll)
+    store.STORE_PATH.write_text(json.dumps({
+        "sso": {"saml": {"entity_id": "https://stale.example/saml"}},
+        "ai_providers": {"openai": {"api_key": "enc:v1:stale", "model": "stale-model"}},
+        "pilot": {"engine": "local"},
+    }), encoding="utf-8")
+
+    raw = store._load_raw()
+
+    assert raw["pilot"]["engine"] == "cloud"
+    assert raw["sso"]["saml"].get("entity_id", "") != "https://stale.example/saml"
+    assert raw["ai_providers"]["openai"]["api_key"] == ""
+    assert raw["ai_providers"]["openai"]["model"] != "stale-model"
+    assert "file_heal_done" not in coll.doc.get("sso", {}) and "sso" not in coll.doc, "nothing copied up"
+
+    # The file is still the fallback when the configured database cannot be read.
+    coll.down = True
+    assert store._load_raw()["pilot"]["engine"] == "local"
