@@ -217,18 +217,14 @@ def _canonical_payload(payload: dict[str, Any]) -> str:
 #: (services.audit_chain_keys, the keyring the Check-now stamp uses). Only the
 #: server can produce one, so a contract written by a client is never honoured.
 HMAC_PREFIX = "mrc-hmac:"
-LEGACY_PREFIX = "mrc-sha256:"
 _HMAC_LABEL = b"datawrap-migration-risk-contract\x00"
+#: A contract this server cannot verify: written or edited by a client, or
+#: approved before this release (unkeyed ``mrc-sha256:``; services.risk_contract_store
+#: lists those for re-approval), or signed by an older replica during the upgrade.
 REAPPROVE_MESSAGE = (
     "This risk approval was not signed by this server, was changed after it was, or was approved "
-    "during the upgrade window (an older replica was still running): re-approve this risk once."
+    "before this release (or during the upgrade window): re-approve this risk once."
 )
-
-
-def legacy_digest(payload: dict[str, Any]) -> str:
-    """The unkeyed digest contracts carried before the keyed signature (anyone can compute it)."""
-    digest = hashlib.sha256(_canonical_payload(payload).encode("utf-8")).hexdigest()
-    return f"{LEGACY_PREFIX}{digest}"
 
 
 def _hmac_hex(payload: dict[str, Any], key: bytes) -> str:
@@ -247,26 +243,20 @@ def sign_risk_contract(payload: dict[str, Any]) -> str:
 
 
 def _signature_valid(payload: dict[str, Any]) -> bool:
-    """A keyed signature this deployment verifies, or an unkeyed one the server recorded."""
+    """A keyed signature this deployment verifies. Nothing else (pre-release digests included) is valid."""
     import hmac
 
     sig = str(payload.get("signature") or "")
-    if sig.startswith(HMAC_PREFIX):
-        key_id, _sep, mac = sig[len(HMAC_PREFIX):].partition(":")
-        try:
-            from services.audit_chain_keys import server_key_for
+    if not sig.startswith(HMAC_PREFIX):
+        return False
+    key_id, _sep, mac = sig[len(HMAC_PREFIX):].partition(":")
+    try:
+        from services.audit_chain_keys import server_key_for
 
-            key = server_key_for(key_id) if key_id else None
-        except Exception:  # noqa: BLE001 - an unreadable keyring verifies nothing
-            key = None
-        return bool(key) and hmac.compare_digest(_hmac_hex(payload, key), mac)
-    if sig.startswith(LEGACY_PREFIX) and sig == legacy_digest(payload):
-        from services.risk_contract_store import holds
-
-        from services.transform_engine import _current_workspace
-
-        return holds(str(payload.get("risk_id") or ""), sig, workspace=_current_workspace() or "")
-    return False
+        key = server_key_for(key_id) if key_id else None
+    except Exception:  # noqa: BLE001 - an unreadable keyring verifies nothing
+        key = None
+    return bool(key) and hmac.compare_digest(_hmac_hex(payload, key), mac)
 
 
 def infer_loss_classification(
@@ -398,13 +388,10 @@ def create_migration_risk_contract(
 
 
 def _record_signed(payload: dict[str, Any]) -> None:
-    """Record the contract in the server's store and write the audit event (no data values)."""
+    """Write the audit event for a signed contract (no data values)."""
     from services.transform_engine import _current_workspace
 
     workspace = str((payload.get("metadata") or {}).get("workspace_id") or _current_workspace() or "")
-    from services.risk_contract_store import record
-
-    record(payload, origin="signed", workspace_id=workspace)
     from services.audit_log import append_audit_event
 
     meta = payload.get("metadata") or {}

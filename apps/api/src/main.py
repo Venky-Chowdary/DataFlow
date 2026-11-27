@@ -352,23 +352,19 @@ async def lifespan(app: FastAPI):
             if imported:
                 print(f"[+] Imported {imported} pipeline schedule(s) from schedules.json → MongoDB")
 
-            # Unkeyed risk contracts the server stored before the keyed signature
-            # stay honoured (services.risk_contract_store); never fatal.
+            # Risk approvals made before the keyed signature no longer count: list
+            # them so operators re-approve before schedules resume. Never fatal.
             try:
-                from services.risk_contract_store import backfill_legacy_contracts
+                from services.risk_contract_store import refresh_upgrade_report
 
-                adopted = await asyncio.to_thread(backfill_legacy_contracts)
-                if adopted:
-                    print(f"[+] Recorded {adopted} pre-cutover risk contract(s) from stored schedules/plans/jobs")
-                from services.risk_contract_store import upgrade_report
-
-                pending = await asyncio.to_thread(upgrade_report)
+                pending = await asyncio.to_thread(refresh_upgrade_report)
                 if pending:
                     named = "; ".join(f"{e['kind']} {e['name'] or e['record_id']}: {e['route']}" for e in pending[:5])
-                    print(f"[!] {len(pending)} pre-upgrade risk approval(s) must be re-approved before their "
-                          f"schedules resume (GET /api/v1/ops/risk-contract-upgrade-report): {named}")
-            except Exception as contract_exc:  # noqa: BLE001 - unrecorded legacy contracts are refused, not trusted
-                print(f"[!] Legacy risk contract backfill skipped: {contract_exc}")
+                    print(f"[!] {len(pending)} risk approval(s) made before this release must be re-approved "
+                          f"in Validate before their schedules resume "
+                          f"(GET /api/v1/ops/risk-contract-upgrade-report): {named}")
+            except Exception as contract_exc:  # noqa: BLE001 - the approvals are refused either way
+                print(f"[!] Risk approval upgrade report skipped: {contract_exc}")
 
             # QA Snowflake D12: report schedules no workspace can see (dry run
             # unless DATAFLOW_SCHEDULE_ORPHAN_REPAIR=apply). Never fatal.

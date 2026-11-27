@@ -1,9 +1,10 @@
 """Round 6 (security): risk contracts are server-signed, bound and audited.
 
 1. A Migration Risk Contract carries a keyed HMAC (the deployment's signing
-   keyring); an unkeyed digest a client computes ("mrc-sha256:") is honoured
-   only when the server recorded that exact contract before the cutover, and is
-   otherwise refused with "re-approve this risk" — on every path that reads one.
+   keyring); an unkeyed digest ("mrc-sha256:", what every pre-release contract
+   carries and any client can compute) is never honoured: it is refused with
+   "re-approve this risk" on every path that reads one, and every stored one is
+   listed in the upgrade report (start log, ops endpoint, Validate warning).
 2. Signing writes an audit event (who, workspace, route, table, kind, reason,
    digest; no data values).
 3. An Oracle approval / Check-now request binds the workspace exactly and the
@@ -17,12 +18,19 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
 from services import migration_risk_contract as mrc
 from services import oracle_empty_not_null as oe
+
+
+def _unkeyed(body):
+    """The pre-release digest (``mrc-sha256:``): anyone, a client included, can compute it."""
+    import hashlib
+
+    return "mrc-sha256:" + hashlib.sha256(mrc._canonical_payload(body).encode("utf-8")).hexdigest()
 
 _MAPS = [{"source": c, "target": c.upper(), "confidence": 0.99, "target_type": "TEXT"} for c in ("id", "note")]
 
@@ -72,7 +80,7 @@ def _forged_oracle_contract(**over):
                      "destination": {"connector": "", "schema": "", "table": "dest"}},
     }
     body.update(over)
-    body["signature"] = mrc.legacy_digest(body)
+    body["signature"] = _unkeyed(body)
     return body
 
 
@@ -144,7 +152,7 @@ def test_1_every_generic_contract_reader_refuses_a_client_computed_digest():
     from services.mapping_pipeline import assert_mappings_executable
 
     forged = _generic_contract()
-    forged["signature"] = mrc.legacy_digest(forged)
+    forged["signature"] = _unkeyed(forged)
     mapping = {"source": "qty", "target": "qty", "source_type": "TEXT", "target_type": "INTEGER",
                "transform": "integer", "fidelity": "lossy_cast", "requires_review": True,
                "risk_contract": forged}
@@ -174,23 +182,22 @@ def test_1_an_unsigned_draft_is_signed_in_the_signed_in_users_name_never_the_dra
 
 @pytest.fixture
 def fresh_store(tmp_path, monkeypatch):
-    """An empty contract store (no cutover recorded yet), as on this release's first start."""
+    """An empty report store."""
     from services import risk_contract_store as store
 
     monkeypatch.setattr(store, "_collection", lambda: None)
     monkeypatch.setattr(store, "_file_path", lambda: tmp_path / "risk_contracts.json")
-    monkeypatch.delenv("DATAFLOW_RISK_CONTRACT_CUTOVER", raising=False)
     return store
 
 
 def _legacy(prefix, **over):
     c = _generic_contract(risk_id=f"{prefix}-{uuid.uuid4().hex[:8]}", **over)
-    c["signature"] = mrc.legacy_digest(c)
+    c["signature"] = _unkeyed(c)
     return c
 
 
 def _audit_signed(contract, workspace, **target):
-    """The event the old server-side signing path (hydrate) wrote: no digest, like the old one."""
+    """The event the pre-release server-side signing path (hydrate) wrote."""
     from services.audit_log import append_audit_event
 
     append_audit_event(action="migration_risk_contract.signed", resource=f"risk_contract:{contract['risk_id']}",
@@ -206,166 +213,67 @@ def _in_workspace(monkeypatch, ws):
     monkeypatch.setattr(transform_engine, "_current_workspace", lambda: ws)
 
 
-def test_1_the_cutover_is_this_releases_first_start_and_a_second_start_does_not_move_it(fresh_store, monkeypatch):
-    store = fresh_store
-    assert store.cutover() is None  # nothing recorded: nothing is adopted
-    signed_by_old_server = _legacy("mrc-old", approved_by="ops@example.com")
-    _audit_signed(signed_by_old_server, "ws-a")
-    # Stored by the old code a day before this release first starts (no fixed calendar date).
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    records = [("plan", {"created_at": yesterday, "workspace_id": "ws-a",
-                         "mappings": [{"risk_contract": signed_by_old_server}]})]
-    monkeypatch.setattr(store, "_stored_records", lambda: iter(records))
-    _in_workspace(monkeypatch, "ws-a")
-    assert not mrc.verify_risk_contract(signed_by_old_server)
-    assert store.backfill_legacy_contracts() == 1  # first start
-    first = store.recorded_cutover()
-    assert first is not None and abs((datetime.now(timezone.utc) - first).total_seconds()) < 60
-    assert mrc.verify_risk_contract(signed_by_old_server)
-    # A forged old-format contract presented after the cutover: no server record, refused.
-    forged = _legacy("mrc-forged")
-    assert not mrc.verify_risk_contract(forged)
-    later = (first + timedelta(seconds=1)).isoformat()
-    records.append(("job", {"created_at": later, "workspace_id": "ws-a",
-                            "transfer_request": {"mappings": [{"risk_contract": forged}]}}))
-    assert store.backfill_legacy_contracts() == 0  # second start: idempotent, cutover unchanged
-    assert store.recorded_cutover() == first and store.record_cutover() == first
-    assert not mrc.verify_risk_contract(forged)
-    # The same id with other content (another digest) is not the recorded contract.
-    changed = {**signed_by_old_server, "approved_by": "mallory@example.com"}
-    changed["signature"] = mrc.legacy_digest(changed)
-    assert not mrc.verify_risk_contract(changed)
-
-
-def test_1_a_planted_pre_cutover_plan_with_a_client_computed_contract_is_not_adopted(fresh_store, monkeypatch,
-                                                                                      sqlite_source):
-    """The review repro: client-authored contract JSON in a stored plan proves nothing."""
-    store = fresh_store
-    _in_workspace(monkeypatch, "ws-a")
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    planted = _legacy("mrc-planted")  # approved_by cfo@example.com, never signed by the server
-    oracle_planted = _forged_oracle_contract(risk_id=f"mrc-op-{uuid.uuid4().hex[:6]}",
-                                             metadata={"option": oe.OPTION, "workspace_id": "ws-a"})
-    # Same risk id audited, but for another approver: still not this contract.
-    _audit_signed({**planted, "approved_by": "ops@example.com"}, "ws-a")
-    monkeypatch.setattr(store, "_stored_records", lambda: iter([
-        ("plan", {"created_at": yesterday, "workspace_id": "ws-a",
-                  "mappings": [{"risk_contract": planted}, {"empty_as_null_contract": oracle_planted}]}),
-    ]))
-    assert store.backfill_legacy_contracts() == 0
-    assert not mrc.verify_risk_contract(planted) and not mrc.verify_risk_contract(oracle_planted)
-    mapping = {"source": "qty", "target": "qty", "fidelity": "lossy_cast", "risk_contract": planted}
-    assert not mrc.mapping_has_clearing_risk_contract(mapping)
-    monkeypatch.setattr(oe, "current_workspace", lambda: "ws-a")
-    gate, _ = oe.preflight_hook(_ctx(sqlite_source, [dict(_MAPS[0]), {**_MAPS[1], oe.CONTRACT_KEY: oracle_planted}]))
-    assert gate["status"] == "block" and "re-approve this risk once" in gate["message"]
-    assert "approved during the upgrade window" in mrc.REAPPROVE_MESSAGE
-
-
-def test_2_an_adopted_legacy_contract_is_honoured_only_in_its_own_workspace(fresh_store, monkeypatch):
-    store = fresh_store
-    audited = _legacy("mrc-ws", approved_by="ops@example.com")
+def test_1_a_pre_release_contract_is_never_honoured_whatever_evidence_it_has(monkeypatch, sqlite_source):
+    """Even one the old server audited (in its workspace, or naming a schedule) no longer counts."""
+    audited = _legacy("mrc-aud", approved_by="ops@example.com")
     _audit_signed(audited, "ws-a")
-    no_ws = _legacy("mrc-nows", approved_by="ops@example.com")
-    _audit_signed(no_ws, None)
-    other_ws_event = _legacy("mrc-otherws", approved_by="ops@example.com")
-    _audit_signed(other_ws_event, "ws-b")
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    monkeypatch.setattr(store, "_stored_records", lambda: iter([
-        ("schedule", {"created_at": yesterday, "workspace_id": "ws-a",
-                      "mappings": [{"risk_contract": audited}, {"risk_contract": other_ws_event}]}),
-        ("job", {"created_at": yesterday, "workspace_id": "", "mappings": [{"risk_contract": no_ws}]}),
-    ]))
-    assert store.backfill_legacy_contracts() == 1  # only the one audited in its own workspace
-    _in_workspace(monkeypatch, "ws-a")
-    assert mrc.verify_risk_contract(audited)
-    assert not mrc.verify_risk_contract(other_ws_event) and not mrc.verify_risk_contract(no_ws)
-    _in_workspace(monkeypatch, "ws-b")
-    assert not mrc.verify_risk_contract(audited)  # presented in another workspace
-    _in_workspace(monkeypatch, "")
-    assert not mrc.verify_risk_contract(audited)  # presented with no workspace
-    store.record(no_ws, origin="test", workspace_id="")
-    assert not mrc.verify_risk_contract(no_ws)  # an empty recorded workspace never matches
+    named = _legacy("mrc-sch", approved_by="ops@example.com")
+    _audit_signed(named, None, schedule_id="sch-1")
+    planted = _legacy("mrc-planted")  # what an API caller can write, naming cfo@example.com
+    for ws in ("ws-a", "", "ws-b"):
+        _in_workspace(monkeypatch, ws)
+        for c in (audited, named, planted):
+            assert not mrc.verify_risk_contract(c), (ws, c["risk_id"])
+            assert not mrc.mapping_has_clearing_risk_contract(
+                {"source": "qty", "target": "qty", "fidelity": "lossy_cast", "risk_contract": c})
+    oracle_old = _forged_oracle_contract(risk_id=f"mrc-op-{uuid.uuid4().hex[:6]}")
+    gate, _ = oe.preflight_hook(_ctx(sqlite_source, [dict(_MAPS[0]), {**_MAPS[1], oe.CONTRACT_KEY: oracle_old}]))
+    assert gate["status"] == "block" and "re-approve this risk once" in gate["message"]
+    assert "approved before this release" in mrc.REAPPROVE_MESSAGE
 
 
-def test_2_an_old_event_without_a_workspace_naming_a_schedule_is_adopted_only_in_that_schedules_workspace(
-        fresh_store, monkeypatch):
-    from types import SimpleNamespace
-
-    from services import schedule_store
-
-    store = fresh_store
-    c = _legacy("mrc-sched", approved_by="ops@example.com")
-    _audit_signed(c, None, schedule_id="sch-1")  # the pre-release code wrote no workspace
-    # The workspace comes from the server's own schedule record, not from the stored request.
-    monkeypatch.setattr(schedule_store, "get_schedule",
-                        lambda sid: SimpleNamespace(id=sid, workspace_id="ws-s") if sid == "sch-1" else None)
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    monkeypatch.setattr(store, "_stored_records", lambda: iter([
-        ("schedule", {"id": "sch-1", "name": "nightly", "created_at": yesterday, "workspace_id": "ws-s",
-                      "mappings": [{"source": "qty", "target": "qty", "risk_contract": c}]}),
-    ]))
-    assert store.backfill_legacy_contracts() == 1 and store.upgrade_report() == []
-    _in_workspace(monkeypatch, "ws-s")
-    assert mrc.verify_risk_contract(c)
-    _in_workspace(monkeypatch, "ws-other")
-    assert not mrc.verify_risk_contract(c)
-
-
-def test_2_an_old_event_with_no_target_is_not_adopted_and_is_listed_for_re_approval(fresh_store, monkeypatch,
-                                                                                    tmp_path):
-    import importlib
-
+def test_1_every_pre_release_contract_is_listed_for_re_approval(fresh_store, monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
 
     from tests import r4_route_harness as h
 
     store = fresh_store
-    c = _legacy("mrc-notarget", approved_by="ops@example.com")
-    _audit_signed(c, None)  # no workspace, nothing to derive one from
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    monkeypatch.setattr(store, "_stored_records", lambda: iter([
-        ("schedule", {"id": "sch-2", "name": "hourly orders", "created_at": yesterday, "workspace_id": "ws-a",
-                      "source_table": "orders", "dest_table": "ORDERS",
-                      "mappings": [{"source": "qty", "target": "QTY", "risk_contract": c}]}),
-    ]))
-    assert store.backfill_legacy_contracts() == 0
-    _in_workspace(monkeypatch, "ws-a")
-    assert not mrc.verify_risk_contract(c)
-    [entry] = store.upgrade_report()
-    assert entry["kind"] == "schedule" and entry["name"] == "hourly orders" and entry["reason"] == "audited_without_target"
-    assert entry["route"] == "orders → ORDERS (qty → QTY)" and entry["risk_id"] == c["risk_id"]
-    # Admin-visible list (workspace.manage), and a line in the Validate result for that route.
+    old = _legacy("mrc-old", approved_by="ops@example.com")
+    _audit_signed(old, "ws-a")
+    old_oracle = _forged_oracle_contract(risk_id=f"mrc-oo-{uuid.uuid4().hex[:6]}")
+    keyed = {**_generic_contract(risk_id="mrc-keyed"), "signature": mrc.sign_risk_contract(_generic_contract())}
+    records = [
+        ("schedule", {"id": "sch-2", "name": "hourly orders", "workspace_id": "ws-a", "source_table": "orders",
+                      "dest_table": "ORDERS", "mappings": [{"source": "qty", "target": "QTY", "risk_contract": old},
+                                                           {"source": "x", "target": "X", "risk_contract": keyed}]}),
+        ("job", {"_id": "job-9", "workspace_id": "ws-b", "transfer_request": {
+            "source": {"table": "t"}, "destination": {"table": "DEST"},
+            "mappings": [{"source": "note", "target": "NOTE", oe.CONTRACT_KEY: old_oracle}]}}),
+    ]
+    monkeypatch.setattr(store, "_stored_records", lambda: iter(records))
+    first = store.refresh_upgrade_report()
+    assert [(e["kind"], e["record_id"], e["route"]) for e in first] == [
+        ("schedule", "sch-2", "orders → ORDERS (qty → QTY)"), ("job", "job-9", "t → DEST (note → NOTE)")]
+    assert first[0]["name"] == "hourly orders" and first[0]["risk_id"] == old["risk_id"]
+    assert store.refresh_upgrade_report() == first == store.upgrade_report()  # every start: rebuilt, same
+    # Admin-visible list (workspace.manage, pinned in tests/fixtures/rbac_route_permissions.json).
     h.isolate(tmp_path, monkeypatch)
     from src.main import app
 
     with TestClient(app) as client:
         resp = client.get("/api/v1/ops/risk-contract-upgrade-report")
-    assert resp.status_code == 200 and resp.json()["entries"][0]["name"] == "hourly orders"
-    # (RBAC: workspace.manage, pinned in tests/fixtures/rbac_route_permissions.json.)
-    [warning] = store.reapproval_warnings([{"source": "qty", "target": "QTY", "risk_contract": c}])
-    assert "qty → QTY" in warning["message"] and "Re-approve this risk once" in warning["message"]
+    assert resp.status_code == 200 and {e["record_id"] for e in resp.json()["entries"]} >= {"sch-2", "job-9"}
+    # And a line in the Validate result for that route.
     from services.preflight_service import run_file_preflight
 
     result = run_file_preflight(
         columns=["qty"], column_types={"qty": "TEXT"}, row_count=1,
-        mappings=[{"source": "qty", "target": "QTY", "confidence": 0.99, "target_type": "TEXT", "risk_contract": c}],
+        mappings=[{"source": "qty", "target": "QTY", "confidence": 0.99, "target_type": "TEXT", "risk_contract": old}],
         destination_connected=True, sample_rows=[{"qty": "1"}], destination_table_exists=False,
         destination_can_create=True, destination_db_type="postgresql", source_kind="file", source_format="csv",
         sync_mode="full_refresh_overwrite", destination_table="ORDERS")
-    assert any(w.get("id") == "risk_contract_reapprove" for w in result.get("warnings") or [])
-
-
-def test_1_the_operator_override_wins_over_the_recorded_cutover(fresh_store, monkeypatch):
-    store = fresh_store
-    store.record_cutover()
-    monkeypatch.setenv("DATAFLOW_RISK_CONTRACT_CUTOVER", "2020-01-01T00:00:00+00:00")
-    assert store.cutover() == datetime(2020, 1, 1, tzinfo=timezone.utc)
-    c = _legacy("mrc-ovr", approved_by="ops@example.com")
-    _audit_signed(c, "ws-a")
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    assert store.adopt_stored({"created_at": yesterday, "workspace_id": "ws-a",
-                               "mappings": [{"risk_contract": c}]}, origin="plan") == 0
+    warning = next(w for w in result.get("warnings") or [] if w.get("id") == "risk_contract_reapprove")
+    assert "qty → QTY" in warning["message"] and "Re-approve this risk once" in warning["message"]
 
 
 # ------------------------------------------------------------------------ 2

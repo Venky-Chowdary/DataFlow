@@ -57,14 +57,10 @@ example one naming someone else as the approver) is refused wherever it is
 read: Validate, Execute, a schedule run and the proof pack. With a signed-in
 user, the contract names that user as the approver, whatever the request
 says. Each signing writes an audit event (who, workspace, column, table,
-kind, reason and the signature; no data values). Contracts signed before the
-keyed signature are honoured only if the server's audit log recorded
-signing them before the cutover (the moment this release first started,
-recorded once and shared by every replica). They must also be used in the
-workspace the audit record (or the schedule, plan or job it names) belongs
-to. Any other one shows a `risk_contract_reapprove` warning in Validate. The server records those contracts at
-startup from stored schedules, plans and jobs. Any other such contract is
-refused with "re-approve this risk once" (see
+kind, reason and the signature; no data values). Contracts approved before
+this release no longer count and must be re-approved: each one is listed in
+the start log, at `GET /api/v1/ops/risk-contract-upgrade-report` and as a
+`risk_contract_reapprove` warning in Validate (see
 [backup and upgrade](../operate/backup-and-upgrade.md)).
 
 **Oracle and empty strings.** Oracle stores `''` as NULL, so an empty string

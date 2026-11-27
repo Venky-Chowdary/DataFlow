@@ -275,8 +275,7 @@ def contract_refusal(
     if str(meta.get("workspace_id") or "") != here:
         return "the approval was signed in another workspace; re-approve this risk"
     bound = meta.get("destination")
-    legacy = str(raw.get("signature") or "").startswith("mrc-sha256:")
-    if destination is not None and not (legacy and bound is None) and not binding_matches(bound, destination):
+    if destination is not None and not binding_matches(bound, destination):
         return "the approval was signed for another destination; re-approve this risk"
     return ""
 
