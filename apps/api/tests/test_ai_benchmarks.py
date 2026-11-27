@@ -87,6 +87,18 @@ def test_replay_meets_its_floors_without_drift(offline, suite, monkeypatch):
     assert result["prompt_drift"] == [], f"{suite}: the product's prompt changed; re-record or re-seal"
 
 
+def test_the_pilot_loop_suite_leaves_the_shared_pilot_tools_as_it_found_them(offline):
+    """Train 2: the suite's fake executor never outlives it (later tests run real tools)."""
+    from src.ai.copilot.tools import get_pilot_tools
+
+    tools = get_pilot_tools()
+    before = vars(tools).get("execute")
+    result = bench.suite_pilot_agent_loop(bench.Runner("replay")).as_dict()
+    assert result["passed"], json.dumps(result, indent=1)
+    assert vars(tools).get("execute") is before
+    assert get_pilot_tools() is tools
+
+
 def test_replay_is_deterministic(offline):
     a = bench.suite_parity_explanation(bench.Runner("replay")).as_dict()
     b = bench.suite_parity_explanation(bench.Runner("replay")).as_dict()

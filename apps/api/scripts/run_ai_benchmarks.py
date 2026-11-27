@@ -496,13 +496,24 @@ def suite_pilot_agent_loop(r: Runner) -> SuiteResult:
     for case in cases:
         def loop() -> Any:
             agent = DataPilotAgent()
-            agent.tools.execute = lambda name, args: (executed.append(name) or  # type: ignore[method-assign]
-                                                      ToolResult(name=name, success=True, output={"count": 2}))
+            # agent.tools is the process-wide Pilot tools object (get_pilot_tools):
+            # the fake executor is removed again so later callers run the real tools.
+            tools = agent.tools
+            own = vars(tools)
+            had, prior = "execute" in own, own.get("execute")
+            tools.execute = lambda name, args: (executed.append(name) or  # type: ignore[method-assign]
+                                                ToolResult(name=name, success=True, output={"count": 2}))
             agent._with_result_context = lambda name, args, ctx: dict(args or {})  # type: ignore[method-assign]
             from src.ai.llm.provider import DataTransferAnthropicProvider
 
             agent._anthropic = DataTransferAnthropicProvider()
-            return agent._anthropic_agent_loop("list my connectors", [], "You are Datawrap Pilot.", None)
+            try:
+                return agent._anthropic_agent_loop("list my connectors", [], "You are Datawrap Pilot.", None)
+            finally:
+                if had:
+                    tools.execute = prior  # type: ignore[method-assign]
+                else:
+                    del tools.execute
 
         out, drift = r.play(res.suite, case, loop)
         answered.append(out is not None and out.method == "anthropic_agent")
