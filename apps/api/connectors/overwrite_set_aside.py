@@ -868,6 +868,38 @@ class _Elasticsearch:
         if left:
             raise RuntimeError(f"delete-by-query left {left} document(s) in {index}")
 
+    _META_KEY = "dataflow_overwrite"
+
+    def _meta(self, client: Any, index: str) -> dict[str, Any]:
+        from connectors.overwrite_governance import _es_body
+
+        body = _es_body(client.indices.get_mapping(index=index))
+        entry = _es_body(body.get(index) or (next(iter(body.values())) if len(body) == 1 else {}))
+        return _es_body(_es_body(entry.get("mappings") or {}).get("_meta") or {})
+
+    def _record_aliases(self, client: Any, live: str, backup: str) -> list[dict[str, Any]]:
+        """Keep the live index's alias definitions in the backup's ``_meta``.
+
+        Held only in memory, they were lost when a restore failed after
+        deleting the live index (review N4). ``index.blocks.write`` blocks
+        data writes, not mapping metadata, so the write-blocked backup takes it.
+        """
+        from connectors.overwrite_governance import elasticsearch_aliases
+
+        actions = elasticsearch_aliases(client, live)
+        meta = self._meta(client, backup)
+        meta[self._META_KEY] = {"index": live, "aliases": actions}
+        client.indices.put_mapping(index=backup, meta=meta)
+        return actions
+
+    def _recorded_aliases(self, client: Any, backup: str) -> tuple[list[dict[str, Any]] | None, dict[str, Any]]:
+        """``(alias actions recorded at retire or None, the index's own _meta)``."""
+        meta = self._meta(client, backup)
+        recorded = meta.pop(self._META_KEY, None)
+        if not isinstance(recorded, dict):
+            return None, meta
+        return list(recorded.get("aliases") or []), meta
+
     def retire(
         self, cfg: dict[str, Any], table_name: str, schema: str | None, *, approved: bool = False
     ) -> str | None:
@@ -878,10 +910,23 @@ class _Elasticsearch:
         if stale and live:
             raise _refuse_ambiguous(table_name, backup)
         if not live:
-            # A backup with no live index (left by the earlier delete-and-
-            # recreate design) is the only copy: it is this run's backup.
-            return backup if stale else None
+            if not stale:
+                return None
+            recorded, _meta = self._recorded_aliases(client, backup)
+            if recorded is None:
+                # Left by the earlier delete-and-recreate design: the only
+                # copy, and it is this run's backup.
+                return backup
+            # A restore of this design failed after deleting the live index:
+            # put the index (and its recorded aliases) back first, instead of
+            # loading into a new index and discarding the backup on success.
+            self.restore(cfg, table_name, backup, schema)
         self._clone_aside(client, table_name, backup)
+        try:
+            self._record_aliases(client, table_name, backup)
+        except Exception:
+            client.indices.delete(index=backup, ignore_unavailable=True)
+            raise
         try:
             self._empty(client, table_name)
         except Exception:
@@ -893,6 +938,8 @@ class _Elasticsearch:
     def restore(
         self, cfg: dict[str, Any], table_name: str, backup: str, schema: str | None
     ) -> None:
+        import json
+
         from connectors.overwrite_governance import (
             elasticsearch_aliases,
             elasticsearch_restore_aliases,
@@ -902,12 +949,27 @@ class _Elasticsearch:
         live = _live_name_from_backup(backup, table_name)
         if not client.indices.exists(index=backup):
             raise TableDropError(live, f"backup {backup} is missing")
-        aliases = elasticsearch_aliases(client, live) if client.indices.exists(index=live) else []
-        client.indices.delete(index=live, ignore_unavailable=True)
-        # The backup is already write-blocked, which clone requires.
-        self._clone(client, backup, live)
-        self._unblock(client, live)
-        elasticsearch_restore_aliases(client, live, aliases)
+        recorded, own_meta = self._recorded_aliases(client, backup)
+        aliases = recorded
+        if aliases is None:
+            aliases = elasticsearch_aliases(client, live) if client.indices.exists(index=live) else []
+        try:
+            client.indices.delete(index=live, ignore_unavailable=True)
+            # The backup is already write-blocked, which clone requires.
+            self._clone(client, backup, live)
+            self._unblock(client, live)
+            if recorded is not None:
+                # The clone copied the backup's _meta: give back the index's own.
+                client.indices.put_mapping(index=live, meta=own_meta)
+            elasticsearch_restore_aliases(client, live, aliases)
+        except Exception as exc:
+            raise TableDropError(
+                live,
+                f"{exc}. The previous documents are in {backup} (write-blocked); its _meta."
+                f"{self._META_KEY} keeps the alias definitions. To finish by hand: clone {backup} "
+                f"to {live}, lift index.blocks.write on {live}, then POST _aliases with "
+                f"{json.dumps({'actions': aliases}, default=str)}; the next overwrite also does it.",
+            ) from exc
         client.indices.delete(index=backup)
 
     def discard(

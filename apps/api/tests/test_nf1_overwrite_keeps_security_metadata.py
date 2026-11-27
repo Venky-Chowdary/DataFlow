@@ -978,3 +978,43 @@ def test_gate_blocks_an_unrestorable_snowflake_overwrite_even_when_approved():
     for acknowledged in (False, True):
         gate = _gate("snowflake", probe=probe, acknowledged=acknowledged)
         assert gate["status"] == "block" and "OWNERSHIP" in gate["message"]
+
+
+
+# ------------------------------- review 2: alias definitions survive (N4)
+
+
+def test_elasticsearch_alias_definitions_are_kept_in_the_backup_meta(es):
+    client, store = es
+    backup = retire_set_aside("elasticsearch", {}, "orders")
+
+    recorded = store[backup]["mappings"]["_meta"]["dataflow_overwrite"]["aliases"]
+    assert {a["add"]["alias"] for a in recorded} == {"orders_eu", "orders_read"}
+    assert "_meta" not in store["orders"].get("mappings", {})
+
+
+def test_elasticsearch_failed_restore_after_delete_is_finished_by_the_next_run(es, monkeypatch):
+    """The restore deleted the live index and then failed: the aliases used to be
+    lost (memory only) and the next run discarded the backup on success."""
+    client, store = es
+    backup = retire_set_aside("elasticsearch", {}, "orders")
+    store["orders"]["docs"] = [9]
+    real_clone = client.indices.clone
+
+    def _down(**_: Any) -> dict:
+        raise RuntimeError("cluster unavailable")
+
+    monkeypatch.setattr(client.indices, "clone", _down)
+    with pytest.raises(TableDropError) as info:
+        restore_set_aside("elasticsearch", {}, "orders", backup)
+    assert "orders" not in store and backup in store
+    assert '"alias": "orders_eu"' in str(info.value) and "term" in str(info.value)
+
+    monkeypatch.setattr(client.indices, "clone", real_clone)
+    again = retire_set_aside("elasticsearch", {}, "orders")  # the next run
+
+    assert store["orders"]["docs"] == []  # emptied for this run, in place
+    assert store[again]["docs"] == [1, 2, 3]  # the pre-run documents are its backup
+    assert store["orders"]["aliases"]["orders_eu"] == {"filter": {"term": {"region": "EU"}}}
+    assert set(store["orders"]["aliases"]) == {"orders_eu", "orders_read"}
+    assert "dataflow_overwrite" not in (store["orders"].get("mappings") or {}).get("_meta", {})
