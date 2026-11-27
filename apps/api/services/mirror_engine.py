@@ -975,12 +975,20 @@ def _stream_insert_pk_staging(
 
 def _forces_primary_key(conn: Any) -> bool:
     """Whether this MySQL-family connection's CREATE TABLE demands a PRIMARY KEY."""
-    from services.dest_require_primary_key import server_forces_primary_key_on
+    from services.dest_require_primary_key import (
+        PrimaryKeyRequirementUnreadable,
+        server_forces_primary_key_on,
+    )
 
     try:
         cursor = conn.connection.cursor()
-    except Exception:  # noqa: BLE001 — no DBAPI cursor: keep the plain CTAS
-        return False
+    except Exception as exc:  # noqa: BLE001 - re-raised as unreadable
+        # Not "not forced" (review 3 item 7): whether this server forces a
+        # PRIMARY KEY could not be read, like a probe that failed.
+        raise PrimaryKeyRequirementUnreadable(
+            "could not open a cursor to read whether the destination forces a "
+            f"PRIMARY KEY ({type(exc).__name__})"
+        ) from exc
     try:
         return server_forces_primary_key_on(cursor)[0]
     finally:
