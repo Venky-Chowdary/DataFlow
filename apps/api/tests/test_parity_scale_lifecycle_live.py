@@ -131,7 +131,8 @@ def test_a_live_lease_elsewhere_is_left_alone(tables) -> None:
 
     job_id = _job(*tables)
     _live_lease(job_id)
-    verification.start_for_job(job_id, force=True, background=False)
+    with pytest.raises(verification.VerificationBusy):  # a clear refusal, never a silent no-op
+        verification.start_for_job(job_id, force=True, background=False)
     assert not verification.block_of(_svc().get_job(job_id))  # nothing started: another worker owns it
     _svc().update_job_fields(job_id, {"parity_scale": {"state": "running", "tables": [
         {"name": tables[1], "status": "running", "scan_id": "x"}]}})
@@ -274,3 +275,163 @@ def test_a_summary_stored_while_verification_ran_is_recomputed_when_it_ends(tabl
                              touch_updated_at=False)
     assert verification.start_for_job(job_id, background=False)["state"] == "passed"
     assert _job_summary(_svc().get_job(job_id), job_id)["verdict"] == "proven"
+
+
+@live
+def test_an_item_longer_than_the_lease_keeps_its_worker(tables, monkeypatch) -> None:
+    """Review 2, N1: the heartbeat renews on its own timer while the scan makes progress.
+
+    One item runs three times the lease TTL: the job never reads "stopped", the
+    sweeper does not start a second scan, the schedule still waits, and a
+    re-verify in the same process is a clear refusal (409), not a no-op.
+    """
+    from services.parity_scale import lease, verification
+    from services.parity_scale.driver import ParityScan
+
+    monkeypatch.setattr(lease, "LEASE_TTL_S", 1)
+    real = ParityScan._range_unit
+    slowed: list[int] = []
+
+    def slow_unit(self, item):
+        if not slowed:
+            slowed.append(1)
+            time.sleep(3.0)  # one statement in flight, longer than the lease
+        return real(self, item)
+
+    monkeypatch.setattr(ParityScan, "_range_unit", slow_unit)
+    job_id = _job(*tables)
+    verification.start_for_job(job_id)
+    deadline = time.monotonic() + 10
+    while not slowed and time.monotonic() < deadline:
+        time.sleep(0.05)
+    time.sleep(2.0)  # well past the 1 s lease, inside the slow item
+    job = _svc().get_job(job_id)
+    assert verification.is_running(job), verification.effective_block(job)
+
+    class Sched:
+        id = "s1"
+        last_job_id = job_id
+        wait_for_verification = True
+
+    assert verification.schedule_waits_for_verification(Sched()).startswith("Waiting")
+    assert verification.sweep_once(background=False) == 0  # no second scan
+    with pytest.raises(verification.VerificationBusy):
+        verification.start_for_job(job_id, only_table=tables[1], force=True, background=False)
+    deadline = time.monotonic() + 60
+    while verification.is_running(_svc().get_job(job_id)) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    block = _svc().get_job(job_id)["parity_scale"]
+    assert block["state"] == "passed", block
+    assert block["tables"][0]["evidence"]["resumed"] == 0
+
+
+def test_a_silent_worker_stops_renewing(monkeypatch) -> None:
+    """Review 2, N1: no progress past the stall limit → no renewal, so the lease lapses."""
+    from services.parity_scale import lease, verification
+
+    monkeypatch.setattr(lease, "LEASE_TTL_S", 0.5)
+    renewed: list[str] = []
+    monkeypatch.setattr(lease, "renew", lambda job_id, token: renewed.append(token))
+    stalled = verification._Heartbeat("job", "tok", lambda: time.monotonic() - 1000.0, stall_after=5.0)
+    stalled.start()
+    time.sleep(0.5)
+    stalled.stop()
+    assert renewed == []
+    moving = verification._Heartbeat("job", "tok", time.monotonic, stall_after=5.0)
+    moving.start()
+    time.sleep(0.5)
+    moving.stop()
+    assert renewed  # a worker making progress renews on its own timer
+
+
+@live
+def test_the_wall_clock_cap_holds_across_resumes(tables) -> None:
+    """Review 2, N1: time spent in an item when the worker stopped counts after a resume."""
+    from datetime import datetime, timedelta, timezone
+
+    from services.parity_scale import verification
+    from services.parity_scale.driver import ParityScan, ScanConfig
+    from services.parity_scale.store import MemoryScanStore
+
+    job_id = _job(*tables)
+    spec, _why = verification.table_spec(_svc().get_job(job_id))
+    store = MemoryScanStore()
+    plan = verification.plan_for(spec)
+    scan = ParityScan.start(plan, store=store, open_side=verification.side_opener(spec),
+                            config=ScanConfig(segment_rows=300, max_wall_seconds=60.0))
+    scan.run(max_seconds=0.01)
+    scan.close()
+    state = store.load(scan.state["scan_id"])
+    state["inflight"] = {"t": "stream", "since": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()}
+    store.save(scan.state["scan_id"], state)
+    resumed = ParityScan.resume(scan.state["scan_id"], store=store, open_side=verification.side_opener(spec),
+                                plan=plan)
+    assert resumed.state["elapsed_s"] >= 300
+    while not resumed.done:
+        resumed.run(max_seconds=5)
+    assert resumed.result()["outcome"] != "match"  # the cap ran out: never a pass
+
+
+@live
+def test_the_streamed_pass_is_chunked_into_resumable_key_ranges() -> None:
+    """Review 2, N1: a streamed column is compared range by range, each its own item."""
+    import uuid
+
+    from services.parity_scale import verification
+    from services.parity_scale.driver import ParityScan, ScanConfig
+    from services.parity_scale.store import MemoryScanStore
+    from test_parity_scale_verification_live import N, _endpoint, _sql
+
+    src, dst = f"psd1_c_s_{uuid.uuid4().hex[:8]}", f"psd1_c_d_{uuid.uuid4().hex[:8]}"
+    _sql(f'CREATE TABLE "{src}" (id bigint PRIMARY KEY, name varchar(40), amt numeric(12,2))',
+         f"INSERT INTO \"{src}\" SELECT g, 'n' || g, g FROM generate_series(1, {N}) g",
+         f'CREATE TABLE "{dst}" (LIKE "{src}" INCLUDING ALL)',
+         f'INSERT INTO "{dst}" SELECT id, upper(name), amt FROM "{src}"',
+         f"UPDATE \"{dst}\" SET name = 'WRONG' WHERE id = 2500")
+    try:
+        job_id = _svc().create_transfer_job({
+            "status": "completed",
+            "transfer_request": {"source": _endpoint(src), "destination": _endpoint(dst),
+                                 "mappings": [{"source": "id", "target": "id"},
+                                              {"source": "name", "target": "name", "transform": "upper"},
+                                              {"source": "amt", "target": "amt"}],
+                                 "sync_mode": "full_refresh_overwrite"},
+            "destination_summary": {"table": dst, "primary_key_columns": ["id"]},
+            "reconciliation": {"passed": True, "source_rows": N, "target_rows": N,
+                               "coverage_limit": {"rows": N, "limit": 100}},
+        })
+        spec, _why = verification.table_spec(_svc().get_job(job_id))
+        plan = verification.plan_for(spec)
+        assert plan.stream_columns, "the transformed column is compared by the streamed pass"
+        scan = ParityScan.start(plan, store=MemoryScanStore(), open_side=verification.side_opener(spec),
+                                config=ScanConfig(segment_rows=500, mode="R"))
+        scan.run(max_seconds=0.01)  # the start item: plans the ranges
+        streams = [i for i in scan.state["queue"] if i["t"] == "stream"]
+        assert len(streams) > 1 and all("lo" in i for i in streams)
+        while not scan.done:
+            scan.run(max_seconds=5)
+        evidence = scan.result()
+        assert evidence["outcome"] == "differences_found"
+        assert evidence["differences"]["changed_rows"] == 1
+        assert evidence["coverage"]["complete"] is True
+    finally:
+        _sql(f'DROP TABLE IF EXISTS "{src}"', f'DROP TABLE IF EXISTS "{dst}"')
+
+
+@live
+def test_a_streamed_read_runs_under_a_server_side_timeout(tables) -> None:
+    """Review 2, N1: every statement the scan issues has a server-side timeout, the stream's too."""
+    from services.parity_scale import verification
+
+    job_id = _job(*tables)
+    spec, _why = verification.table_spec(_svc().get_job(job_id))
+    side = verification.side_opener(spec)("source", verification.plan_for(spec))
+    try:
+        side.set_timeout(1)
+        started = time.monotonic()
+        with pytest.raises(Exception, match="(?i)cancel|timeout"):
+            list(side.stream("SELECT pg_sleep(5)", [], 10))
+        assert time.monotonic() - started < 4
+        assert side.execute("SELECT 1", [])[0][0] == 1
+    finally:
+        side.close()

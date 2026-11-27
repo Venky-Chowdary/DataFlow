@@ -362,12 +362,14 @@ class SqlSide(Side):
         rows = self.execute(sql, [*params, *[h.lower() for h in row_hashes], *lim])
         return [(str(r[0]).lower(), tuple(r[1:])) for r in rows]
 
+    range_stream = True
+
     def iter_stream(
-        self, columns: Sequence[ColumnPlan], batch: int = 5000
+        self, columns: Sequence[ColumnPlan], batch: int = 5000, lo: KeyBound = None, hi: KeyBound = None
     ) -> Iterator[tuple[tuple[Any, ...] | None, tuple[Any, ...]]]:
         width = len(self.key_cols)
         names = [*self.quoted_keys(), *(self.quote(self.column_name(c)) for c in columns)]
-        where, params = self.where(None, None)
+        where, params = self.where(lo, hi)
         sql = f"SELECT {', '.join(names)} FROM {self.table_ref} WHERE {where}"
         for row in self.stream(sql, params, batch):
             yield (tuple(row[:width]) if width else None), tuple(row[width:])

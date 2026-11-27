@@ -62,6 +62,10 @@ class ScanConfig:
     boundary_strategy: str = "auto"
     large_table_rows: int = 2_000_000
     statement_timeout_s: float | None = 120.0
+    #: Server-side timeout of one streamed read (one key range of the streamed pass).
+    stream_timeout_s: float | None = 1800.0
+    #: Rows per key range of the streamed pass (each range is its own resumable item).
+    stream_chunk_rows: int = 250_000
     max_retries: int = 2
     max_wall_seconds: float | None = None
     systematic_unit_ratio: float = 0.05
@@ -165,6 +169,9 @@ class ParityScan:
         self._open_side = open_side
         self._sides: dict[str, Side] = {}
         self._pinned_at: dict[str, float] = {}
+        #: Monotonic time of the last statement, streamed batch or item: the worker's
+        #: heartbeat renews the lease only while this moves (services.parity_scale.verification).
+        self.last_progress = time.monotonic()
         self._pool: Any = None
         #: Test hook: called before each statement with ``(op, item)``; it may
         #: raise :class:`UnitTimeout` to simulate a slow statement.
@@ -210,6 +217,18 @@ class ParityScan:
             raise ScanStateError("the plan changed since the scan started (schema or mapping): restart it")
         if state.get("status") == "running":
             state["resumed"] = int(state.get("resumed") or 0) + 1
+            inflight = state.pop("inflight", None)
+            if isinstance(inflight, dict):
+                # An item was running when the worker stopped: its time counts against the
+                # wall-clock cap (until now, a conservative bound), so the cap holds across resumes.
+                from datetime import datetime, timezone
+
+                try:
+                    since = datetime.fromisoformat(str(inflight.get("since")))
+                    lost = max(0.0, (datetime.now(timezone.utc) - since).total_seconds())
+                except (TypeError, ValueError):
+                    lost = 0.0
+                state["elapsed_s"] = round(float(state.get("elapsed_s") or 0) + lost, 6)
             store.save(scan_id, state)
         return cls(state, store=store, open_side=open_side, fault=fault)
 
@@ -236,6 +255,8 @@ class ParityScan:
         if role not in self._sides:
             side = self._open_side(role, self.plan)
             side.set_timeout(self.config.statement_timeout_s)
+            side.tick = self._tick
+            side.stream_timeout_seconds = self.config.stream_timeout_s
             if self.config.pin_snapshot:
                 self._pin(role, side)
             self._sides[role] = side
@@ -258,6 +279,9 @@ class ParityScan:
             consistency[role] = {"kind": "not_established", "reason": f"pinning failed ({type(exc).__name__})"}
         if consistency[role].get("kind") == "pinned":
             self._pinned_at[role] = time.monotonic()
+
+    def _tick(self) -> None:
+        self.last_progress = time.monotonic()
 
     def _held_for(self, role: str) -> float:
         return round(time.monotonic() - self._pinned_at[role], 3) if role in self._pinned_at else 0.0
@@ -341,12 +365,18 @@ class ParityScan:
                     self._abandon_queue("scan wall-clock budget exhausted")
                     continue
                 t0 = time.monotonic()
+                self.last_progress = t0
                 self._release_overdue_pins()
                 item = self.state["queue"].pop(0) if self.state["queue"] else None
                 if item is None:
                     self._finish()
                 else:
+                    if item["t"] == "stream":
+                        # A long item: if the worker stops inside it, a resume still counts its time.
+                        self.state["inflight"] = {"t": item["t"], "since": utc_now()}
+                        self.store.save(self.state["scan_id"], {**self.state, "queue": [item, *self.state["queue"]]})
                     self._process(item)
+                    self.state.pop("inflight", None)
                     self.state["items_done"] += 1
                 self.state["elapsed_s"] = round(float(self.state["elapsed_s"]) + time.monotonic() - t0, 6)
                 self.store.save(self.state["scan_id"], self.state)
@@ -435,10 +465,11 @@ class ParityScan:
             tail.append({"t": "held"})
         if mode == "S":
             self.state["phase"] = "stream"
-            self._enqueue({"t": "stream", "shape": "multiset" if self.plan.keyless else "keyed"}, *tail)
+            shape = "multiset" if self.plan.keyless else "keyed"
+            self._enqueue(*self._stream_items(shape), *tail)
             return
         if self.plan.stream_columns and not self.plan.keyless:
-            tail.append({"t": "stream", "shape": "changed"})
+            tail.append({"t": "stream", "shape": "changed", "chunk": True})
         self.state["phase"] = "level0"
         if mode == "R":
             src = self.side("source")
@@ -458,6 +489,7 @@ class ParityScan:
                 self._enqueue(*tail)
                 return
             bounds = [None, *[encode_key(p) for p in points], None]
+            tail = [x for t in tail for x in (self._stream_items(t["shape"], bounds) if t.get("chunk") else [t])]
             units = [
                 {"t": "R", "lo": bounds[i], "hi": bounds[i + 1], "lvl": 0, "retry": 0,
                  "est": self.config.segment_rows}
@@ -468,7 +500,29 @@ class ParityScan:
             self._enqueue(*units, {"t": "level0_done"})
         else:
             self._enqueue({"t": "H", "lvl": 0, "parents": [], "retry": 0})
+            tail = [x for t in tail for x in (self._stream_items(t["shape"]) if t.get("chunk") else [t])]
         self._enqueue(*tail)
+
+    def _stream_items(self, shape: str, bounds: list[Any] | None = None) -> list[dict[str, Any]]:
+        """The streamed pass as resumable items: one per key range when the key orders the
+        same on both engines (each range read under its own timeouts), else one item."""
+        one = [{"t": "stream", "shape": shape}]
+        if shape == "multiset" or not self.plan.order_portable:
+            return one
+        src = self.side("source")
+        if not getattr(src, "range_stream", False):
+            return one
+        if bounds is None:
+            try:
+                points, _strategy = src.boundaries(self.config.stream_chunk_rows,
+                                                   strategy=self.config.boundary_strategy,
+                                                   large_table_rows=self.config.large_table_rows)
+                self.state["statements"] += 1
+            except UnitTimeout:
+                return one
+            bounds = [None, *[encode_key(p) for p in points], None]
+        return [{"t": "stream", "shape": shape, "lo": bounds[i], "hi": bounds[i + 1]}
+                for i in range(len(bounds) - 1)]
 
     # mode R ---------------------------------------------------------------------------
     def _range_unit(self, item: dict[str, Any]) -> None:
@@ -826,6 +880,8 @@ class ParityScan:
         self.state["phase"] = "stream"
         shape = item["shape"]
         columns = None if shape != "changed" else list(self.plan.stream_columns)
+        wall = self.config.max_wall_seconds
+        deadline = None if wall is None else time.monotonic() + max(0.0, wall - float(self.state["elapsed_s"]))
         try:
             if self._fault is not None:
                 self._fault("stream", item)
@@ -834,15 +890,19 @@ class ParityScan:
                 shape=shape, columns=columns, keys_cap=self.config.keys_stored_cap,
                 examples_cap=self.config.examples_cap, batch=self.config.stream_batch,
                 spill_dir=self.config.spill_dir,
+                lo=decode_key(item["lo"]) if item.get("lo") is not None else None,
+                hi=decode_key(item["hi"]) if item.get("hi") is not None else None,
+                deadline=deadline, tick=self._tick,
             )
         except UnitTimeout as exc:
             self._not_compared(item, f"streamed pass timed out: {exc}")
             return
+        previous = self.state.get("stream") or {}
         self.state["stream"] = {
             "shape": shape,
             "columns": [c.target for c in (columns or self.plan.compared_columns)],
-            "rows_source": result.rows_source,
-            "rows_destination": result.rows_destination,
+            "rows_source": int(previous.get("rows_source") or 0) + result.rows_source,
+            "rows_destination": int(previous.get("rows_destination") or 0) + result.rows_destination,
         }
         diff = self.state["diff"]
         if shape == "multiset":
@@ -854,8 +914,11 @@ class ParityScan:
                                       level0_complete=True)
             return
         if shape == "keyed":
-            self.state["rows"].update(source=result.rows_source, destination=result.rows_destination,
-                                      level0_complete=True)
+            # Key ranges add up; one unfinished range is "not compared", so the total is never claimed.
+            self.state["rows"]["source"] = int(self.state["rows"].get("source") or 0) + result.rows_source
+            self.state["rows"]["destination"] = (int(self.state["rows"].get("destination") or 0)
+                                                 + result.rows_destination)
+            self.state["rows"]["level0_complete"] = True
             for name in ("missing", "extra", "duplicate"):
                 diff[name] += getattr(result, name)
                 diff[f"{name}_keys"].extend(getattr(result, f"{name}_keys"))

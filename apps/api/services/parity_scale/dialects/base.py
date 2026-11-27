@@ -70,6 +70,10 @@ def range_predicate(
     return (" AND ".join(clauses) or "TRUE"), params
 
 
+def _noop() -> None:
+    return None
+
+
 class Side(ABC):
     """One table on one engine, under one plan, as source or destination."""
 
@@ -83,6 +87,14 @@ class Side(ABC):
         self.timeout_seconds: float | None = None
         #: Set by :meth:`pin`: every later statement reads one snapshot of the table.
         self.pinned = False
+        #: Called at every statement and every streamed batch: the worker's heartbeat
+        #: counts these as progress (the scan driver sets it).
+        self.tick: Any = _noop
+        #: Server-side timeout of one streamed read (the streamed pass, per key range).
+        self.stream_timeout_seconds: float | None = None
+
+    #: Streams can be limited to a key range (the streamed pass is chunked by range).
+    range_stream = False
 
     def pin(self, max_hold_s: float | None = None) -> dict[str, Any]:
         """Read every later statement from one snapshot; what was established, in words.

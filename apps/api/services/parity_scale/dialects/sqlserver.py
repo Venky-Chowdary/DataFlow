@@ -251,7 +251,16 @@ class SqlServerSide(SqlSide):
                 return None
         return None
 
+    def _set_query_timeout(self, seconds: float | None) -> None:
+        inner = self._driver_conn()
+        if seconds and inner is not None and hasattr(inner, "query_timeout"):
+            try:
+                inner.query_timeout = max(1, int(round(seconds)))
+            except (AttributeError, TypeError, ValueError):
+                pass
+
     def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+        self.tick()
         inner = self._driver_conn()
         if self.timeout_seconds and inner is not None and hasattr(inner, "query_timeout"):
             try:
@@ -273,11 +282,14 @@ class SqlServerSide(SqlSide):
             raise
 
     def stream(self, sql: str, params: Sequence[Any], batch: int) -> Iterator[tuple[Any, ...]]:
+        self.tick()
+        self._set_query_timeout(self.stream_timeout_seconds or self.timeout_seconds)
         cur = self.conn.cursor()
         try:
             cur.execute(sql, tuple(params)) if params else cur.execute(sql)
             while True:
                 rows = cur.fetchmany(batch)
+                self.tick()
                 if not rows:
                     break
                 yield from rows

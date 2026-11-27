@@ -67,11 +67,18 @@ class StreamResult:
 
 
 def _spill(conn: sqlite3.Connection, table: str, side: Side, columns: Sequence[ColumnPlan], *,
-           keyed: bool, keep_values: bool, batch: int) -> int:
+           keyed: bool, keep_values: bool, batch: int, lo: Any = None, hi: Any = None,
+           deadline: float | None = None, tick: Any = None) -> int:
+    import time
+
+    from services.parity_scale.dialects.base import UnitTimeout
+
     plan = side.plan
     count = 0
     pending: list[tuple[str | None, str, str | None, str | None]] = []
-    for key, values in side.iter_stream(columns, batch=batch):
+    rows = side.iter_stream(columns, batch=batch, lo=lo, hi=hi) if (lo is not None or hi is not None) \
+        else side.iter_stream(columns, batch=batch)
+    for key, values in rows:
         h = row_fingerprint_hash(values, columns, plan.dest_engine, source=side.is_source)
         ident = side.key_hex(key) if keyed and key is not None else None
         key_json = json.dumps(encode_key(key)) if keyed and key is not None else None
@@ -81,6 +88,10 @@ def _spill(conn: sqlite3.Connection, table: str, side: Side, columns: Sequence[C
         if len(pending) >= batch:
             conn.executemany(f"INSERT INTO {table} VALUES (?, ?, ?, ?)", pending)
             pending.clear()
+            if tick is not None:
+                tick()
+            if deadline is not None and time.monotonic() > deadline:
+                raise UnitTimeout("the scan's wall-clock budget ran out in the streamed pass")
     if pending:
         conn.executemany(f"INSERT INTO {table} VALUES (?, ?, ?, ?)", pending)
     conn.commit()
@@ -98,6 +109,10 @@ def stream_compare(
     examples_cap: int = 20,
     batch: int = 5000,
     spill_dir: str | None = None,
+    lo: Any = None,
+    hi: Any = None,
+    deadline: float | None = None,
+    tick: Any = None,
 ) -> StreamResult:
     if shape not in {"changed", "keyed", "multiset"}:
         raise ValueError(f"unknown stream shape {shape!r}")
@@ -112,8 +127,11 @@ def stream_compare(
         conn.execute("PRAGMA synchronous=OFF")
         conn.execute("CREATE TABLE s (k TEXT, h TEXT NOT NULL, key TEXT, vals TEXT)")
         conn.execute("CREATE TABLE d (k TEXT, h TEXT NOT NULL, key TEXT, vals TEXT)")
-        result.rows_source = _spill(conn, "s", source, cols, keyed=keyed, keep_values=not keyed, batch=batch)
-        result.rows_destination = _spill(conn, "d", destination, cols, keyed=keyed, keep_values=not keyed, batch=batch)
+        bounds = {"lo": lo, "hi": hi, "deadline": deadline, "tick": tick}
+        result.rows_source = _spill(conn, "s", source, cols, keyed=keyed, keep_values=not keyed, batch=batch,
+                                    **bounds)
+        result.rows_destination = _spill(conn, "d", destination, cols, keyed=keyed, keep_values=not keyed,
+                                         batch=batch, **bounds)
         if keyed:
             conn.execute("CREATE INDEX s_k ON s(k)")
             conn.execute("CREATE INDEX d_k ON d(k)")

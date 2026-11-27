@@ -390,15 +390,69 @@ def table_state(table: dict[str, Any]) -> str:
 # ── the runner ───────────────────────────────────────────────────────────────
 
 
+class VerificationBusy(RuntimeError):
+    """A live worker holds this job's verification: re-verify is refused (HTTP 409), never ignored."""
+
+
+class _Heartbeat(threading.Thread):
+    """Renews the lease on its own timer while the scan makes progress.
+
+    Progress is a statement started, a streamed batch read or an item begun
+    (``scan.last_progress``); every statement runs under its own server-side
+    timeout, so a healthy worker inside one long statement still renews. A
+    worker silent for longer than ``stall_after`` stops renewing and its lease
+    lapses: readers then see it as stopped.
+    """
+
+    def __init__(self, job_id: str, token: str, progress: Callable[[], float], stall_after: float) -> None:
+        super().__init__(name=f"parity-verify-heartbeat-{job_id}", daemon=True)
+        self.job_id, self.token, self.progress, self.stall_after = job_id, token, progress, stall_after
+        self.halt = threading.Event()
+        self.lost = threading.Event()
+
+    def run(self) -> None:
+        import time
+
+        from services.parity_scale import lease
+
+        while not self.halt.wait(max(0.1, float(lease.LEASE_TTL_S) / 5.0)):
+            if time.monotonic() - self.progress() > self.stall_after:
+                continue  # no progress: let the lease lapse
+            try:
+                lease.renew(self.job_id, self.token)
+            except lease.LeaseLost:
+                self.lost.set()
+                return
+            except Exception:  # noqa: BLE001 — the next beat tries again; the lease outlives a blip
+                logger.warning("Lease renewal failed for the verification of job %s", self.job_id, exc_info=True)
+
+    def stop(self) -> None:
+        self.halt.set()
+        self.join(5.0)
+
+
+def _stall_after(config: Any) -> float:
+    """How long a worker may make no progress at all: its slowest statement and retries, plus margin."""
+    timeout = float(getattr(config, "statement_timeout_s", None) or 120.0)
+    retries = int(getattr(config, "max_retries", 2) or 0)
+    return timeout * (retries + 1) + 60.0
+
+
 def _workspace_of(job: dict[str, Any]) -> str:
     return str(job.get("workspace_id") or "")
 
 
-def _register(job_id: str, thread: threading.Thread) -> bool:
-    """Check and register this process's worker for the job in one step."""
+def _register(job_id: str, thread: threading.Thread, *, takeover: bool = False) -> bool:
+    """Check and register this process's worker for the job in one step.
+
+    ``takeover``: the registered worker's lease has lapsed (it stopped making
+    progress); the new worker replaces it and the old one is fenced off by the
+    lease at its next write.
+    """
     with _ACTIVE_LOCK:
         running = _ACTIVE.get(job_id)
-        if running is not None and running is not thread and (running.is_alive() or not running.ident):
+        if (running is not None and running is not thread and (running.is_alive() or not running.ident)
+                and not takeover):
             return False
         _ACTIVE[job_id] = thread
         return True
@@ -433,12 +487,17 @@ def start_for_job(
     job = _service().get_job(job_id) or {}
     if not job:
         return {}
-    if not force and not only_table:
+    from services.parity_scale.lease import lease_live
+
+    asked = bool(force or only_table)
+    if not asked:
         if block_of(job):
             return effective_block(job)
         if not needs_scale_verification(job):
             return {}
-    if is_running(job):
+    if is_running(job) or (asked and lease_live(job)):
+        if asked:
+            raise VerificationBusy("Verification is already running for this job.")
         return effective_block(job)
     spec, why = table_spec(job)
     if spec is not None and only_table and only_table != spec["name"]:
@@ -446,11 +505,15 @@ def start_for_job(
     holder: dict[str, tuple[Any, ...]] = {}
     worker = threading.Thread(target=lambda: _run_guarded(*holder["work"]), name=f"parity-verify-{job_id}",
                               daemon=True)
-    if not _register(job_id, worker):
+    if not _register(job_id, worker, takeover=asked and not lease_live(job)):
+        if asked:
+            raise VerificationBusy("Verification is already running for this job.")
         return effective_block(job)
     token = claim(job_id)
     if token is None:
         _unregister(job_id, worker)
+        if asked:
+            raise VerificationBusy("Verification is already running for this job.")
         return effective_block(_service().get_job(job_id))
     try:
         if spec is None:
@@ -533,7 +596,7 @@ def _run_guarded(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, r
 
 def _run(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, resume: bool, token: str) -> None:
     from services.parity_scale.driver import ParityScan, ScanConfig
-    from services.parity_scale.lease import renew
+    from services.parity_scale.lease import LeaseLost, renew
 
     store = JobScanStore(job_id, token)
     plan = plan_for(spec)
@@ -552,13 +615,18 @@ def _run(job_id: str, spec: dict[str, Any], scan_id: str, config: Any, resume: b
         scan = ParityScan.resume(scan_id, store=store, open_side=opener, plan=plan)
     else:
         scan = ParityScan.start(plan, store=store, open_side=opener, config=cfg, scan_id=scan_id)
+    beat = _Heartbeat(job_id, token, lambda: scan.last_progress, _stall_after(scan.config))
+    beat.start()
     try:
         while not scan.done:
+            if beat.lost.is_set():
+                raise LeaseLost(f"the verification of job {job_id} is held by another worker now")
             progress = scan.run(max_seconds=SLICE_SECONDS)
             renew(job_id, token)
             _update_table(job_id, spec["name"], token, progress=progress)
         evidence = job_evidence(scan.result())
     finally:
+        beat.stop()
         scan.close()
     _finish_table(job_id, spec["name"], token, status="done", evidence=evidence)
 

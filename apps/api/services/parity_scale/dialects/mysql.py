@@ -194,8 +194,8 @@ class MySQLSide(SqlSide):
             "AND TABLE_NAME = %s", [self.schema or None, self.table])
         return int(rows[0][0]) if rows and rows[0][0] is not None else None
 
-    def _timeout(self, cur: Any) -> None:
-        seconds = self.timeout_seconds
+    def _timeout(self, cur: Any, seconds: float | None = None) -> None:
+        seconds = seconds or self.timeout_seconds
         if not seconds:
             return
         if self.server == "mariadb":
@@ -246,6 +246,7 @@ class MySQLSide(SqlSide):
     def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         import pymysql
 
+        self.tick()
         try:
             with self.conn.cursor() as cur:
                 self._timeout(cur)
@@ -270,11 +271,15 @@ class MySQLSide(SqlSide):
     def stream(self, sql: str, params: Sequence[Any], batch: int) -> Iterator[tuple[Any, ...]]:
         import pymysql
 
+        self.tick()
         cur = self.conn.cursor(pymysql.cursors.SSCursor)
         try:
+            # One streamed SELECT runs under the stream's own server-side timeout.
+            self._timeout(cur, self.stream_timeout_seconds)
             cur.execute(sql, list(params))
             while True:
                 rows = cur.fetchmany(batch)
+                self.tick()
                 if not rows:
                     break
                 yield from rows

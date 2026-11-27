@@ -154,6 +154,7 @@ class SqliteSide(Side):
         return 0
 
     def _run(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+        self.tick()
         if self.timeout_seconds:
             self._deadline = time.monotonic() + float(self.timeout_seconds)
             self.conn.set_progress_handler(self._progress, 1000)

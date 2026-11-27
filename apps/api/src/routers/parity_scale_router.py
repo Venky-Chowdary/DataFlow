@@ -64,7 +64,7 @@ async def get_verification(job_id: str, request: Request):
 @router.post("/jobs/{job_id}/verification/tables/{table}")
 async def reverify_table(job_id: str, table: str, request: Request):
     from services.audit_log import actor_from_request
-    from services.parity_scale.verification import is_running, start_for_job
+    from services.parity_scale.verification import VerificationBusy, is_running, start_for_job
     from services.parity_state import audit
 
     job = _job(job_id, request, write=True)
@@ -72,6 +72,9 @@ async def reverify_table(job_id: str, table: str, request: Request):
         raise HTTPException(status_code=409, detail="Verification is already running for this job.")
     try:
         block = await asyncio.to_thread(start_for_job, job_id, only_table=table, force=True)
+    except VerificationBusy as exc:
+        # Never a silent no-op: a live worker holds it (or it just started elsewhere).
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     audit("job.verification.restarted", job=job, job_id=job_id, actor=actor_from_request(request),

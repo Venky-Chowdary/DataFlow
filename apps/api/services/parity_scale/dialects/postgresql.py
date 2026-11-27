@@ -340,6 +340,7 @@ class PostgresSide(SqlSide):
     def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         import psycopg2
 
+        self.tick()
         if self.pinned:
             return self._execute_pinned(sql, params)
         try:
@@ -376,10 +377,14 @@ class PostgresSide(SqlSide):
     def stream(self, sql: str, params: Sequence[Any], batch: int) -> Iterator[tuple[Any, ...]]:
         import uuid as _uuid
 
-        if self.pinned:
-            # A savepoint keeps the pinned snapshot usable when the stream fails part way.
-            with self.conn.cursor() as plain:
+        self.tick()
+        with self.conn.cursor() as plain:
+            if self.pinned:
+                # A savepoint keeps the pinned snapshot usable when the stream fails part way.
                 plain.execute("SAVEPOINT psd1_stream")
+            if self.timeout_seconds:
+                # Every FETCH is its own statement under this server-side timeout.
+                plain.execute("SET LOCAL statement_timeout = %s", (int(self.timeout_seconds * 1000),))
         cur = self.conn.cursor(name=f"psd1_stream_{_uuid.uuid4().hex[:12]}")
         cur.itersize = batch
         failed = False
@@ -387,6 +392,7 @@ class PostgresSide(SqlSide):
             cur.execute(sql, list(params))
             while True:
                 rows = cur.fetchmany(batch)
+                self.tick()
                 if not rows:
                     break
                 yield from rows
