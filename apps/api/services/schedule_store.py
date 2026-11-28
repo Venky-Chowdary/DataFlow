@@ -1038,6 +1038,7 @@ def _save_one_mongo(
     sched: PipelineSchedule,
     *,
     guard: _RunWrite | None = None,
+    touched: bool = False,
 ) -> None:
     """Write only what this caller changed, conditional on the stored revision.
 
@@ -1126,6 +1127,11 @@ def _save_one_mongo(
             reference["name_key"] = _canon(payload["name_key"])
         delta = _changed_fields(payload, reference)
         if not delta:
+            if touched:
+                # An explicit write that changed no field (a pause of a paused
+                # schedule) still moves the revision, so a conditional undo
+                # never mistakes it for "nothing happened".
+                coll.update_one({"_id": sched.id}, {"$inc": {"version": 1}})
             return
         filt: dict[str, Any] = {"_id": sched.id}
         filt["version"] = (
@@ -1166,6 +1172,7 @@ def _save_mongo(
     *,
     removed_ids: Sequence[str] = (),
     guard: _RunWrite | None = None,
+    touched: Sequence[str] = (),
 ) -> None:
     """Persist schedules as individual docs with three-way-merged version CAS.
 
@@ -1185,7 +1192,8 @@ def _save_mongo(
     for s in schedules:
         seen.add(s.id)
         _save_one_mongo(
-            coll, s, guard=guard if guard is not None and guard.schedule_id == s.id else None
+            coll, s, guard=guard if guard is not None and guard.schedule_id == s.id else None,
+            touched=s.id in touched,
         )
     # Only the ids a caller explicitly deleted are removed. Sweeping every doc
     # absent from this snapshot deleted schedules another instance created
@@ -1214,11 +1222,15 @@ def _save_all(
     *,
     removed_ids: Sequence[str] = (),
     guard: _RunWrite | None = None,
+    touched: Sequence[str] = (),
 ) -> None:
+    """Persist ``schedules``. ``touched`` names schedules an explicit write was
+    for: their revision moves even when no field changed."""
     svc = _mongo_backend()
     if svc:
-        _save_mongo(svc, schedules, removed_ids=removed_ids, guard=guard)
+        _save_mongo(svc, schedules, removed_ids=removed_ids, guard=guard, touched=touched)
         return
+    _bump_file_versions(schedules, touched)
     # One process owns the file: every writer loads and saves under the store
     # lock (``_CLAIM_LOCK``), so nothing lands between a caller's read and its
     # write and ``guard`` has nothing left to check. Two processes sharing one
@@ -1227,6 +1239,27 @@ def _save_all(
     # that window parsed nothing and saw no schedules at all (get_schedule ->
     # None; a run's result recorded against "no such schedule" was dropped).
     write_json_atomic(STORE_PATH, {"schedules": [s.to_dict() for s in schedules]})
+
+
+def _bump_file_versions(schedules: list[PipelineSchedule], touched: Sequence[str]) -> None:
+    """The file store keeps a revision like the Mongo one: +1 per write that
+    changes a schedule (or is explicitly for it). It stayed 0, so a conditional
+    write could not tell "unchanged" from "changed and changed back"."""
+    stored = {s.id: s for s in _load_schedules_from_file(STORE_PATH)} if STORE_PATH.exists() else {}
+    wanted = set(touched)
+    for sched in schedules:
+        old = stored.get(sched.id)
+        if old is None:
+            continue
+        base = int(old.version or 0)
+        if sched.id in wanted or _state_of(sched) != _state_of(old):
+            sched.version = base + 1
+        else:
+            sched.version = base
+
+
+def _state_of(sched: PipelineSchedule) -> str:
+    return _canon({k: v for k, v in sched.to_dict().items() if k != "version"})
 
 
 def schedule_overdue_seconds(
@@ -2510,7 +2543,7 @@ def _update_schedule_locked(
             if due is None or due <= now:
                 updated.next_run_at = next_run_for(updated, now)
         schedules[i] = updated
-        _save_all(schedules)
+        _save_all(schedules, touched=(schedule_id,))
         if "approval_request" not in data:
             released = _release_empty_mapping_if_mapped(updated)
             if released:
@@ -2615,27 +2648,43 @@ def _release_empty_mapping_if_mapped(sched: PipelineSchedule) -> PipelineSchedul
 
 
 def restore_if_unchanged(
-    schedule_id: str, expected: Mapping[str, Any], values: Mapping[str, Any]
+    schedule_id: str, expected_version: int, values: Mapping[str, Any]
 ) -> str:
-    """Put ``values`` back on a schedule only if ``expected`` still holds.
+    """Put ``values`` back on a schedule only if nobody wrote it since revision
+    ``expected_version`` (the revision this process's own change produced).
 
     Used to undo a change this process made (a connector delete that failed
     after pausing or re-pointing its schedules). The write is raw: re-enabling
     through :func:`update_schedule` would re-arm the slot and drop a pending
-    retry or an approved re-run. Returns ``restored``, ``changed`` (someone
-    changed one of the fields since; nothing written) or ``gone``.
+    retry or an approved re-run. On Mongo it is one conditional update on the
+    revision, so a write another replica lands between the read and the write
+    makes it match nothing. Returns ``restored``, ``changed`` (written since;
+    nothing changed here) or ``gone``.
     """
+    svc = _mongo_backend()
+    if svc is not None:
+        coll = svc.get_database()["pipeline_schedules"]
+        doc = coll.find_one({"_id": schedule_id})
+        if doc is None:
+            return "gone"
+        result = coll.find_one_and_update(
+            {"_id": schedule_id, "version": int(expected_version)},
+            {"$set": bson_safe_document(dict(values)), "$inc": {"version": 1}},
+            return_document=True,
+        )
+        if result is None:
+            return "changed"
+        _remember_base(_schedule_from_doc(result))
+        return "restored"
     with _CLAIM_LOCK:
         schedules = _load_all()
         for i, s in enumerate(schedules):
             if s.id != schedule_id:
                 continue
-            current = s.to_dict()
-            if any(_canon(current.get(k)) != _canon(v) for k, v in expected.items()
-                   if k not in ("version", "updated_at")):
+            if int(s.version or 0) != int(expected_version):
                 return "changed"
-            schedules[i] = PipelineSchedule.from_dict({**current, **dict(values)})
-            _save_all([schedules[i]] if _mongo_backend() is not None else schedules)
+            schedules[i] = PipelineSchedule.from_dict({**s.to_dict(), **dict(values)})
+            _save_all(schedules, touched=(schedule_id,))
             return "restored"
     return "gone"
 

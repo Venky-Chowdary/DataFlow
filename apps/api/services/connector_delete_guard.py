@@ -339,10 +339,12 @@ def _change_one(plan: DeletePlan, row: dict[str, Any]) -> dict[str, Any]:
         return {**done, "result": "change_failed", "error": type(exc).__name__}
     after = _snapshot(changed) if changed is not None else before
     moved = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
-    # The undo writes only if the schedule is still exactly as this change left
-    # it (every field): an operator's pause or edit in between stands.
+    # The undo is conditional on the revision this change produced: any write
+    # since (an operator's pause or edit, another replica) makes it stand.
+    stored = get_schedule(sched.id)
+    version = int(stored.version or 0) if stored is not None and _snapshot(stored) == after else None
     return {**done, "result": result, "_before": {k: before.get(k) for k in moved},
-            "_after": after if moved else {}}
+            "_version": version}
 
 
 def _pause_or_repoint(plan: DeletePlan) -> list[dict[str, Any]]:
@@ -362,7 +364,10 @@ def _undo_one(done: dict[str, Any]) -> None:
         done["result"] = "unchanged" if done["result"] in ("paused", "repointed") else done["result"]
         return
     try:
-        outcome = restore_if_unchanged(done["id"], done["_after"], done["_before"])
+        outcome = (
+            "changed" if done.get("_version") is None
+            else restore_if_unchanged(done["id"], done["_version"], done["_before"])
+        )
     except Exception as exc:  # noqa: BLE001 - recorded and named in the answer
         logger.exception("Schedule %s could not be restored after a failed connector delete", done["id"])
         done.update(result=f"{done['result']}_not_restored", error=type(exc).__name__)
@@ -530,14 +535,41 @@ def delete_via_route(
         raise HTTPException(status_code=404, detail="Connector not found")
     if outcome["status"] != 200:
         # Plain sentences built from the per-schedule outcome, never exception text.
-        raise HTTPException(status_code=outcome["status"], detail={
-            "message": outcome["message"], "connector_deleted": outcome["deleted"],
-            "schedules": outcome["schedules"],
-        })
+        detail = {"message": outcome["message"], "connector_deleted": outcome["deleted"],
+                  "schedules": outcome["schedules"]}
+        if outcome["status"] == 404:
+            raise EnvelopeHTTPException(404, _not_deleted_envelope(outcome["message"], detail))
+        raise HTTPException(status_code=outcome["status"], detail=detail)
     out: dict[str, Any] = {"ok": True}
     if outcome["schedules"]:
         out["bound_schedules"] = {"action": plan.action, "schedules": outcome["schedules"]}
     return out
+
+
+#: The next step when the delete failed and every schedule was put back.
+NOT_DELETED_ACTION = (
+    "Reload Connections to see whether the connection still exists, then delete it "
+    "again if it does. Nothing else changed."
+)
+
+
+def _not_deleted_envelope(message: str, detail: dict[str, Any]) -> dict[str, Any]:
+    import uuid
+
+    from services.tracing import get_correlation_id
+
+    return {
+        "error": {
+            "code": "platform.not_found",
+            "title": "Connection not deleted",
+            "message": message,
+            "action": {"label": NOT_DELETED_ACTION, "ui": "reload", "api": ""},
+            "object": {},
+            "retriable": False,
+            "reference": get_correlation_id() or uuid.uuid4().hex,
+        },
+        "detail": detail,
+    }
 
 
 def in_use_envelope(exc: ConnectorInUse) -> dict[str, Any]:

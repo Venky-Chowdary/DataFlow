@@ -570,3 +570,114 @@ def test_a_connector_of_another_workspace_shows_as_the_runner_sees_it(env):
     row = next(r for r in client.get("/api/v1/schedules/").json() if r["id"] == sched.id)
     assert row["connection_deleted"] == ["source"], row
     assert client.get(f"/api/v1/schedules/{sched.id}").json()["connection_deleted"] == ["source"]
+
+
+# --- review round 3: the undo is a conditional write ---------------------------
+
+
+def _paused_with_retry(store):
+    """A schedule with a pending retry, then paused (what the delete's pause does)."""
+    from datetime import datetime, timedelta, timezone
+
+    sched = store.create_schedule({
+        "name": "D432 undo race", "source_connector_id": "s", "source_table": "t",
+        "dest_connector_id": "d", "dest_table": "t_race", "interval": "cron", "cron": "0 3 * * *",
+        "timezone": "UTC", "sync_mode": "upsert", "primary_key": "id", "max_retries": 2,
+        "mappings": [{"source": "id", "target": "id"}],
+    })
+    retry = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    store.update_schedule(sched.id, {"retry_at": retry, "retry_attempt": 1})
+    before = store.get_schedule(sched.id).to_dict()
+    store.update_schedule(sched.id, {"enabled": False})
+    paused = store.get_schedule(sched.id)
+    moved = {k: before[k] for k in before
+             if k not in ("version", "updated_at") and before.get(k) != paused.to_dict().get(k)}
+    return sched, int(paused.version or 0), moved
+
+
+def test_on_mongo_a_write_between_read_and_restore_wins(monkeypatch):
+    """The reviewer's probe: another replica writes (and moves the revision)
+    after the undo read the document. The restore must match nothing."""
+    import services.schedule_store as store
+    from tests.test_schedule_claim_concurrency import _Mongo
+
+    svc = _Mongo()
+    monkeypatch.setattr(store, "_mongo_backend", lambda: svc)
+    getattr(store, "_BASE_DOCS", {}).clear()
+    sched, version, moved = _paused_with_retry(store)
+    coll = svc.get_database()["pipeline_schedules"]
+    real_find_one = coll.find_one
+
+    def _read_then_race(filt, *a, **k):
+        doc = real_find_one(filt, *a, **k)
+        live = coll.docs[sched.id]
+        live["notify_on_success"] = True  # an operator's edit on another replica
+        live["version"] = int(live.get("version") or 0) + 1
+        return doc
+
+    monkeypatch.setattr(coll, "find_one", _read_then_race)
+    assert store.restore_if_unchanged(sched.id, version, moved) == "changed"
+    doc = coll.docs[sched.id]
+    assert doc["enabled"] is False and not doc.get("retry_at"), "the restore landed over a newer write"
+    assert doc["notify_on_success"] is True
+
+
+def test_on_mongo_an_untouched_schedule_is_restored(monkeypatch):
+    import services.schedule_store as store
+    from tests.test_schedule_claim_concurrency import _Mongo
+
+    svc = _Mongo()
+    monkeypatch.setattr(store, "_mongo_backend", lambda: svc)
+    getattr(store, "_BASE_DOCS", {}).clear()
+    sched, version, moved = _paused_with_retry(store)
+    assert store.restore_if_unchanged(sched.id, version, moved) == "restored"
+    after = store.get_schedule(sched.id)
+    assert after.enabled is True and after.retry_at == moved["retry_at"]
+
+
+def test_the_file_store_moves_the_revision_on_every_write(tmp_path, monkeypatch):
+    import services.schedule_store as store
+
+    monkeypatch.setattr(store, "STORE_PATH", tmp_path / "schedules.json")
+    monkeypatch.setattr(store, "_mongo_backend", lambda: None)
+    sched, version, _moved = _paused_with_retry(store)
+    other = store.create_schedule({
+        "name": "D432 bystander", "source_connector_id": "s", "source_table": "t",
+        "dest_connector_id": "d", "dest_table": "t_other", "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}],
+    })
+    assert version > 0
+    # A pause of an already paused schedule changes no field but is a write.
+    store.update_schedule(sched.id, {"enabled": False})
+    assert int(store.get_schedule(sched.id).version) == version + 1
+    # A write for another schedule does not move this one.
+    store.update_schedule(other.id, {"notify_on_success": True})
+    assert int(store.get_schedule(sched.id).version) == version + 1
+
+
+def test_a_manual_pause_between_the_pause_and_the_undo_is_respected(env, monkeypatch):
+    import src.routers.saved_connectors_router as router
+    from services.schedule_store import get_schedule, update_schedule
+
+    src, dst = _connector("d432-src"), _connector("d432-dst")
+    sched = _schedule("D432 paused by hand", src, dst)
+
+    def _operator_pauses_then_delete_fails(*a, **k):
+        update_schedule(sched.id, {"enabled": False})  # already paused by the delete: no field changes
+        return False
+
+    monkeypatch.setattr(router, "delete_connector", _operator_pauses_then_delete_fails)
+    resp = _pause_delete(env["client"], src, sched)
+    assert resp.status_code == 404, resp.text
+    assert get_schedule(sched.id).enabled is False, "the undo re-enabled a schedule an operator paused"
+    assert _audits(env)[-1]["details"]["schedules"][0]["result"] == "changed_since_left_as_is"
+
+
+def test_a_failed_delete_with_everything_restored_says_what_to_do(env, monkeypatch):
+    src, dst = _connector("d432-src"), _connector("d432-dst")
+    sched = _schedule("D432 nightly A", src, dst)
+    _fail_connector_delete(monkeypatch)
+    body = _pause_delete(env["client"], src, sched).json()
+    assert body["detail"]["message"] == "The connection was not deleted. Its schedules are as they were."
+    action = body["error"]["action"]["label"]
+    assert "switch workspace" not in action and "delete it again" in action, action
