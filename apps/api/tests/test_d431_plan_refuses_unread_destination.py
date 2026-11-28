@@ -238,3 +238,96 @@ def test_execute_checks_each_streams_own_map_rows():
     request = _pending_request(Path("/nonexistent/src.db"), Path("/nonexistent/dst.db"), multi=True)
     refusal = execute_plan_refusal(request)
     assert refusal and refusal.gate_id == GATE
+
+
+# -- AC-3: a destination schema that does not exist ------------------------
+
+
+class _FakeNamespaceEngine:
+    """Answers the namespace query only; records what it was asked."""
+
+    def __init__(self, exists: bool):
+        self.exists = exists
+        self.asked: list[tuple[str, dict]] = []
+
+    def connect(self):
+        engine = self
+
+        class _Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def execute(self, stmt, params=None):
+                engine.asked.append((str(stmt), dict(params or {})))
+
+                class _R:
+                    def first(self_inner):
+                        return (1,) if engine.exists else None
+
+                return _R()
+
+        return _Conn()
+
+
+@pytest.mark.parametrize("db_type,schema,query", [
+    ("oracle", "nosuchschema69", "all_users"),
+    ("sqlserver", "nosuch", "sys.schemas"),
+])
+def test_missing_namespace_is_named(monkeypatch, db_type, schema, query):
+    from services import dest_namespace
+
+    fake = _FakeNamespaceEngine(exists=False)
+    monkeypatch.setattr("connectors.generic_sql._engine", lambda cfg: fake)
+    cfg = {"type": db_type, "schema": schema, "username": "app", "host": "db.example.com"}
+    missing = dest_namespace.missing_destination_namespace(cfg)
+    assert missing.lower() == schema.lower()
+    assert query in fake.asked[0][0]
+    fake.exists = True
+    assert dest_namespace.missing_destination_namespace(cfg) == ""
+
+
+def test_default_schema_and_other_engines_are_not_asked(monkeypatch):
+    from services import dest_namespace
+
+    fake = _FakeNamespaceEngine(exists=False)
+    monkeypatch.setattr("connectors.generic_sql._engine", lambda cfg: fake)
+    assert dest_namespace.missing_destination_namespace(
+        {"type": "oracle", "schema": "APP", "username": "app"}) == ""
+    assert dest_namespace.missing_destination_namespace(
+        {"type": "sqlserver", "schema": "dbo", "username": "sa"}) == ""
+    assert dest_namespace.missing_destination_namespace(
+        {"type": "postgresql", "schema": "nosuch", "username": "app"}) == ""
+    assert fake.asked == []
+
+
+def test_plan_into_a_missing_oracle_schema_fails_naming_it(route, monkeypatch):
+    """Round 69: NOSUCHSCHEMA69 tested green; the plan said safe with create-new
+    mappings and the run failed ORA-01918. The plan now names the schema."""
+    fake = _FakeNamespaceEngine(exists=False)
+    monkeypatch.setattr("connectors.generic_sql._engine", lambda cfg: fake)
+    dest_read = {
+        "ok": True, "error": "", "columns": [], "db_type": "oracle", "table_exists": False,
+        "config": {"type": "oracle", "schema": "NOSUCHSCHEMA69", "username": "app",
+                   "host": "ora.example.com", "port": 1521},
+    }
+    from src.ai.copilot import transfer_tools as tt
+
+    real = tt._introspect
+
+    def fake_read(conn, table, purpose="", **kw):
+        if purpose == "destination":
+            return dict(dest_read)
+        return real(conn, table, purpose=purpose, **kw)
+
+    monkeypatch.setattr(tt, "_introspect", fake_read)
+    res = tt.plan_transfer(
+        source_connector_name=route[0], source_table="orders",
+        dest_connector_name=route[1], dest_table="orders_out",
+        sync_mode="upsert", upsert_key="id",
+    )
+    assert res.success is False
+    assert "Destination schema NOSUCHSCHEMA69 does not exist" in res.error
+    assert "ORA-" not in res.error

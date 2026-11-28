@@ -1279,6 +1279,15 @@ def plan_transfer(
         dst_info = dst_read.value
 
     dest_exists = _dest_table_exists_tri_state(dst_info)
+    if dest_exists is False:
+        # D431: "no such table" under a schema the server does not have is not
+        # create-new; the run would fail ORA-01918. Name the schema instead.
+        from services.dest_namespace import missing_destination_namespace, missing_namespace_refusal
+
+        missing_ns = missing_destination_namespace(dst_info.get("config"))
+        if missing_ns:
+            return _tool_result(tool, success=False, error=missing_namespace_refusal(
+                str(dst_conn.get("name") or describe_target(dst_conn) or "the destination"), missing_ns))
     # D209: a pgvector destination is a typed table or a vector-document
     # table. Decide which once; the Map, preflight, payload and job share it.
     from services.pgvector_layout import LAYOUT_DOCUMENT, plan_layout
