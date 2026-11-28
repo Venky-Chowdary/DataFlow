@@ -895,11 +895,16 @@ async def list_pipeline_schedules(
 
 
 def _visible_connector_ids() -> set[str] | None:
-    """Ids of the saved connectors this request can see; None when unreadable."""
+    """Ids of every connector a schedule can resolve (the saved store and the
+    platform store the scheduler falls back to); None when either is unreadable."""
     try:
         from services.connector_store import list_connectors
+        from services.mongodb_service import get_mongodb_service
 
-        return {c.id for c in list_connectors()}
+        ids = {c.id for c in list_connectors()}
+        for doc in get_mongodb_service().list_connectors():
+            ids.update(str(doc.get(k)) for k in ("_id", "id") if doc.get(k))
+        return ids
     except Exception:  # noqa: BLE001 - unknown is not "deleted": fall back per row
         return None
 

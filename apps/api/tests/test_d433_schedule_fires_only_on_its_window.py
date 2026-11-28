@@ -283,3 +283,72 @@ def test_on_mongo_a_beat_claim_loses_when_another_replica_moved_the_slot(monkeyp
     )
     assert claimed is None, "the beat claimed on a slot another replica had already moved"
     assert not docs[sched.id].get("running")
+
+
+# --- review round 1 ---------------------------------------------------------
+
+
+def _write_raw(schedule_id: str, **fields) -> None:
+    """A legacy document as stored, bypassing the save-time validation."""
+    import json
+
+    data = json.loads(store.STORE_PATH.read_text())
+    for row in data["schedules"]:
+        if row["id"] == schedule_id:
+            row.update(fields)
+    store.STORE_PATH.write_text(json.dumps(data))
+
+
+def test_one_unarmable_schedule_does_not_stop_the_beat_for_the_others(temp_store):
+    good = _schedule(name="D433 good")
+    store.update_schedule(good.id, {"next_run_at": _ago(1)})
+    bad = _schedule(name="D433 legacy cron", dest_table="orders_legacy")
+    _write_raw(bad.id, cron="61 * * * *", next_run_at=None)
+
+    due = store.due_schedules()
+    assert good.id in {s.id for s in due}, "one bad unslotted schedule stopped every schedule"
+    assert bad.id not in {s.id for s in due}
+    # Surfaced, not skipped silently: the bad schedule's history says why and what fixes it.
+    skip = store.get_schedule(bad.id).run_history[-1]
+    assert skip["status"] == "skipped" and skip["reason_code"] == "slot_unarmable", skip
+    assert "cron expression" in skip["reason"], skip
+
+
+def test_an_unslotted_schedule_armed_by_the_beat_says_so_in_its_history(temp_store):
+    sched = _schedule()
+    store.update_schedule(sched.id, {"next_run_at": None})
+    store.due_schedules()
+    after = store.get_schedule(sched.id)
+    skip = after.run_history[-1]
+    assert skip["status"] == "skipped" and skip["reason_code"] == "slot_armed", skip
+    assert after.next_run_at in skip["reason"], skip
+
+
+def test_a_transient_back_off_rerun_is_labelled_a_retry(temp_store, dispatched, monkeypatch):
+    """A transient failure's back-off moves the next run past the cron slot; the
+    run it starts re-runs the failed one, and was labelled cron_window."""
+    from services.failure_retry_policy import TRANSIENT
+
+    sched = _schedule(cron="* * * * *")
+    for i in range(2):  # two identical transient failures in a row: the second backs off
+        store.mark_schedule_run(sched.id, f"job-f{i}", status="failed", run_entry={
+            "job_id": f"job-f{i}", "status": "failed", "attempt": 0, "error": "connection reset by peer",
+        })
+    monkeypatch.setattr(runner, "_job_doc", lambda job_id: {
+        "status": "failed", "error": "connection reset by peer", "phase": "read",
+    })
+    monkeypatch.setattr(runner, "_retry_decision", lambda *a, **k: {
+        "retry": False, "reason": "Retry budget exhausted after 0 attempt(s).",
+        "failure_class": {"kind": TRANSIENT},
+    })
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    store.mark_schedule_running(sched.id, "beat", "job-f2")
+    runner._finalize_run(sched.id, "job-f2", 0, datetime.now(timezone.utc))
+    parked = store.get_schedule(sched.id)
+    assert parked.next_run_reason == "transient_backoff", (parked.next_run_at, parked.run_history[-1])
+
+    store.update_schedule(sched.id, {"next_run_at": _ago(0.5)})  # the back-off has elapsed
+    assert runner._run_schedule(sched.id) == "job-1"
+    run = store.get_schedule(sched.id).run_history[-1]
+    assert run["trigger"] == "retry" and run["fire_reason"] == "retry", run
+    assert run["retry_kind"] == "transient_backoff", run

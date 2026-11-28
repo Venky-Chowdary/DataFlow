@@ -9,7 +9,8 @@ the moment the run claims the schedule:
 * ``missed_window_catch_up`` — the stored slot is older than one window (the
   scheduler was down or the schedule was parked), or the operator queued a
   catch-up; one run covers it and the skipped windows are counted;
-* ``retry`` — a failed run's declared retry is due;
+* ``retry`` — a failed run's declared retry is due, or the back-off a
+  transient failure put past the next cron slot has come;
 * a human decision that re-armed the schedule at once (``approval``,
   ``plan_change``, ``rebaseline``), recorded on the schedule by that decision.
 
@@ -30,6 +31,9 @@ FIRE_CRON_WINDOW = "cron_window"
 FIRE_CATCH_UP = "missed_window_catch_up"
 FIRE_RETRY = "retry"
 FIRE_MANUAL = "manual"
+
+#: Stored with a transient failure's back-off (later than the cron slot): the run it starts is a retry.
+TRANSIENT_BACKOFF = "transient_backoff"
 
 #: Reasons a human decision stores on the schedule when it re-arms it at once.
 HUMAN_REARM_REASONS = frozenset({"approval", "plan_change", "rebaseline"})
@@ -79,6 +83,9 @@ def fire_reason(sched: Any, now: datetime | None = None) -> str:
     armed_by = str(getattr(sched, "next_run_reason", "") or "").strip()
     if armed_by in HUMAN_REARM_REASONS:
         return armed_by
+    if armed_by == TRANSIENT_BACKOFF:
+        # The back-off a transient failure put past the next cron slot.
+        return FIRE_RETRY
     if int(getattr(sched, "catch_up_windows_left", 0) or 0) > 0:
         return FIRE_CATCH_UP
     from services.schedule_store import count_missed_windows

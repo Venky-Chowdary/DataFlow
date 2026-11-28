@@ -964,7 +964,17 @@ class _ConnectorLabels:
             _logger.debug("inbox connector label unavailable for %s", cid, exc_info=True)
             return out
         if conn is None:
-            out["deleted"] = True
+            from services.connector_delete_guard import platform_connector
+
+            try:
+                legacy = platform_connector(cid)
+            except Exception:  # noqa: BLE001 - unreadable is not deleted
+                _logger.debug("inbox platform connector unavailable for %s", cid, exc_info=True)
+                return out
+            if legacy is None:
+                out["deleted"] = True
+            else:
+                out.update(name=str(legacy.get("name") or ""), type=str(legacy.get("type") or ""))
             return out
         out.update(name=str(conn.name or ""), type=str(conn.type or ""))
         return out

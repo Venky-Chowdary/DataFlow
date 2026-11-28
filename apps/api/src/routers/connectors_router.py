@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 from datetime import date
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from fastapi import (
     APIRouter,
@@ -3266,19 +3266,40 @@ def get_connector(connector_id: str, request: Request):
 
 @router.delete("/{connector_id}")
 @off_event_loop
-def delete_connector(connector_id: str, request: Request):
-    """Delete a connector"""
+def delete_connector(
+    connector_id: str,
+    request: Request,
+    bound_schedules: Annotated[str, Query(max_length=32)] = "",
+    acknowledge_schedules: Annotated[str, Query(max_length=8000)] = "",
+    repoint_to: Annotated[str, Query(max_length=128)] = "",
+):
+    """Delete a connector (D432: the saved-connector delete's contract).
+
+    The scheduler resolves a schedule's connector here too, so a connector
+    schedules use is refused 409 unless ``bound_schedules`` and
+    ``acknowledge_schedules`` say what happens to them, exactly as on
+    ``DELETE /connectors/saved/{id}``.
+    """
     try:
         mongo = get_mongodb_service()
         connector = mongo.get_connector(connector_id)
         if not connector:
             raise HTTPException(status_code=404, detail="Connector not found")
-        assert_resource_workspace(request, str(connector.get("workspace_id") or ""), write=True)
-        success = mongo.delete_connector(connector_id)
+        workspace = str(connector.get("workspace_id") or "")
+        assert_resource_workspace(request, workspace, write=True)
+        from types import SimpleNamespace
 
-        if not success:
-            raise HTTPException(status_code=404, detail="Connector not found")
+        from services.connector_delete_guard import delete_via_route
 
+        conn = SimpleNamespace(
+            id=connector_id, name=str(connector.get("name") or connector_id),
+            type=str(connector.get("type") or connector.get("format") or ""), workspace_id=workspace,
+        )
+        delete_via_route(
+            request, conn, workspace_id=workspace, bound_schedules=bound_schedules,
+            acknowledge_schedules=acknowledge_schedules, repoint_to=repoint_to,
+            delete=lambda: bool(mongo.delete_connector(connector_id)),
+        )
         return {"success": True, "message": "Connector deleted"}
 
     except HTTPException:

@@ -439,38 +439,22 @@ def remove_saved_connector(
     them and the options, unless ``bound_schedules`` (pause | repoint |
     delete_schedules) is sent with ``acknowledge_schedules`` = the ids of
     exactly the schedules bound now (comma-separated) and, to re-point,
-    ``repoint_to``. The choice is applied first and audited.
+    ``repoint_to``. A failed connector delete leaves the schedules as they
+    were; what happened is audited.
     """
-    from services.connector_delete_guard import (
-        ConnectorInUse,
-        apply_bound_schedule_action,
-        plan_connector_delete,
-    )
+    from services.connector_delete_guard import delete_via_route
 
     workspace_id = _resolve_workspace(request, workspace_id)
     conn = get_connector(connector_id, workspace_id=workspace_id)
     _writable_connector_or_404(request, conn)
-    try:
-        plan = plan_connector_delete(
-            conn,
-            workspace_id=str(conn.workspace_id or workspace_id or ""),
-            action=bound_schedules,
-            acknowledged=[part for part in acknowledge_schedules.split(",") if part.strip()],
-            repoint_to=repoint_to,
-        )
-    except ConnectorInUse as exc:
-        raise HTTPException(status_code=409, detail=exc.payload | {"message": str(exc)}) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    user = getattr(request.state, "user", None) or {}
-    actor = str(user.get("email") or user.get("name") or "").strip()
-    affected = apply_bound_schedule_action(plan, actor=actor, request=request)
-    if not delete_connector(connector_id, workspace_id=workspace_id):
-        raise HTTPException(status_code=404, detail="Connector not found")
-    out: dict[str, Any] = {"ok": True}
-    if affected:
-        out["bound_schedules"] = {"action": plan.action, "schedules": affected}
-    return out
+    return delete_via_route(
+        request, conn,
+        workspace_id=str(conn.workspace_id or workspace_id or ""),
+        bound_schedules=bound_schedules,
+        acknowledge_schedules=acknowledge_schedules,
+        repoint_to=repoint_to,
+        delete=lambda: delete_connector(connector_id, workspace_id=workspace_id),
+    )
 
 
 class RotateSecretsBody(BaseModel):

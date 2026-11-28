@@ -116,7 +116,12 @@ def test_sc9_every_delivery_is_logged_and_listed_per_workspace(live, receiver):
             "source_table": table, "dest_connector_id": dst, "dest_table": f"{table}_out",
             "interval": "hourly", "mappings": _MAPS,
         }).json()["id"]
-        assert admin.delete(f"/api/v1/connectors/saved/{doomed}").status_code == 200
+        # An orphaned schedule is the premise: the connector disappears under a
+        # schedule that stays enabled. The delete routes now refuse that without
+        # an acknowledgement (D432), so remove it from the store directly.
+        from services.connector_store import delete_connector
+
+        assert delete_connector(doomed, workspace_id=live.workspace_id)
         _due(sid)
         _settle(sid, runs=1)
 

@@ -1618,8 +1618,15 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
 
                 return finding_closed_by_success(after)
             if backs_off:
-                due, backoff["delay"] = _transient_backoff(after, schedule_clock.utc_now())
-                return {"next_run_at": due}
+                at = schedule_clock.utc_now()
+                due, backoff["delay"] = _transient_backoff(after, at)
+                from services.schedule_store import next_run_for
+
+                # A back-off that moved the next run past the cadence's own slot
+                # starts a re-run of the failed one, not a cron window: its run
+                # says so (D433 AC-4).
+                backed_off = due != str(next_run_for(after, at))
+                return {"next_run_at": due, "next_run_reason": "transient_backoff" if backed_off else ""}
             if finding:
                 return _finding_patch(after, **finding)
         except Exception:  # noqa: BLE001 — never stops the run being recorded
@@ -2245,11 +2252,15 @@ def _run_schedule(
         else life.TRIGGER_RETRY if reason == FIRE_RETRY
         else life.TRIGGER_CADENCE
     )
+    backoff = reason == FIRE_RETRY and not retrying
     run_id = life.begin_run(
         schedule_id, trigger=trigger, attempt=attempt, fire_reason=reason,
         scheduled_for="" if manual else str(
-            (sched.retry_at if reason == FIRE_RETRY else sched.next_run_at) or ""
+            (sched.retry_at if retrying else sched.next_run_at) or ""
         ),
+        # A transient fault's back-off re-run: a retry the scheduler owes, not a
+        # declared max_retries attempt (those carry attempt >= 1).
+        retry_kind="transient_backoff" if backoff else ("declared" if reason == FIRE_RETRY else ""),
     )
     with life.bound_run(schedule_id, run_id):
         try:

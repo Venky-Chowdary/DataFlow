@@ -234,3 +234,140 @@ def test_mcp_confirm_is_refused_when_a_schedule_was_bound_after_the_preview(env)
     assert resp.status_code == 409, resp.text
     assert "D432 nightly B" in resp.text
     assert get_connector(src.id) is not None
+
+
+# --- review round 1 ---------------------------------------------------------
+
+
+def test_the_platform_connector_delete_route_follows_the_same_rule(env):
+    """``DELETE /connectors/{id}`` removes a connector the scheduler also resolves
+    (mongodb_service): it refused nothing before, so it was a way around D432."""
+    from services.mongodb_service import get_mongodb_service
+    from services.schedule_store import create_schedule, get_schedule
+
+    client = env["client"]
+    mongo = get_mongodb_service()
+    legacy = mongo.save_connector({"name": "legacy-pg", "type": "postgresql", "host": "127.0.0.1",
+                                   "port": 5432, "database": "d432"})
+    dst = _connector("d432-dst")
+    sched = create_schedule({
+        "name": "D432 legacy bound", "source_connector_id": legacy, "source_table": "orders",
+        "dest_connector_id": dst.id, "dest_table": "orders_l", "interval": "daily",
+        "timezone": "UTC", "sync_mode": "full_refresh_overwrite", "enabled": True,
+        "mappings": [{"source": "id", "target": "id"}],
+    })
+
+    refused = client.delete(f"/api/v1/connectors/{legacy}")
+    assert refused.status_code == 409, refused.text
+    assert "D432 legacy bound" in _detail(refused)["message"]
+    assert mongo.get_connector(legacy) is not None
+
+    resp = client.delete(f"/api/v1/connectors/{legacy}",
+                         params={"bound_schedules": "pause", "acknowledge_schedules": sched.id})
+    assert resp.status_code == 200, resp.text
+    assert mongo.get_connector(legacy) is None
+    assert get_schedule(sched.id).enabled is False
+    assert any(e["event"] == "connector.delete.bound_schedules" for e in env["events"])
+
+
+def test_a_connector_delete_that_fails_leaves_the_schedules_as_they_were(env, monkeypatch):
+    import src.routers.saved_connectors_router as router
+    from services.schedule_store import get_schedule
+
+    client = env["client"]
+    src, dst = _connector("d432-src"), _connector("d432-dst")
+    sched = _schedule("D432 nightly A", src, dst)
+    monkeypatch.setattr(router, "delete_connector", lambda *a, **k: False)
+
+    resp = client.delete(f"/api/v1/connectors/saved/{src.id}",
+                         params={"bound_schedules": "pause", "acknowledge_schedules": sched.id})
+    assert resp.status_code == 404, resp.text
+    assert get_schedule(sched.id).enabled is True, "a failed delete left the schedule paused"
+    audited = [e for e in env["events"] if e["event"] == "connector.delete.bound_schedules"]
+    assert audited and audited[-1]["outcome"] == "failed", audited
+    assert audited[-1]["details"]["connector_deleted"] is False
+    assert audited[-1]["details"]["schedules"][0]["result"] == "unchanged"
+
+
+def test_delete_schedules_reports_what_was_actually_deleted(env, monkeypatch):
+    import services.schedule_store as store
+    from services.connector_store import get_connector
+
+    client = env["client"]
+    src, dst = _connector("d432-src"), _connector("d432-dst")
+    sched = _schedule("D432 nightly A", src, dst)
+    monkeypatch.setattr(store, "delete_schedule", lambda _sid: False)
+
+    resp = client.delete(f"/api/v1/connectors/saved/{src.id}",
+                         params={"bound_schedules": "delete_schedules", "acknowledge_schedules": sched.id})
+    assert resp.status_code == 200, resp.text
+    assert get_connector(src.id) is None
+    assert resp.json()["bound_schedules"]["schedules"][0]["result"] == "not_deleted"
+    audited = [e for e in env["events"] if e["event"] == "connector.delete.bound_schedules"]
+    assert audited[-1]["outcome"] == "failed", audited
+
+
+def test_repoint_or_delete_schedules_needs_schedule_manage(env, monkeypatch):
+    import services.connector_delete_guard as guard
+    from services.connector_store import get_connector
+    from services.schedule_store import get_schedule
+
+    client = env["client"]
+    src, dst, spare = _connector("d432-src"), _connector("d432-dst"), _connector("d432-spare")
+    sched = _schedule("D432 nightly A", src, dst)
+    monkeypatch.setattr(guard, "may_manage_schedules", lambda request: False)
+    for params in ({"bound_schedules": "repoint", "repoint_to": spare.id},
+                   {"bound_schedules": "delete_schedules"}):
+        resp = client.delete(f"/api/v1/connectors/saved/{src.id}",
+                             params={**params, "acknowledge_schedules": sched.id})
+        assert resp.status_code == 403, resp.text
+        assert "schedule.manage" in resp.text
+    assert get_connector(src.id) is not None and get_schedule(sched.id).source_connector_id == src.id
+    # Pausing is the safe choice: it does not need schedule.manage.
+    ok = client.delete(f"/api/v1/connectors/saved/{src.id}",
+                       params={"bound_schedules": "pause", "acknowledge_schedules": sched.id})
+    assert ok.status_code == 200, ok.text
+
+
+def test_a_key_scoped_without_schedule_manage_may_not_change_schedules(monkeypatch):
+    from types import SimpleNamespace
+
+    import services.connector_delete_guard as guard
+    from src.services import auth_service
+
+    monkeypatch.setattr(auth_service, "auth_required", lambda: True)
+    scoped = SimpleNamespace(state=SimpleNamespace(
+        user={"role": "admin", "scopes": ["connector.read", "connector.delete"]}, effective_role="admin"))
+    full = SimpleNamespace(state=SimpleNamespace(user={"role": "admin"}, effective_role="admin"))
+    assert guard.may_manage_schedules(scoped) is False
+    assert guard.may_manage_schedules(full) is True
+
+
+def test_the_refusal_reads_as_plain_sentences_with_a_fitting_next_step(env):
+    client = env["client"]
+    src, dst = _connector("d432-src"), _connector("d432-dst")
+    _schedule("D432 nightly A", src, dst)
+    body = client.delete(f"/api/v1/connectors/saved/{src.id}").json()
+    action = body["error"]["action"]["label"]
+    assert "don't need changing" not in action and "pause" in action.lower(), action
+    message = body["detail"]["message"]
+    assert "pause: pause" not in message and " — " not in message, message
+    assert "pause them" in message and "re-point them" in message, message
+
+
+def test_a_connector_only_the_platform_store_holds_is_not_shown_deleted(env):
+    from services.mongodb_service import get_mongodb_service
+    from services.schedule_store import create_schedule
+
+    client = env["client"]
+    legacy = get_mongodb_service().save_connector({"name": "legacy-pg", "type": "postgresql"})
+    dst = _connector("d432-dst")
+    sched = create_schedule({
+        "name": "D432 legacy only", "source_connector_id": legacy, "source_table": "orders",
+        "dest_connector_id": dst.id, "dest_table": "orders_l", "interval": "daily",
+        "timezone": "UTC", "sync_mode": "full_refresh_overwrite", "enabled": True,
+        "mappings": [{"source": "id", "target": "id"}],
+    })
+    row = next(r for r in client.get("/api/v1/schedules/").json() if r["id"] == sched.id)
+    assert row["connection_deleted"] == [], row
+    assert client.get(f"/api/v1/schedules/{sched.id}").json()["connection_deleted"] == []

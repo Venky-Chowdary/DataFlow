@@ -2490,6 +2490,7 @@ def _update_schedule_locked(
         # Recompute the next due time when the cadence changed.
         if (interval, cron, tz) != (s.interval, s.cron, s.timezone):
             updated.next_run_at = next_run_for(updated)
+            updated.next_run_reason = ""
         # Pausing clears the stored slot — a disabled schedule has no next run,
         # and a stale future stamp only pretends one is coming (M24).
         if s.enabled and not bool(merged.get("enabled", s.enabled)):
@@ -3913,30 +3914,64 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
                 getattr(s, "id", ""),
             )
     if unslotted:
+        # Never raises: each schedule is armed, or surfaced, on its own.
         arm_unslotted_schedules(unslotted, current)
     return due
 
 
 def arm_unslotted_schedules(schedule_ids: Sequence[str], now: datetime) -> int:
-    """Give each enabled schedule that has no next run its next cron window."""
-    from services.schedule_fire_rule import needs_slot
+    """Give each enabled schedule that has no next run its next cron window.
 
-    wanted = set(schedule_ids)
+    One schedule at a time: a legacy document whose cadence cannot be computed
+    (``61 * * * *`` raises ``CronError``) or whose write fails must not stop the
+    beat for every other schedule. Each outcome is on the schedule's history: an
+    armed slot as a skipped beat that names the window it now waits for, a
+    cadence that cannot be armed as a skipped beat that names the fix.
+    """
     armed = 0
-    with _CLAIM_LOCK:
-        schedules = _load_all()
-        changed: list[PipelineSchedule] = []
-        for i, s in enumerate(schedules):
-            if s.id not in wanted or not needs_slot(s):
-                continue
-            schedules[i] = PipelineSchedule.from_dict(
-                {**s.to_dict(), "next_run_at": next_run_for(s, now), "next_run_reason": ""}
-            )
-            changed.append(schedules[i])
+    for schedule_id in schedule_ids:
+        if _arm_one_unslotted(schedule_id, now):
             armed += 1
-        if changed:
-            _save_all(changed if _mongo_backend() is not None else schedules)
     return armed
+
+
+def _arm_one_unslotted(schedule_id: str, now: datetime) -> bool:
+    from services.schedule_fire_rule import needs_slot
+    from services.schedule_run_lifecycle import record_skip
+
+    try:
+        with _CLAIM_LOCK:
+            schedules = _load_all()
+            sched = next((s for s in schedules if s.id == schedule_id), None)
+            if sched is None or not needs_slot(sched):
+                return False
+            slot = next_run_for(sched, now)
+            updated = PipelineSchedule.from_dict(
+                {**sched.to_dict(), "next_run_at": slot, "next_run_reason": ""}
+            )
+            if _mongo_backend() is not None:
+                _save_all([updated])
+            else:
+                _save_all([updated if s.id == schedule_id else s for s in schedules])
+    except Exception as exc:  # noqa: BLE001 - one document must not stop the beat; it is surfaced below
+        logger.exception("Schedule %s has no next run and could not be armed", schedule_id)
+        emit_event(logger, "schedule.run.skip", outcome="skipped", reason_code="slot_unarmable",
+                   schedule_id=schedule_id, error=exc)
+        record_skip(
+            schedule_id, "slot_unarmable",
+            "This schedule has no next run stored and its next cron window could not be "
+            f"computed ({type(exc).__name__}: {str(exc)[:200]}). It will not run on its own: "
+            "fix the cron expression or time zone on the schedule, or press Run now.",
+        )
+        return False
+    emit_event(logger, "schedule.run.skip", outcome="skipped", reason_code="slot_armed",
+               schedule_id=schedule_id)
+    record_skip(
+        schedule_id, "slot_armed",
+        f"This schedule had no next run stored, so the scheduler set it to the next cron "
+        f"window ({slot}) instead of running it now.",
+    )
+    return True
 
 
 def seconds_until_next_schedule(

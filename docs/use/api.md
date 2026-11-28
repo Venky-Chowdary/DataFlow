@@ -92,9 +92,12 @@ or `delete_schedules`), `acknowledge_schedules` (the ids of exactly the
 schedules bound now, comma-separated) and, for `repoint`, `repoint_to` (a
 saved connector of the same type). A schedule bound since you looked is not
 acknowledged, so the call is refused again with the new list. A schedule with
-a run in progress refuses the delete. The choice is applied before the
-connector is removed and is audited as `connector.delete.bound_schedules`.
-A connector no schedule uses is deleted with no extra step. The MCP
+a run in progress refuses the delete. `repoint` and `delete_schedules` also
+need `schedule.manage` (403 without it); `pause` does not. If the connector
+delete itself fails, paused or re-pointed schedules are put back as they were
+and the answer is 404. What happened is audited as
+`connector.delete.bound_schedules`. A connector no schedule uses is deleted
+with no extra step. `DELETE /api/v1/connectors/{id}`, the MCP
 `delete_connector` tool and the app's delete follow the same rule.
 
 ## Errors
