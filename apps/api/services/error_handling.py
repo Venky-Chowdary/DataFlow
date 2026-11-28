@@ -1071,6 +1071,13 @@ def _connection_lost_failure(
     from services.connection_lost_codes import connection_lost_code
     from services.error_taxonomy import classify, legacy_code
 
+    if _is_product_refusal(error):
+        # Datawrap's own refusal keeps its words and its verdict; only a wrapper
+        # that names a dropped connection as its cause (``raise ... from``,
+        # e.g. SqlServerCdcReadError) is that connection problem.
+        cause = getattr(error, "__cause__", None)
+        if not (isinstance(cause, BaseException) and connection_lost_code(cause)):
+            return None
     code = connection_lost_code(error)
     if not code:
         return None

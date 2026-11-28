@@ -222,3 +222,35 @@ def test_confirmed_repair_on_a_generic_sql_destination(monkeypatch, tmp_path: Pa
     )
     assert again["outcomes"]["repaired"] == 1 and again["resolved"] is True
     assert dest_values()["3"] == ("s3", "0/100")
+
+
+def test_a_repair_whose_upsert_writes_nothing_is_not_reported_repaired(monkeypatch, tmp_path: Path):
+    """Review LOW: the outcome follows what the upsert wrote, never assumed."""
+    import connectors.cdc_eos_sa as sa
+    from connectors.cdc_eos_drift_repair import repair_row_in_eos_transaction
+    from connectors.cdc_eos_sql import apply_change_batch_exactly_once
+    from services.cdc_engine import ChangeBatch
+
+    dest_cfg = {"type": "sqlite", "database": str(tmp_path / "dest.db")}
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 1.0},
+        {"source": "v", "target": "v", "confidence": 1.0},
+    ]
+    types = {"id": "string", "v": "string"}
+    apply_change_batch_exactly_once(
+        dest_type="generic_sql", dest_cfg=dest_cfg, dest_table="orders_copy",
+        change=ChangeBatch(inserts=[{"id": "1", "v": "s1"}], resume_token={"lsn": "0/100"}),
+        mappings=mappings, column_types=types, headers=["id", "v"], pk_target_cols=["id"],
+        cursor_key=CURSOR,
+    )
+    _sqlite(dest_cfg["database"], "UPDATE orders_copy SET v = 'damaged' WHERE id = '1'")
+    monkeypatch.setattr(sa, "_upsert_row", lambda *a, **k: 0)
+
+    outcome = repair_row_in_eos_transaction(
+        dest_type="generic_sql", dest_cfg=dest_cfg, dest_table="orders_copy", stream_key=CURSOR,
+        row={"id": "1", "v": "s1"}, mappings=mappings, column_types=types, pk_targets=["id"],
+        committed_lsn="0/100", writer_fence=0,
+    )
+
+    assert outcome == "refused_newer_event"
+    assert _sqlite(dest_cfg["database"], "SELECT v FROM orders_copy WHERE id = '1'") == [("damaged",)]

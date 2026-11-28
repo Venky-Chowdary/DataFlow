@@ -126,11 +126,13 @@ def repair_row_in_eos_transaction(
             if held is not None and not repair_overwrite_allowed(held[0], committed_lsn):
                 return "refused_newer_event"
             full = {c: values.get(c) for c in target_cols}
-            sa._upsert_row(
+            written = sa._upsert_row(
                 conn, table_q, target_cols, pk_targets, full, dialect,
                 absent=absent, allow_equal_lsn=True,
             )
-            return "repaired"
+            # The upsert re-checks the stamp itself and always sets _df_lsn, so
+            # writing nothing means its guard refused: never claim a repair.
+            return "repaired" if written else "refused_newer_event"
 
         return sa._in_dest_transaction(engine, _work)
     finally:

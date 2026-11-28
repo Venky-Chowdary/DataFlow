@@ -178,3 +178,28 @@ def test_the_main_driver_code_decides_not_a_trailing_one(error):
     from services.connection_lost_codes import connection_lost_code
 
     assert connection_lost_code(error) == ""
+
+
+def test_a_refusal_raised_while_a_drop_was_handled_keeps_its_own_verdict():
+    """Review LOW: an ExactlyOnceRouteError raised inside the ``except`` that
+    handled a dropped session (implicit ``__context__``) is Datawrap's refusal:
+    it stays run_refused and not retriable, never "Connection lost, run again"."""
+    from services.cdc_exactly_once import ExactlyOnceRouteError
+    from services.error_handling import humanize_transfer_failure
+
+    try:
+        try:
+            raise _dead_session()
+        except Exception:
+            raise ExactlyOnceRouteError(
+                "exactly_once apply requires destination primary-key columns.",
+                reason="exactly_once_requires_primary_key",
+            )
+    except ExactlyOnceRouteError as refusal:
+        assert refusal.__context__ is not None  # the drop is only context
+        failure = humanize_transfer_failure(refusal)
+    assert failure["code"] == "run_refused", failure
+    assert failure["retriable"] is False
+    assert "primary-key columns" in failure["message"]
+    # A wrapper that names the drop as its cause is still the drop.
+    _assert_connection_lost(humanize_transfer_failure(_wrapped_cdc_read_error()), "20047")

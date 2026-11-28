@@ -100,8 +100,11 @@ def connection_lost_code(error: Any) -> str:
             verdict = _code_of(err)
             if verdict is not None:
                 return verdict
-            context = None if err.__suppress_context__ else err.__context__
-            for inner in (getattr(err, "orig", None), err.__cause__, context):
+            # Only an explicit link (``raise ... from``, SQLAlchemy ``orig``)
+            # says what an error wraps. The implicit ``__context__`` is whatever
+            # was being handled when it was raised: a refusal raised while a
+            # dropped connection was handled is a refusal, not that drop.
+            for inner in (getattr(err, "orig", None), err.__cause__):
                 if isinstance(inner, BaseException):
                     nxt.append(inner)
         if not nxt:
