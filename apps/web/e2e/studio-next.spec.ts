@@ -128,6 +128,35 @@ async function expectActionBarBelowCanvas(page: Page): Promise<void> {
   expect(barBox!.y + barBox!.height).toBeLessThanOrEqual(viewport!.height);
 }
 
+/**
+ * The bar is one pinned row that clips what does not fit. On a phone the long
+ * Back label and the primary once overflowed it and cut the primary off at the
+ * right edge (390 px). Nothing may overflow the bar, and the primary is whole.
+ */
+async function expectActionBarFits(page: Page): Promise<void> {
+  const bar = page.locator(".df2-xform-actions");
+  const fit = await bar.evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    const primary = node.querySelector(".df2-step-primary");
+    const primaryBox = primary?.getBoundingClientRect();
+    return {
+      scrollWidth: node.scrollWidth,
+      clientWidth: node.clientWidth,
+      barLeft: box.left,
+      barRight: box.right,
+      primaryLeft: primaryBox?.left ?? Number.NaN,
+      primaryRight: primaryBox?.right ?? Number.NaN,
+      primaryClipped: primary ? primary.scrollWidth > primary.clientWidth : true,
+    };
+  });
+  const viewport = page.viewportSize();
+  expect(fit.scrollWidth, "the action bar overflows").toBeLessThanOrEqual(fit.clientWidth);
+  expect(fit.primaryLeft).toBeGreaterThanOrEqual(fit.barLeft);
+  expect(fit.primaryRight).toBeLessThanOrEqual(Math.min(fit.barRight, viewport!.width));
+  expect(fit.primaryClipped, "the primary label is clipped").toBe(false);
+  await expect(bar.locator(".df2-step-primary")).toBeInViewport({ ratio: 1 });
+}
+
 async function apiUp(page: Page): Promise<boolean> {
   try {
     const response = await page.request.get("/api/v1/health");
@@ -198,11 +227,13 @@ test.describe("studio next", () => {
     await page.addStyleTag({ content: "* { caret-color: transparent !important; transition: none !important; animation: none !important; }" });
     await quietChrome(page);
     await expectActionBarBelowCanvas(page);
+    await expectActionBarFits(page);
     // xyflow edge antialiasing moves about one percent between captures.
     await shoot(page, "canvas-light-1440.png", [], 0.02);
     await page.setViewportSize({ width: 390, height: 844 });
     await quietChrome(page);
     await expectActionBarBelowCanvas(page);
+    await expectActionBarFits(page);
     await shoot(page, "canvas-light-390.png", [], 0.04);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.evaluate(() => {
@@ -213,10 +244,12 @@ test.describe("studio next", () => {
     await expect(page.locator(".react-flow")).toHaveClass(/dark/);
     await quietChrome(page);
     await expectActionBarBelowCanvas(page);
+    await expectActionBarFits(page);
     await shoot(page, "canvas-dark-1440.png", [], 0.02);
     await page.setViewportSize({ width: 390, height: 844 });
     await quietChrome(page);
     await expectActionBarBelowCanvas(page);
+    await expectActionBarFits(page);
     await shoot(page, "canvas-dark-390.png", [], 0.04);
   });
 

@@ -490,7 +490,7 @@ export function TransferTransformStep({
 
   const footer = (
     <div className={canvasEnabled ? "df2-xform-actions" : "df2-card-footer df2-wizard-footer df2-step-footer"}>
-      <StepBackButton label={canvasEnabled ? "Back to Destination" : "Back"} onClick={onBack} />
+      <StepBackButton label={canvasEnabled ? "Back to Destination" : "Back"} narrowLabel={canvasEnabled ? "Back" : undefined} onClick={onBack} />
       <div className="df2-btn-row">
         {!continueState.enabled && continueState.reason ? (
           <StepFooterReason>{continueState.reason}</StepFooterReason>

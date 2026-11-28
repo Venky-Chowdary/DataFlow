@@ -13,15 +13,29 @@ import { Button, type ButtonProps } from "../ui/Button";
 
 export function StepBackButton({
   label = "Back",
+  narrowLabel,
   ...rest
-}: Omit<ButtonProps, "variant" | "children" | "leadingIcon"> & { label?: string }) {
+}: Omit<ButtonProps, "variant" | "children" | "leadingIcon"> & {
+  label?: string;
+  /**
+   * Shown instead of `label` on a phone (<=480px), where the long label and the
+   * primary do not fit one footer row. The button keeps `label` as its name.
+   */
+  narrowLabel?: string;
+}) {
   return (
     <Button
       {...rest}
+      aria-label={narrowLabel ? label : rest["aria-label"]}
       className={`df2-step-back${rest.className ? ` ${rest.className}` : ""}`}
       leadingIcon={<DtIcon name="arrow-left" size={16} />}
     >
-      {label}
+      {narrowLabel ? (
+        <>
+          <span className="df2-step-back-label">{label}</span>
+          <span className="df2-step-back-label-narrow" aria-hidden="true">{narrowLabel}</span>
+        </>
+      ) : label}
     </Button>
   );
 }
