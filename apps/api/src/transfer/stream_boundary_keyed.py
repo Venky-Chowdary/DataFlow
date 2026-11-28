@@ -493,16 +493,29 @@ def _accepted_verdict(recon: dict[str, Any], tie: dict[str, Any], kwargs: dict[s
     """
     ack = tie["accepted"]
     count: int | None = None
+    why_unmeasured = ""
     window = recon.get("window_duplicates")
     if isinstance(window, dict) and window.get("accepted"):
         count = int(window.get("rows") or 0)
+    elif not tie.get("mode"):
+        # The tie group was never imaged (the recipe has no single image of a
+        # re-read row): a re-read has nothing to count against, and "0" would
+        # be an invented measurement.
+        why_unmeasured = str(tie.get("unmeasured") or (
+            "the rows at the watermark could not be imaged to count their copies"
+        ))
     else:
         try:
             count = sum(int(d["copies"]) - int(d["expected"]) for d in boundary_duplicates(**kwargs))
         except Exception:  # noqa: BLE001 - an unmeasured count is said as such
             count = None
-    shown = "not measured" if count is None else str(count)
+            why_unmeasured = "the destination could not be re-read to count them"
+    shown = f"not measured ({why_unmeasured})" if count is None and why_unmeasured else (
+        "not measured" if count is None else str(count)
+    )
     ack["duplicates"] = count
+    if count is None:
+        ack["duplicates_not_measured"] = why_unmeasured or "not measured"
     recon["boundary_check"] = {"status": "accepted", **ack}
     recon["migration_proven"] = False
     if recon.get("passed") is not False and recon.get("verification_verdict") not in ("failed",):

@@ -158,7 +158,41 @@ def test_the_boundary_refusal_keeps_its_remedy_on_the_job_record(store, tmp_path
         assert "turns one source row into several written rows" in text, text
         assert "record the route's acknowledgement 'accept possible boundary duplicates'" in text, text
         assert "Open Transform and fix the recipe" not in text, text
+        # One period at the end, not "..".
+        assert text.rstrip().endswith("'accept possible boundary duplicates'."), text
+        assert not text.rstrip().endswith(".."), text
     assert sorted(r[0] for r in _sql(dst, "SELECT id FROM t")) == [1, 2, 3, 3]
+
+
+def test_an_acknowledged_tie_group_without_an_image_reports_its_count_as_not_measured(
+    store, tmp_path, monkeypatch
+):
+    """Re-review LOW: "0 duplicates" was reported while 2 expanded copies were appended."""
+    import src.transfer.stream_boundary_keyed as keyed
+
+    monkeypatch.setattr(keyed, "_accepted", lambda *a, **k: {"actor": "qa", "reason": "ok", "at": "t"})
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    _sql(src, "CREATE TABLE t (id INTEGER, tags TEXT, updated_at TEXT NOT NULL)")
+    for i in range(1, 4):
+        _sql(src, "INSERT INTO t VALUES (?,?,?)", (i, '["a", "b"]' if i == 3 else '["x"]', _ts(i)))
+    recipe = {"steps": [{"op": "unnest_json", "column": "tags", "options": {"to": "tag"}}]}
+    cols = ["id", "tags", "updated_at"]
+    _job, first = _run(store, _request(_ep(src), _ep(dst), recipe, cols))
+    assert first.success, first.error
+    _sql(src, "INSERT INTO t VALUES (?,?,?)", (4, '["x"]', _ts(4)))
+
+    _job, second = _run(store, _request(_ep(src), _ep(dst), recipe, cols))
+
+    assert second.success, second.error
+    # The tie group (row 3, two written rows) went through under the acknowledgement.
+    assert sorted(r[0] for r in _sql(dst, "SELECT id FROM t")) == [1, 2, 3, 3, 3, 3, 4]
+    check = (second.reconciliation or {}).get("boundary_check") or {}
+    assert check.get("status") == "accepted", check
+    assert check.get("duplicates") is None, check
+    assert "image" in str(check.get("duplicates_not_measured") or ""), check
+    assert "Boundary duplicates accepted by qa: not measured (" in str(
+        (second.reconciliation or {}).get("message")
+    )
 
 
 def test_commit_window_acknowledgement_appends_only_the_tie_group(store, monkeypatch):
@@ -200,6 +234,9 @@ def test_commit_window_acknowledgement_appends_only_the_tie_group(store, monkeyp
         summary = second.destination_summary or {}
         accepted = (summary.get("incremental_boundary_tie") or {}).get("accepted") or {}
         assert accepted.get("actor") == "qa", summary.get("incremental_boundary_tie")
+        # Two expanded copies went through: never reported as "0".
+        check = (second.reconciliation or {}).get("boundary_check") or {}
+        assert check.get("duplicates") is None and check.get("duplicates_not_measured"), check
         window = summary.get("commit_safe_window") or {}
         assert int(window.get("rows_replayed") or 0) > 0, window
         assert int(window.get("rows_already_landed") or 0) == int(window.get("rows_replayed") or 0), window

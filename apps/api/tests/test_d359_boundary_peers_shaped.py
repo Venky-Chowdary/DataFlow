@@ -187,3 +187,40 @@ def test_the_unnest_refusal_says_one_row_becomes_several():
         shape_boundary_peers(runner, cols, [["30", '["a", "b"]', "t"]])
     assert "turns one source row into several written rows" in str(caught.value)
     assert "from many source rows" not in str(caught.value)
+
+
+def test_rows_below_the_watermark_are_never_dropped_on_a_partial_key(monkeypatch):
+    """Re-review LOW: two rows share (cursor, first key column) and differ on the
+    rest. Matching on the partial key dropped the late one as the other's copy;
+    with no complete key it is refused, even under the acknowledgement."""
+    from types import SimpleNamespace
+
+    import src.transfer.stream_boundary_keyed as keyed
+    from src.transfer.stream_boundary_recipe import RecipeBoundaryStructural
+    from src.transfer.stream_commit_window import _structural_group_drop
+
+    monkeypatch.setattr(keyed, "_accepted", lambda *a, **k: {"actor": "qa", "reason": "ok", "at": "t"})
+    stored = [["t1", "1", "x"]]  # (ts, a, b): the copy an earlier run wrote
+    cols = ["ts", "a", "b"]
+    state = {
+        "replay_ident": ["ts", "a"],
+        "replay_ident_fps": _dest_fps([r[:2] for r in stored], ["ts", "a"]),
+    }
+    run = SimpleNamespace(
+        cfg=SimpleNamespace(
+            effective_sync="incremental_append", destination=None, dest_table="t",
+            dest_cfg={}, shape_runner=None, mappings=[{"source": c, "target": c} for c in cols],
+        ),
+        cur=SimpleNamespace(_boundary_fps_state=state),
+        tally=SimpleNamespace(dest_summary={}),
+    )
+    peers = [["t1", "1", "y"], ["t1", "1", "x"]]  # the late row is read first
+    with pytest.raises(keyed.BoundaryRefused, match="no complete key"):
+        _structural_group_drop(
+            run, RecipeBoundaryStructural("no image"), at_mark=False, headers=cols, peers=peers,
+            dedupe_kw=dict(
+                mappings=run.cfg.mappings, target_cols=cols, column_types=None,
+                stream_error_policy=None, digest_dest_types=None, dest_bind_dialect="postgresql",
+                remap_dest_types=None, destination_pk_columns=[],
+            ),
+        )

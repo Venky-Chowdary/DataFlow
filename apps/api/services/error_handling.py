@@ -958,9 +958,10 @@ def humanize_transfer_failure(
                 "Open Map and set Primary key to a column that is unique in the source "
                 "(or use append without that PK / dedupe upstream) before Resume."
             )
-        elif matched.get("code") in {
-            "all_rows_quarantined", "value_conversion_refused", "boundary_duplicates_unchecked",
-        }:
+        elif matched.get("code") == "boundary_duplicates_unchecked":
+            # The refusal is whole sentences ending in its remedy: no second period.
+            message = f"{title}. {raw.rstrip().rstrip('.')}."
+        elif matched.get("code") in {"all_rows_quarantined", "value_conversion_refused"}:
             message = f"{title}. {raw}."
         elif matched.get("code") == "shape_refused_row":
             message = (

@@ -580,23 +580,25 @@ def _structural_group_drop(
 
     Without the route's audited acknowledgement: refused with its remedy. With
     it, only the tie group *at* the stored watermark is appended unchecked (and
-    the acceptance recorded, as the tie-group dedupe records it); rows below
-    the mark are still matched, on their identity (cursor, key) and unshaped,
-    so the overlap window is never appended again whole.
+    the acceptance recorded, as the tie-group dedupe records it).
+
+    Rows below the mark are never appended unchecked: the acknowledgement does
+    not cover them. They reach here only when their match needed the recipe's
+    image - no complete key, or a key the recipe rewrites - and matching them on
+    part of a key could drop a late row as another row's copy. Refused by name.
     """
+    del headers, peers, dedupe_kw
+    from services.sync_cursor import requires_upsert
+
     from .stream_boundary_keyed import (
         BOUNDARY_TIE_KEY,
         BoundaryRefused,
         _accepted,
         _summary,
     )
-    from .stream_boundary_recipe import recipe_touches, refusal_text
+    from .stream_boundary_recipe import refusal_text
 
-    from services.sync_cursor import requires_upsert
-
-    from .stream_boundary import _boundary_append_dedupe
-
-    cfg, state = run.cfg, run.cur._boundary_fps_state
+    cfg = run.cfg
     if requires_upsert(cfg.effective_sync):
         return set()  # an upsert rewrites a re-read row by key: fail open, as always
     ack = _accepted(getattr(cfg, "destination", None), cfg.dest_table,
@@ -606,19 +608,19 @@ def _structural_group_drop(
     if at_mark:
         summary = _summary(run)
         if summary is not None:
-            summary.setdefault(BOUNDARY_TIE_KEY, {})["accepted"] = {**ack, "why": str(exc)}
+            tie = summary.setdefault(BOUNDARY_TIE_KEY, {})
+            tie["accepted"] = {**ack, "why": str(exc)}
+            tie["unmeasured"] = "the recipe gives the re-read rows at the watermark no single image to count"
         logger.warning("Re-read tie group not checked (%s); duplicates accepted by %s", exc, ack["actor"])
         return set()
-    ident = list(state.get("replay_ident") or [])
-    if not ident:
-        raise BoundaryRefused(refusal_text(exc)) from exc
-    # Unshaped, on the identity columns only (shape_runner marks "remap only
-    # the compared columns"; the identity is never a recipe-written column here).
-    return _boundary_append_dedupe(
-        list(headers or []), peers, state["replay_ident_fps"], match_cols=ident,
-        shape_runner=cfg.shape_runner if not recipe_touches(cfg.shape_runner, cfg.mappings, ident) else None,
-        **dedupe_kw,
-    )
+    raise BoundaryRefused(
+        "The rows this run re-reads below the stored watermark have no complete key, or a "
+        "key this route's recipe rewrites, and the recipe gives them no single image, so a "
+        "row already delivered cannot be told apart from a late one. Declare a primary key "
+        "the recipe does not rewrite, or run this route as full_refresh_overwrite (the "
+        "route's acknowledgement 'accept possible boundary duplicates' covers only the rows "
+        "at the watermark)."
+    ) from exc
 
 
 def replay_rows_already_landed(
@@ -702,15 +704,12 @@ def replay_rows_already_landed(
             content_cols, content_error = read_cols, None
             if version is None or not keyed_append:
                 content_cols, content_error = _content_match_columns(cfg, read_cols)
-            ident = [c for c in dict.fromkeys([cursor_dest, key_dest]) if c in read_cols]
             state.update(
                 replay_cols=read_cols,
                 replay_match=version if version is not None else content_cols,
                 replay_match_error=content_error if version is None else None,
                 replay_tie_match=version if keyed_append else content_cols,
                 replay_tie_error=None if keyed_append else content_error,
-                replay_ident=ident,
-                replay_ident_fps=Counter(),
                 replay_seen=set(),
                 # Stored copies are counted: one copy absorbs one re-read row.
                 replay_tie_fps=Counter(),
@@ -738,10 +737,7 @@ def replay_rows_already_landed(
                 sort_key=key_dest, key_values=chunk,
             )
             lowered = [{str(k).lower(): v for k, v in dr.items()} for dr in dest_rows or []]
-            for cols, bucket in (
-                (match_cols, state["fps"]), (tie_cols, state["replay_tie_fps"]),
-                (state["replay_ident"], state["replay_ident_fps"]),
-            ):
+            for cols, bucket in ((match_cols, state["fps"]), (tie_cols, state["replay_tie_fps"])):
                 tups = [tuple(low.get(str(c).lower()) for c in cols) for low in lowered]
                 bucket.update(
                     fp
