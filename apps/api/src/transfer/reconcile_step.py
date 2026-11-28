@@ -3552,8 +3552,9 @@ def _covered_keyed_noop_verify(
     if str(src_type or "").strip().lower() not in _VERIFY_READ_ENGINES:
         # D421: a file or object source has no population re-read here. Its
         # empty "re-read" reported every destination key as "only in the
-        # destination" on a no-op poll. No re-read, no drift claim.
-        return None
+        # destination" on a no-op poll. No re-read, no drift claim - and the
+        # run says the comparison did not happen.
+        return _noop_drift_unmeasured(target_rows)
     src_cfg = resolve_connector_config(source_endpoint)
     dest_cfg = resolve_connector_config(endpoint)
     map_list = mappings or []
@@ -3639,7 +3640,7 @@ def _covered_keyed_noop_verify(
         src_type=src_type,
     )
     if as_target is None:
-        return None
+        return _noop_drift_unmeasured(target_rows)
     drift = measure_drift(
         source_rows=as_target,
         target_rows=[r for r in dest_rows if isinstance(r, dict)],
@@ -3663,6 +3664,25 @@ def _covered_keyed_noop_verify(
             resource=str(endpoint.table or ""),
         )
     return None
+
+
+#: D421: the no-op poll's out-of-window comparison did not run.
+NOOP_DRIFT_UNMEASURED = (
+    "Out-of-window drift was not measured: this source cannot be re-read for comparison."
+)
+
+
+def _noop_drift_unmeasured(target_rows: int) -> dict[str, Any]:
+    """A quiet poll whose out-of-window drift could not be compared, said plainly."""
+    return {
+        "passed": True,
+        "message": (
+            "No new source rows since the last watermark — nothing written, "
+            f"destination unchanged at {target_rows:,} row(s). {NOOP_DRIFT_UNMEASURED}"
+        ),
+        "assurance_level": NO_OP_DEST_UNCHANGED,
+        "out_of_window_drift_measured": False,
+    }
 
 
 def _noop_source_as_written(

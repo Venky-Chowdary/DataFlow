@@ -104,6 +104,11 @@ def test_csv_noop_rerun_claims_no_destination_only_rows(tmp_path, store):
     assert rerun.records_transferred == 0
     assert _drift(rerun) == {}
     assert "only in the destination" not in _message(rerun)
+    # Not measured is said, never left to read as "nothing drifted".
+    assert (
+        "Out-of-window drift was not measured: this source cannot be re-read for comparison."
+        in _message(rerun)
+    ), _message(rerun)
     conn = sqlite3.connect(dst)
     assert conn.execute("SELECT count(*) FROM r61").fetchone()[0] == 30
     conn.close()
@@ -153,6 +158,7 @@ def test_pg_noop_rerun_with_transforms_names_only_real_drift(store):
         quiet = _go(store, request())
         assert quiet.records_transferred == 0
         assert _drift(quiet) == {}, _message(quiet)
+        assert "not measured" not in _message(quiet)  # a SQL source was compared
 
         # A change made without moving the cursor, and a hard delete.
         pg_sql(f"UPDATE {src} SET note = 'edited' WHERE id = 4")
