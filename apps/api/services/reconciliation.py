@@ -4880,6 +4880,12 @@ def sample_compare_rows(
                     )
                 except Exception:
                     transform = m.get("transform")
+            if str(transform or "").strip().lower() in {"trim", "trim_id"} and not (
+                m.get("user_override") or m.get("userOverride") or m.get("transform_override")
+            ):
+                # The writer applies a name-triggered trim only when the operator
+                # asked (writer_common._convert_mapped_cell); so does the compare.
+                transform = None
             # Sparse CDC / STOP_COLUMN / coerce_null: source DF_MISSING means
             # omit-from-SET — skip compare (do not fingerprint as NULL).
             # Destination DF_MISSING is a leak and must still mismatch.
