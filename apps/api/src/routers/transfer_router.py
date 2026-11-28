@@ -692,7 +692,8 @@ async def map_columns_route(body: MapColumnsRequest, request: Request):
         "dataflow.validation_mode": body.validation_mode or "",
         "dataflow.correlation_id": get_correlation_id() if callable(get_correlation_id) else "",
     }
-    with (start_span("studio.map", attributes=span_attrs, kind="internal") if start_span is not None else __import__('contextlib').nullcontext()):
+    with (start_span("studio.map", attributes=span_attrs, kind="internal") if start_span is not None else __import__('contextlib').nullcontext()), \
+            await _map_oracle_session(body, request):
         result = run_mapping_pipeline(
             body.source_columns,
             body.target_columns or [],
@@ -798,6 +799,37 @@ def _record_plan_suggestions(request: Request, plan_id: str, result: Any) -> Non
                                  mappings=mappings, llm=result.get("llm"))
     except Exception as exc:  # noqa: BLE001 - Map answers whatever the evidence store does
         logging.getLogger(__name__).warning("plan model suggestions not recorded: %s", type(exc).__name__)
+
+
+async def _map_oracle_session(body: MapColumnsRequest, request: Request) -> Any:
+    """Map grades an Oracle zone pair on the destination's session, as Validate does.
+
+    Unbound, PostgreSQL TIMESTAMPTZ into a new Oracle table was stamped lossy at
+    0.70, under the Map floor Validate then enforced on a session that read back
+    UTC. No destination endpoint (or an unopenable one) keeps it unconfirmed.
+    """
+    from services.oracle_session_scope import is_oracle, oracle_destination_scope
+
+    dest = body.destination
+    if not is_oracle(body.destination_db_type) or dest is None or dest.kind != "database":
+        return oracle_destination_scope(body.destination_db_type, None)
+    _assert_endpoint_connectors(request, read=(dest,))
+    from services.secret_config import probe_config_from_endpoint
+
+    from ..transfer.adapters import resolve_endpoint
+    from ..transfer.models import EndpointConfig
+
+    from services.map_key_columns import MAP_KEY_PROBE_TIMEOUT_S
+
+    def _scope() -> Any:
+        endpoint = resolve_endpoint(EndpointConfig.from_dict(dest.kind, dest.model_dump(by_alias=True)))
+        cfg = probe_config_from_endpoint(body.destination_db_type, endpoint)
+        return oracle_destination_scope(body.destination_db_type, cfg)
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_scope), MAP_KEY_PROBE_TIMEOUT_S)
+    except Exception:  # noqa: BLE001 - unresolvable or slow: the pin stays unconfirmed
+        return oracle_destination_scope(body.destination_db_type, None)
 
 
 async def _map_key_columns(body: MapColumnsRequest, request: Request) -> tuple[list[str], str]:

@@ -1460,30 +1460,40 @@ def plan_transfer(
         map_src_rows = [{**r, "inferred_type": declared[r["name"]]} for r in src_rows]
 
     note_step(f"mapping the source columns onto {dst_table}")
-    mapping = run_mapping_pipeline(
-        [r["name"] for r in src_rows],
-        [r["name"] for r in map_dst_rows],
-        source_schemas=map_src_rows,
-        target_schemas=map_dst_rows,
-        source_samples=samples,
-        validation_mode=validation_mode,
-        destination_db_type=_engine_format(dst_info),
-        # The engine route maps under the source engine's identity
-        # (``_auto_map``). Without it a BSON date read as a zoneless TIMESTAMP
-        # and a PostgreSQL / Mongo VARCHAR as a code-page one, so the plan
-        # demanded a risk contract for columns Execute stamps preserve (D147).
-        source_db_type=_engine_format(src_info),
-        schema_policy=schema_policy,
-        sync_mode=mode,
-        destination_table_exists=map_dest_exists,
-        # Warehouse DDL is fact. Object stores, files, and procedure extracts
-        # are a sample: marking them authoritative made the plan say TEXT
-        # while the integrity check bound the profiled DECIMAL.
-        source_types_authoritative=_plan_source_types_authoritative(
-            src_conn, src_info, callable_plan
-        ),
-        use_llm=False,
-    )
+    from services.oracle_session_scope import oracle_destination_scope
+
+    # Map grades an Oracle zone pair on the destination session, as Validate
+    # and Execute do: unbound, TIMESTAMPTZ into a new Oracle table read as
+    # lossy at 0.70, under the Map floor Validate then enforced.
+    with oracle_destination_scope(
+        # A table this run creates reads back not-found; its connection is
+        # still the session the run writes on. An unopened one stays unconfirmed.
+        _engine_format(dst_info), dst_info.get("config") or None
+    ):
+        mapping = run_mapping_pipeline(
+            [r["name"] for r in src_rows],
+            [r["name"] for r in map_dst_rows],
+            source_schemas=map_src_rows,
+            target_schemas=map_dst_rows,
+            source_samples=samples,
+            validation_mode=validation_mode,
+            destination_db_type=_engine_format(dst_info),
+            # The engine route maps under the source engine's identity
+            # (``_auto_map``). Without it a BSON date read as a zoneless TIMESTAMP
+            # and a PostgreSQL / Mongo VARCHAR as a code-page one, so the plan
+            # demanded a risk contract for columns Execute stamps preserve (D147).
+            source_db_type=_engine_format(src_info),
+            schema_policy=schema_policy,
+            sync_mode=mode,
+            destination_table_exists=map_dest_exists,
+            # Warehouse DDL is fact. Object stores, files, and procedure extracts
+            # are a sample: marking them authoritative made the plan say TEXT
+            # while the integrity check bound the profiled DECIMAL.
+            source_types_authoritative=_plan_source_types_authoritative(
+                src_conn, src_info, callable_plan
+            ),
+            use_llm=False,
+        )
     mappings = list(mapping.get("mappings") or [])
     mappings, transform_refusal = _apply_column_transforms(mappings, column_transforms)
     if transform_refusal:
