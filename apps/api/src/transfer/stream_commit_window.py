@@ -553,6 +553,74 @@ def _map_target(source_col: str, mappings: list[dict[str, Any]] | None) -> str:
     return source_col
 
 
+def _content_match_columns(cfg: Any, read_cols: list[str]) -> tuple[list[str], Exception | None]:
+    """``(columns, structural finding)`` for a whole-content match of re-read rows."""
+    from .stream_boundary_recipe import RecipeBoundaryStructural, run_stamped_targets
+
+    try:
+        stamped = {c.lower() for c in run_stamped_targets(cfg.shape_runner, cfg.mappings)}
+    except RecipeBoundaryStructural as exc:
+        return list(read_cols), exc
+    content = [c for c in read_cols if c.lower() not in stamped]
+    if not content:
+        return list(read_cols), RecipeBoundaryStructural(
+            "Every column this route writes holds a value its recipe stamps on every run "
+            "(run_timestamp, surrogate_key), so a re-read row cannot be told apart from "
+            "its stored copy. Add a source column to the route, run it as upsert on a key "
+            "or as full_refresh_overwrite, or record the route's acknowledgement 'accept "
+            "possible boundary duplicates'."
+        )
+    return content, None
+
+
+def _structural_group_drop(
+    run: Any, exc: Exception, *, at_mark: bool, headers: list[str], peers: list, dedupe_kw: dict
+) -> set[int]:
+    """A re-read group the recipe gives no comparable image of (D359 review).
+
+    Without the route's audited acknowledgement: refused with its remedy. With
+    it, only the tie group *at* the stored watermark is appended unchecked (and
+    the acceptance recorded, as the tie-group dedupe records it); rows below
+    the mark are still matched, on their identity (cursor, key) and unshaped,
+    so the overlap window is never appended again whole.
+    """
+    from .stream_boundary_keyed import (
+        BOUNDARY_TIE_KEY,
+        BoundaryRefused,
+        _accepted,
+        _summary,
+    )
+    from .stream_boundary_recipe import recipe_touches, refusal_text
+
+    from services.sync_cursor import requires_upsert
+
+    from .stream_boundary import _boundary_append_dedupe
+
+    cfg, state = run.cfg, run.cur._boundary_fps_state
+    if requires_upsert(cfg.effective_sync):
+        return set()  # an upsert rewrites a re-read row by key: fail open, as always
+    ack = _accepted(getattr(cfg, "destination", None), cfg.dest_table,
+                    str(cfg.dest_cfg.get("schema") or ""))
+    if ack is None:
+        raise BoundaryRefused(refusal_text(exc)) from exc
+    if at_mark:
+        summary = _summary(run)
+        if summary is not None:
+            summary.setdefault(BOUNDARY_TIE_KEY, {})["accepted"] = {**ack, "why": str(exc)}
+        logger.warning("Re-read tie group not checked (%s); duplicates accepted by %s", exc, ack["actor"])
+        return set()
+    ident = list(state.get("replay_ident") or [])
+    if not ident:
+        raise BoundaryRefused(refusal_text(exc)) from exc
+    # Unshaped, on the identity columns only (shape_runner marks "remap only
+    # the compared columns"; the identity is never a recipe-written column here).
+    return _boundary_append_dedupe(
+        list(headers or []), peers, state["replay_ident_fps"], match_cols=ident,
+        shape_runner=cfg.shape_runner if not recipe_touches(cfg.shape_runner, cfg.mappings, ident) else None,
+        **dedupe_kw,
+    )
+
+
 def replay_rows_already_landed(
     run: Any, headers: list[str], rows: list[list[str]], *, verify: bool = False
 ) -> set[int]:
@@ -572,6 +640,7 @@ def replay_rows_already_landed(
     from services.value_serializer import present_cell_text
 
     from .stream_boundary import _boundary_append_dedupe
+    from .stream_boundary_read import BoundaryStructural
 
     cfg, cur = run.cfg, run.cur
     through = str(getattr(cfg, "replay_through", "") or "")
@@ -601,19 +670,6 @@ def replay_rows_already_landed(
             )
             live = {str(k).lower() for k in (probe[0] if probe else {})}
             read_cols = [c for c in all_cols if c.lower() in live] or all_cols
-            from .stream_boundary_recipe import RecipeBoundaryStructural, run_stamped_targets
-
-            # A run-stamped column differs between the stored copy and the probe
-            # by construction: never part of a content match (D359).
-            stamped = {c.lower() for c in run_stamped_targets(cfg.shape_runner, cfg.mappings)}
-            content_cols = [c for c in read_cols if c.lower() not in stamped]
-            if not content_cols:
-                raise RecipeBoundaryStructural(
-                    "Every column this route writes is stamped with the run's start by its "
-                    "transform recipe (run_timestamp), so a re-read row cannot be told apart "
-                    "from its stored copy. Add a source column to the route, or run it as "
-                    "full_refresh_overwrite."
-                )
             # Below the stored mark a re-read row is recognised as a row
             # *version*: its cursor value and its identity. Content is not part
             # of it — a row edited in place without moving its cursor is
@@ -633,17 +689,28 @@ def replay_rows_already_landed(
                 # Without a proven unique key a row is its whole content: two
                 # rows that share (cursor, part of a key) are never one row.
                 if getattr(cfg, "replay_key_complete", True)
-                else content_cols
+                else None
             )
             keyed_append = bool(
                 not requires_upsert(cfg.effective_sync)
                 and cfg.pk_target_cols
                 and all(c in read_cols for c in cfg.pk_target_cols)
             )
+            # A content match leaves out the columns the recipe stamps per run
+            # (D359); a recipe whose stamp cannot be left out is a structural
+            # finding of the group that needs the content match, decided there.
+            content_cols, content_error = read_cols, None
+            if version is None or not keyed_append:
+                content_cols, content_error = _content_match_columns(cfg, read_cols)
+            ident = [c for c in dict.fromkeys([cursor_dest, key_dest]) if c in read_cols]
             state.update(
                 replay_cols=read_cols,
-                replay_match=version,
+                replay_match=version if version is not None else content_cols,
+                replay_match_error=content_error if version is None else None,
                 replay_tie_match=version if keyed_append else content_cols,
+                replay_tie_error=None if keyed_append else content_error,
+                replay_ident=ident,
+                replay_ident_fps=Counter(),
                 replay_seen=set(),
                 # Stored copies are counted: one copy absorbs one re-read row.
                 replay_tie_fps=Counter(),
@@ -671,7 +738,10 @@ def replay_rows_already_landed(
                 sort_key=key_dest, key_values=chunk,
             )
             lowered = [{str(k).lower(): v for k, v in dr.items()} for dr in dest_rows or []]
-            for cols, bucket in ((match_cols, state["fps"]), (tie_cols, state["replay_tie_fps"])):
+            for cols, bucket in (
+                (match_cols, state["fps"]), (tie_cols, state["replay_tie_fps"]),
+                (state["replay_ident"], state["replay_ident_fps"]),
+            ):
                 tups = [tuple(low.get(str(c).lower()) for c in cols) for low in lowered]
                 bucket.update(
                     fp
@@ -687,29 +757,32 @@ def replay_rows_already_landed(
         tie_set = set(tie_idx)
         below_idx = [i for i in replay_idx if i not in tie_set]
         landed: set[int] = set()
-        for group, cols, fps, added in (
-            (below_idx, match_cols, state["fps"], []),
-            (tie_idx, tie_cols, state["replay_tie_fps"], state.get("new_cols") or []),
+        dedupe_kw = dict(
+            mappings=cfg.mappings, target_cols=all_cols, column_types=cfg.column_types,
+            stream_error_policy=cfg.stream_error_policy, digest_dest_types=cfg.digest_dest_types,
+            dest_bind_dialect=cfg.dest_bind_dialect, remap_dest_types=cfg.fingerprint_dest_types,
+            destination_pk_columns=list(cfg.pk_target_cols or []),
+        )
+        for group, cols, fps, added, error, at_mark in (
+            (below_idx, match_cols, state["fps"], [], state.get("replay_match_error"), False),
+            (tie_idx, tie_cols, state["replay_tie_fps"], state.get("new_cols") or [],
+             state.get("replay_tie_error"), True),
         ):
             if not (group and fps):
                 continue
-            drop = _boundary_append_dedupe(
-                list(headers or []),
-                [rows[i] for i in group],
-                fps,
-                match_cols=cols,
-                new_cols=added,
-                mappings=cfg.mappings,
-                target_cols=all_cols,
-                column_types=cfg.column_types,
-                stream_error_policy=cfg.stream_error_policy,
-                digest_dest_types=cfg.digest_dest_types,
-                dest_bind_dialect=cfg.dest_bind_dialect,
-                remap_dest_types=cfg.fingerprint_dest_types,
-                destination_pk_columns=list(cfg.pk_target_cols or []),
+            peers_in = [rows[i] for i in group]
+            try:
+                if error is not None:
+                    raise error
                 # Compared as the recipe wrote them (D359).
-                shape_runner=cfg.shape_runner,
-            )
+                drop = _boundary_append_dedupe(
+                    list(headers or []), peers_in, fps, match_cols=cols, new_cols=added,
+                    shape_runner=cfg.shape_runner, **dedupe_kw,
+                )
+            except BoundaryStructural as exc:
+                drop = _structural_group_drop(
+                    run, exc, at_mark=at_mark, headers=headers, peers=peers_in, dedupe_kw=dedupe_kw,
+                )
             landed.update(group[i] for i in drop)
         if not verify:
             # The window's own re-read: rows below the mark (the tie group at
@@ -732,20 +805,17 @@ def replay_rows_already_landed(
             # An upsert rewrites a re-read row by key: writing it again is harmless.
             logger.warning("Re-read window dedupe skipped (upsert, fail-open): %s", exc)
             return set()
-        from .stream_boundary_read import BoundaryStructural
+        from .stream_boundary_keyed import BoundaryHeldBack as _Held, BoundaryRefused as _Refused
 
+        if isinstance(exc, (_Held, _Refused)):
+            raise
         if isinstance(exc, BoundaryStructural):
-            # Every run would fail the same way (D359: a recipe with no
-            # per-row image): name the remedy instead of retrying forever,
-            # unless the route recorded the audited acknowledgement.
-            from .stream_boundary_keyed import BoundaryRefused, _accepted
+            # Every run would fail the same way: name the remedy instead of
+            # retrying forever. (The audited acknowledgement is decided per
+            # group above; it never lets the whole window through.)
             from .stream_boundary_recipe import refusal_text
 
-            if _accepted(getattr(cfg, "destination", None), cfg.dest_table,
-                         str(cfg.dest_cfg.get("schema") or "")) is not None:
-                logger.warning("Re-read window dedupe not possible (%s); duplicates accepted", exc)
-                return set()
-            raise BoundaryRefused(refusal_text(exc)) from exc
+            raise _Refused(refusal_text(exc)) from exc
         # D335: an append that cannot tell which re-read rows are already at the
         # destination stops before writing them and keeps its cursor.
         from .stream_boundary_keyed import BoundaryHeldBack, held_back_message

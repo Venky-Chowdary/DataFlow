@@ -76,6 +76,13 @@ def _boundary_append_dedupe(
             remap_dest_types=remap_dest_types, destination_pk_columns=destination_pk_columns,
         )
         return {live_idx[j] for j in inner}
+    if shape_runner is not None:
+        # Compared unshaped: a column the recipe introduces is not on the raw
+        # page, and remapping it would hold every peer out. Only the compared
+        # columns are remapped.
+        wanted = {*match_cols, *(new_cols or [])}
+        mappings = [m for m in mappings or [] if isinstance(m, dict) and m.get("target") in wanted]
+        target_cols = [c for c in target_cols if c in wanted]
     remap_kw = dict(
         mappings=mappings,
         target_cols=target_cols,

@@ -296,10 +296,11 @@ def _landed(run, headers, rows, *, cursor_dest_col, watermark, keyed, record):
             from .stream_boundary_recipe import RecipeBoundaryStructural
 
             raise RecipeBoundaryStructural(
-                "Every column this route writes besides the cursor is stamped with the run's "
-                "start by its transform recipe (run_timestamp), so a re-read row at the stored "
-                "watermark cannot be told apart from its stored copy. Declare a key on this "
-                "route, add a source column to it, or run it as full_refresh_overwrite."
+                "Every column this route writes besides the cursor holds a value its recipe "
+                "stamps on every run (run_timestamp, surrogate_key), so a re-read row at the "
+                "stored watermark cannot be told apart from its stored copy. Declare a key on "
+                "this route, add a source column to it, run it as full_refresh_overwrite, or "
+                "record the route's acknowledgement 'accept possible boundary duplicates'."
             )
         state["keyless_pool"], state["keyless_cols"] = pool, cols
     pool = dict(state["keyless_pool"])  # the verify pass asks the same question

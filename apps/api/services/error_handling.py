@@ -227,6 +227,24 @@ ROWS_STAY_NOTE = "Rows already written stay on the destination until you address
 
 _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (
+        # The append boundary refusal (D335/D359) carries its own remedy, and
+        # names a recipe step: without this rule "recipe" sent it to the
+        # recipe-refusal rule and its remedy was cut off.
+        ("accept possible boundary duplicates",),
+        {
+            "code": "boundary_duplicates_unchecked",
+            "category": "data_quality",
+            "confidence": "high",
+            "title": "The rows at the stored watermark cannot be checked for duplicates",
+            "fix": (
+                "Nothing past the watermark was written. Follow the remedy in the message: "
+                "change the step or route it names, or record the route's acknowledgement "
+                "'accept possible boundary duplicates'."
+            ),
+            "primary_action": "open_shape",
+        },
+    ),
+    (
         # First: the reasons quoted after this sentence name columns, and the
         # driver-text rules below would title it a missing destination column.
         ("were quarantined, so nothing was written",),
@@ -940,7 +958,9 @@ def humanize_transfer_failure(
                 "Open Map and set Primary key to a column that is unique in the source "
                 "(or use append without that PK / dedupe upstream) before Resume."
             )
-        elif matched.get("code") in {"all_rows_quarantined", "value_conversion_refused"}:
+        elif matched.get("code") in {
+            "all_rows_quarantined", "value_conversion_refused", "boundary_duplicates_unchecked",
+        }:
             message = f"{title}. {raw}."
         elif matched.get("code") == "shape_refused_row":
             message = (

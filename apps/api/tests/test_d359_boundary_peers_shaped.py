@@ -159,3 +159,31 @@ def test_one_stored_copy_absorbs_one_peer():
 def test_no_recipe_passes_the_rows_through():
     rows = [["1", "a", "t"]]
     assert shape_boundary_peers(None, HEADERS, rows) == (HEADERS, rows)
+
+
+def test_a_stamp_folded_into_a_source_column_is_refused_naming_the_step():
+    """Re-review MED 1: only introduced columns may leave the match."""
+    runner = _runner(
+        {"op": "run_timestamp", "options": {"to": "loaded_at"}},
+        {"op": "concat_columns", "options": {"to": "name", "columns": ["name", "loaded_at"]}},
+    )
+    with pytest.raises(BoundaryStructural) as caught:
+        run_stamped_targets(runner, MAPPINGS)
+    text = refusal_text(caught.value)
+    assert "Step 2 (concat_columns)" in text and "'name'" in text
+    assert text.rstrip().endswith("'accept possible boundary duplicates'.")
+
+
+def test_a_surrogate_key_counter_is_a_per_run_stamp():
+    """Re-review MED 3: the counter restarts on every run and every fork."""
+    runner = _runner({"op": "surrogate_key", "options": {"to": "sk"}})
+    assert run_stamped_targets(runner, [*MAPPINGS, {"source": "sk", "target": "sk"}]) == {"sk"}
+
+
+def test_the_unnest_refusal_says_one_row_becomes_several():
+    cols = ["id", "tags", "updated_at"]
+    runner = _runner({"op": "unnest_json", "column": "tags", "options": {"to": "tag"}}, columns=cols)
+    with pytest.raises(BoundaryStructural) as caught:
+        shape_boundary_peers(runner, cols, [["30", '["a", "b"]', "t"]])
+    assert "turns one source row into several written rows" in str(caught.value)
+    assert "from many source rows" not in str(caught.value)

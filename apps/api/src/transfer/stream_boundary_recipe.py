@@ -28,8 +28,9 @@ from .stream_boundary_read import BoundaryStructural
 
 #: Steps whose output row depends on rows other than the one shaped.
 _NO_ROW_IMAGE_OPS = frozenset({"aggregate", "rank_rows"})
-#: Steps that stamp a value not derived from the row (the run's start).
-_RUN_STAMPED_OPS = frozenset({"run_timestamp"})
+#: Steps that stamp a value not derived from the row: the run's start, or a
+#: running counter that restarts on every run and every fork.
+_RUN_STAMPED_OPS = frozenset({"run_timestamp", "surrogate_key"})
 
 
 class RecipeBoundaryStructural(BoundaryStructural):
@@ -65,12 +66,25 @@ def _step_reads(step: Any) -> set[str]:
 
 
 def run_stamped_columns(shape_runner: Any) -> set[str]:
-    """Recipe output columns that carry the run's own stamp, directly or derived."""
+    """Columns the recipe introduces that carry a per-run stamp, directly or derived.
+
+    Only introduced columns can be left out of a match: a source column the
+    stamp is folded into still carries the row's identity, and leaving it out
+    matched a late row with another row's stored copy and dropped it. Such a
+    step is refused by name (:class:`RecipeBoundaryStructural`).
+    """
     recipe = _recipe(shape_runner)
+    if recipe is None:
+        return set()
+    sources = set(recipe.input_columns or ()) | set(recipe.read_columns or ())
     stamped: set[str] = set()
-    for step in getattr(recipe, "enabled_steps", ()) or ():
+    for index, step in enumerate(recipe.enabled_steps, start=1):
         if step.op in _RUN_STAMPED_OPS or (stamped and _step_reads(step) & stamped):
-            stamped.update(str(c) for c in step.writes if c)
+            writes = {str(c) for c in step.writes if c}
+            overwritten = sorted(writes & sources)
+            if overwritten:
+                raise RecipeBoundaryStructural(_stamped_source_message(index, step.op, overwritten[0]))
+            stamped |= writes
     return stamped
 
 
@@ -100,14 +114,37 @@ def recipe_touches(shape_runner: Any, mappings: list[dict] | None, targets: list
     return any(to_source.get(t, t) in touched or t in touched for t in targets)
 
 
+_REMEDY = (
+    "Run this route as upsert on a key, or as full_refresh_overwrite, move that "
+    "step out of the recipe, or record the route's acknowledgement 'accept "
+    "possible boundary duplicates'."
+)
+
+
 def _no_image_message(index: int, op: str) -> str:
     return (
-        f"Step {index} ({op}) of this route's transform recipe computes each written row "
-        "from many source rows, so a re-read row at the stored watermark has no single "
-        "image to compare with its stored copy, and an append could write it twice. "
-        "Run this route as upsert on a key, or as full_refresh_overwrite, move that "
-        "step out of the recipe, or record the route's acknowledgement 'accept "
-        "possible boundary duplicates'."
+        f"Step {index} ({op}) of this route's recipe computes each written row from many "
+        "source rows, so a re-read row at the stored watermark has no single image to "
+        f"compare with its stored copy, and an append could write it twice. {_REMEDY}"
+    )
+
+
+def _expand_message(index: int, op: str) -> str:
+    return (
+        f"Step {index} ({op}) of this route's recipe turns one source row into several "
+        "written rows, so a re-read row at the stored watermark has no single image to "
+        f"compare with its stored copy, and an append could write it twice. {_REMEDY}"
+    )
+
+
+def _stamped_source_message(index: int, op: str, column: str) -> str:
+    return (
+        f"Step {index} ({op}) of this route's recipe writes a value that changes on every "
+        f"run into the source column '{column}', so a re-read row at the stored watermark "
+        "cannot be told apart from another row's stored copy and could be dropped or "
+        "written twice. Write that value to a new column instead, run this route as "
+        "upsert on a key or as full_refresh_overwrite, or record the route's "
+        "acknowledgement 'accept possible boundary duplicates'."
     )
 
 
@@ -144,12 +181,9 @@ def shape_boundary_peers(
         if len(got) > 1:
             index, step = next(
                 ((i, s) for i, s in enumerate(steps, start=1) if s.definition.expands),
-                (0, None),
+                (len(steps), steps[-1]),
             )
-            raise RecipeBoundaryStructural(
-                _no_image_message(index, step.op) if step is not None
-                else _no_image_message(len(steps), steps[-1].op)
-            )
+            raise RecipeBoundaryStructural(_expand_message(index, step.op))
         shaped.append(got[0] if got else None)
     return out_headers, shaped
 
