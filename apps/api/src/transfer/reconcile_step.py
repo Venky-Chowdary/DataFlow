@@ -1407,7 +1407,7 @@ def _transform_applied_proof_impl(
 
         target_cols, _ = resolve_target_columns(
             mappings, source_schema or {}, preserve_case=True,
-            identifier=target_identifier(dest_db_type),
+            identifier=target_identifier(dest_db_type), dest_db=dest_db_type or "",
         )
         digest_cols = [c for c in target_cols if c not in _stamp_set(scd2_opts)]
     else:
@@ -2935,7 +2935,7 @@ def _compute_source_checksum_from_spool(
 
         target_cols, _ = resolve_target_columns(
             mappings, source_schema or {}, preserve_case=True,
-            identifier=target_identifier(dest_db_type),
+            identifier=target_identifier(dest_db_type), dest_db=dest_db_type or "",
         )
     acc = FingerprintAccumulator()
     policy = transform_error_policy_for_validation_mode(validation_mode)
@@ -3010,7 +3010,7 @@ def _compute_source_checksum(
 
         target_cols, _ = resolve_target_columns(
             mappings, source_schema or {}, preserve_case=True,
-            identifier=target_identifier(dest_db_type),
+            identifier=target_identifier(dest_db_type), dest_db=dest_db_type or "",
         )
     mapped_rows, _rejected = map_rows_for_fingerprint(
         headers=columns,

@@ -356,7 +356,7 @@ def write_mapped_rows(
 
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True,
-        identifier=writer_identifier("zendesk"),
+        identifier=writer_identifier("zendesk"), dest_db="zendesk",
     )
     policy = transform_error_policy(error_policy)
     live_dest = _kwargs.get("destination_column_types")

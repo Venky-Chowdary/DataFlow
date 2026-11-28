@@ -231,7 +231,7 @@ def stream_scd2_mirror_transfer(
 
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in schema]
-    target_cols, _ = resolve_target_columns(mappings, schema, preserve_case=True)
+    target_cols, _ = resolve_target_columns(mappings, schema, preserve_case=True, dest_db=dest_type)
     # The merge reads staging rows, which are already in target space: it maps
     # each staged column to itself, never through the source-space Map again.
     merge_mappings, merge_schema = staged_merge_map(mappings, schema, target_cols)
@@ -239,7 +239,7 @@ def stream_scd2_mirror_transfer(
     # Read-back digests are steered by the same types the write pass used.
     from services.mirror_engine import target_fingerprint_types
 
-    digest_types = target_fingerprint_types(mappings, schema)
+    digest_types = target_fingerprint_types(mappings, schema, dest_type)
 
     staging = _staging_endpoint(destination, job_id or "", mappings)
     staging_qualified = _qualified(staging.table, schema_name, dest_type)

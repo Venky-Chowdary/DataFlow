@@ -132,7 +132,7 @@ def write_mapped_rows(
 
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True,
-        identifier=writer_identifier("stripe"),
+        identifier=writer_identifier("stripe"), dest_db="stripe",
     )
     policy = transform_error_policy(error_policy)
     # Stripe has no Describe API — OpenAPI catalog∩Studio coverage gate so

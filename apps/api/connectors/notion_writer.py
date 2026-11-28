@@ -410,7 +410,7 @@ def write_mapped_rows(
 
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True,
-        identifier=writer_identifier("notion"),
+        identifier=writer_identifier("notion"), dest_db="notion",
     )
     policy = transform_error_policy(error_policy)
     properties: dict[str, str] = {}

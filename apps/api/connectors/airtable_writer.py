@@ -581,7 +581,7 @@ def write_mapped_rows(
 
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True,
-        identifier=writer_identifier("airtable"),
+        identifier=writer_identifier("airtable"), dest_db="airtable",
     )
     policy = transform_error_policy(error_policy)
     # Live Meta when PAT has schema.bases:read — typed DECIMAL/VARCHAR(n)

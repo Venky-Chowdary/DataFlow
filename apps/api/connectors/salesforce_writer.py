@@ -414,7 +414,12 @@ def write_mapped_rows(
             driver="salesforce",
         )
 
-    target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    from connectors.destination_naming import writer_identifier
+
+    target_cols, _ = resolve_target_columns(  # naming unchanged; the type sets the case rule
+        mappings, column_types, preserve_case=True, dest_db="salesforce",
+        identifier=writer_identifier("", preserve_case=True),
+    )
     # Rebuild targets with Salesforce API-name honesty (__c / __r preserved).
     sf_cols: list[str] = []
     for m in mappings or []:

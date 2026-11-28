@@ -112,7 +112,7 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
 
             cfg.target_cols, _ = resolve_target_columns(
                 cfg.mappings, cfg.column_types, preserve_case=True,
-                identifier=target_identifier(cfg.dest_type),
+                identifier=target_identifier(cfg.dest_type), dest_db=cfg.dest_type,
             )
 
 

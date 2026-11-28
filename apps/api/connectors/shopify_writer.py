@@ -159,7 +159,7 @@ def write_mapped_rows(
 
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True,
-        identifier=writer_identifier("shopify"),
+        identifier=writer_identifier("shopify"), dest_db="shopify",
     )
     policy = transform_error_policy(error_policy)
     metafield_defs: list[dict] | None = None

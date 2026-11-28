@@ -431,7 +431,7 @@ def write_mapped_rows(
     # G11: a search store keeps the mapped name (``@timestamp``, ``host.name``).
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True,
-        identifier=writer_identifier("elasticsearch"),
+        identifier=writer_identifier("elasticsearch"), dest_db="elasticsearch",
     )
     # Before any destination dial or index create. A keyless overwrite used to
     # create an empty index and then reject every row (D301). A mapped ``id``

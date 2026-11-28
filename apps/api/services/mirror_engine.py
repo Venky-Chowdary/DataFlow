@@ -252,12 +252,15 @@ def _target_columns(
     records_columns: list[str],
     mappings: list[dict[str, Any]] | None,
     source_schema: dict[str, str] | None,
+    dest_db: str = "",
 ) -> list[str]:
     """Return the ordered target column names for checksum comparison."""
     from connectors.writer_common import resolve_target_columns
 
     if mappings:
-        target_cols, _ = resolve_target_columns(mappings, source_schema or {}, preserve_case=True)
+        target_cols, _ = resolve_target_columns(
+            mappings, source_schema or {}, preserve_case=True, dest_db=dest_db
+        )
         return target_cols
     return records_columns
 
@@ -265,6 +268,7 @@ def _target_columns(
 def target_fingerprint_types(
     mappings: list[dict[str, Any]] | None,
     source_schema: dict[str, str] | None,
+    dest_db: str = "",
 ) -> dict[str, str]:
     """Target column → logical type, as the write pass fingerprints them."""
     from connectors.writer_common import resolve_target_columns
@@ -272,7 +276,7 @@ def target_fingerprint_types(
     if not mappings:
         return {c: str(t) for c, t in (source_schema or {}).items() if t}
     target_cols, logical = resolve_target_columns(
-        mappings, source_schema or {}, preserve_case=True
+        mappings, source_schema or {}, preserve_case=True, dest_db=dest_db
     )
     return {c: str(t) for c, t in zip(target_cols, logical) if t}
 
@@ -1144,7 +1148,10 @@ def apply_inferred_soft_deletes(
 
     import sqlalchemy as sa
 
-    target_cols = _target_columns(columns, mappings, schema)
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    mirror_dest = resolve_driver_type(str(getattr(endpoint, "format", "") or ""))
+    target_cols = _target_columns(columns, mappings, schema, mirror_dest)
     engine = get_sqlalchemy_engine(cfg)
     engine_dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "")
     from connectors.generic_sql import _resolve_physical_table_ident
@@ -1231,7 +1238,7 @@ def apply_inferred_soft_deletes(
                     target_cols,
                     lattice,
                     batch_size,
-                    dest_types=target_fingerprint_types(mappings, schema),
+                    dest_types=target_fingerprint_types(mappings, schema, mirror_dest),
                     physical=stored,
                 )
                 kept = _live_held_out_keys(
@@ -1252,7 +1259,7 @@ def apply_inferred_soft_deletes(
                         target_cols,
                         lattice,
                         batch_size,
-                        dest_types=target_fingerprint_types(mappings, schema),
+                        dest_types=target_fingerprint_types(mappings, schema, mirror_dest),
                         physical=stored,
                         pk_columns=pk_physical,
                         exclude_keys=kept,

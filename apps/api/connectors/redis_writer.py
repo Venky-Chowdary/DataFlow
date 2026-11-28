@@ -433,7 +433,7 @@ def write_mapped_rows(
         column_types,
         preserve_case=True,
         table_exists=False if pending_doc else None,
-        identifier=writer_identifier("redis"),
+        identifier=writer_identifier("redis"), dest_db="redis",
     )
     from connectors.writer_common import resolve_studio_or_map_dest_types
 

@@ -169,14 +169,14 @@ _CASE_PAIR = [{"source": "Name", "target": "Name"}, {"source": "name", "target":
 
 @pytest.mark.parametrize(
     "dest", ["sqlite", "mysql", "mariadb", "sqlserver", "duckdb", "bigquery", "snowflake", "redshift",
-             "databricks", "iceberg"],
+             "databricks", "iceberg", "oracle", "db2", ""],
 )
 def test_validate_and_the_writer_refuse_a_case_pair_where_names_fold(dest):
     from connectors.writer_common import resolve_target_columns
     from services.ddl_compatibility import evaluate_ddl_compatibility
 
     _ok, issues = evaluate_ddl_compatibility(
-        mappings=_CASE_PAIR, dest_db_type=dest, table_exists=False, allow_create=True,
+        mappings=_CASE_PAIR, dest_db_type=dest or "unknown", table_exists=False, allow_create=True,
     )
     assert any("'Name' and 'name'" in i for i in issues), issues
     with pytest.raises(ValueError, match="'Name' and 'name'"):
@@ -184,8 +184,8 @@ def test_validate_and_the_writer_refuse_a_case_pair_where_names_fold(dest):
 
 
 @pytest.mark.parametrize(
-    "dest", ["postgresql", "pgvector", "oracle", "", "mongodb", "kafka", "elasticsearch", "csv",
-             "parquet", "s3", "gcs", "azure_blob", "adls"],
+    "dest", ["postgresql", "pgvector", "mongodb", "kafka", "elasticsearch", "csv",
+             "parquet", "s3", "gcs", "azure_blob", "adls", "sftp", "email", "clickhouse"],
 )
 def test_case_exact_destinations_keep_two_columns(dest):
     """Re-review: PostgreSQL quotes and keeps case (``"Name"`` and ``"name"`` are two
@@ -196,20 +196,19 @@ def test_case_exact_destinations_keep_two_columns(dest):
 
     assert target_name_collisions(_CASE_PAIR, dest_type=dest) == []
     _ok, issues = evaluate_ddl_compatibility(
-        mappings=_CASE_PAIR, dest_db_type=dest or "postgresql", table_exists=False, allow_create=True,
+        mappings=_CASE_PAIR, dest_db_type=dest, table_exists=False, allow_create=True,
     )
     assert not any("collision" in i for i in issues), issues
     targets, _types = resolve_target_columns(_CASE_PAIR, {}, preserve_case=True, dest_db=dest)
     assert targets == ["Name", "name"]
 
 
-def test_oracle_folds_only_an_all_lowercase_name():
-    """SQLAlchemy's Oracle names: ``name`` is case-insensitive (``NAME``); ``Name`` is quoted."""
+def test_oracle_folds_like_its_writer_binds_existing_columns():
+    """Oracle's writer binds an existing column by its case-folded stored spelling
+    (``_resolve_physical_column_idents``), so ``Name``/``name`` are one column there."""
     from services.target_name_collision import target_name_collisions
 
-    assert target_name_collisions(_CASE_PAIR, dest_type="oracle") == []
-    upper_pair = [{"source": "NAME", "target": "NAME"}, {"source": "name", "target": "name"}]
-    assert [s for _t, s in target_name_collisions(upper_pair, dest_type="oracle")] == [["NAME", "name"]]
+    assert [s for _t, s in target_name_collisions(_CASE_PAIR, dest_type="oracle")] == [["Name", "name"]]
 
 
 def test_a_pending_mapping_the_writer_skips_is_not_a_collision():
@@ -335,3 +334,93 @@ def test_sqlite_overwrite_refuses_the_pair_by_name(pair_source, tmp_path, monkey
             assert conn.execute("SELECT * FROM t").fetchall() == [(9, "kept")]
         finally:
             conn.close()
+
+
+def _sqlite_rows(db):
+    import sqlite3
+
+    conn = sqlite3.connect(str(db))
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(t)")]
+        return cols, conn.execute("SELECT * FROM t ORDER BY 1").fetchall()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("sync_mode", ["scd2", "full_refresh_mirror"])
+def test_buffered_history_route_refuses_a_case_pair_before_any_alter(
+    case_source, tmp_path, monkeypatch, sync_mode
+):
+    """Round 4 (HIGH): scd2_engine named its targets with no destination type and the
+    check treated that as case-exact: SCD2 (buffered, priority_column) ALTERed the
+    SQLite table, inserted rows without the "name" values and failed verification
+    with them in place. Refused by name now; the table is byte-identical."""
+    import sqlite3
+
+    fake = _engine_store(tmp_path, monkeypatch)
+    db = tmp_path / "d.sqlite"
+    conn = sqlite3.connect(str(db))
+    with conn:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, label TEXT)")
+        conn.executemany("INSERT INTO t VALUES (?, ?)", [(100, "kept 100"), (101, "kept 101")])
+    conn.close()
+    before = _sqlite_rows(db)
+    request = TransferRequest(
+        source=_pg_endpoint(case_source),
+        destination=EndpointConfig(kind="database", format="sqlite", database=str(db), table="t"),
+        mappings=[{"source": "id", "target": "id"}, {"source": "Name", "target": "Name"},
+                  {"source": "name", "target": "name"}],
+        sync_mode=sync_mode,
+        stream_contracts=[{"name": case_source, "primary_key": ["id"], "sync_mode": sync_mode,
+                           "selected": True}],
+        skip_preflight=True, validation_mode="strict", priority_column="id",
+        schema_policy="propagate_columns",
+    )
+    job_id = "t2dh" + uuid.uuid4().hex[:16]
+    fake.update_job_status(job_id, "pending", transfer_request={})
+    result = UniversalTransferEngine().execute_tracked(request, job_id)
+    assert not result.success
+    assert "'Name' and 'name'" in str(result.error), result.error
+    assert _sqlite_rows(db) == before, "no ALTER, no rows"
+
+
+def test_buffered_scd2_into_mysql_refuses_a_case_pair_before_any_alter(case_source, tmp_path, monkeypatch):
+    """The MySQL leg: a raw "Duplicate column name" after the table was altered."""
+    r.mysql_conn().close()
+    fake = _engine_store(tmp_path, monkeypatch)
+    table = "t2dm_" + uuid.uuid4().hex[:8]
+    r.execute("mysql", f"CREATE TABLE `{table}` (id BIGINT PRIMARY KEY, label TEXT)")
+    r.execute("mysql", f"INSERT INTO `{table}` VALUES (100, 'kept 100')")
+    cfg = r.dest_config("mysql")
+    try:
+        request = TransferRequest(
+            source=_pg_endpoint(case_source),
+            destination=EndpointConfig(kind="database", format="mysql", table=table, host=cfg["host"],
+                                       port=cfg["port"], database=cfg["database"],
+                                       username=cfg["username"], password=cfg["password"]),
+            mappings=[{"source": "id", "target": "id"}, {"source": "Name", "target": "Name"},
+                      {"source": "name", "target": "name"}],
+            sync_mode="scd2",
+            stream_contracts=[{"name": case_source, "primary_key": ["id"], "sync_mode": "scd2",
+                               "selected": True}],
+            skip_preflight=True, validation_mode="strict", priority_column="id",
+            schema_policy="propagate_columns",
+        )
+        job_id = "t2dm" + uuid.uuid4().hex[:16]
+        fake.update_job_status(job_id, "pending", transfer_request={})
+        result = UniversalTransferEngine().execute_tracked(request, job_id)
+        assert not result.success
+        assert "'Name' and 'name'" in str(result.error), result.error
+        cols = [c[0] for c in r.query("mysql", f"SELECT COLUMN_NAME FROM information_schema.columns "
+                                               f"WHERE table_schema=DATABASE() AND table_name='{table}' "
+                                               "ORDER BY ORDINAL_POSITION")]
+        assert cols == ["id", "label"], cols
+        assert r.query("mysql", f"SELECT id, label FROM `{table}`") == [(100, "kept 100")]
+    finally:
+        r.drop("mysql", table)
+
+
+def test_clickhouse_keeps_name_and_Name_apart():
+    from services.target_name_collision import target_name_collisions
+
+    assert target_name_collisions(_CASE_PAIR, dest_type="clickhouse") == []

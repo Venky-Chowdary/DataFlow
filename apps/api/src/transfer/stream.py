@@ -1596,7 +1596,7 @@ def _stream_database_transfer_impl(
                 run.cfg.column_types[name] = ddl_carrier_type(str(lt))
     run.cfg.target_cols, logical_types = resolve_target_columns(
         run.cfg.mappings, run.cfg.column_types, preserve_case=True,
-        identifier=target_identifier(run.cfg.dest_type),  # names the writer stores (PR1/G11)
+        identifier=target_identifier(run.cfg.dest_type), dest_db=run.cfg.dest_type,  # PR1/G11
     )
     # Write-path dest_types for Gate-8 fingerprint remap parity — including the
     # drift widen the backfill write applies, so the digest is taken against the

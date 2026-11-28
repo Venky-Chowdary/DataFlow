@@ -387,7 +387,7 @@ def write_mapped_rows(
 
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True,
-        identifier=writer_identifier("hubspot"),
+        identifier=writer_identifier("hubspot"), dest_db="hubspot",
     )
     policy = transform_error_policy(error_policy)
     # Live Properties Describe when scopes allow — VARCHAR(65536)/DECIMAL(38,10)

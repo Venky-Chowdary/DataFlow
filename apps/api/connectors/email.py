@@ -267,7 +267,9 @@ def write_mapped_rows(
             error="At least one recipient (to) is required. Provide it via the 'to' query param or the database/recipients field.",
         )
 
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True, dest_db="email"
+    )
     # Parity with S3/SFTP/GCS/ADLS — Studio destination_column_types must cover
     # every mapped column; never soft-bind Map VARCHAR when Studio is partial.
     dest_types, cov_err = resolve_object_store_write_dest_types(

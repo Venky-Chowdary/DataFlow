@@ -94,38 +94,42 @@ def dest_kind(dest_type: str | None) -> str:
 OBJECT_STORE_EXPORTS = frozenset({"s3", "gcs", "azure_blob", "adls", "azure_data_lake", "sftp"})
 
 
+#: Other destinations whose writers keep a column/field name exactly: ClickHouse
+#: identifiers are case-sensitive; an e-mailed export is a file.
+CASE_EXACT_SQL = frozenset({"clickhouse"})
+CASE_EXACT_OTHER = frozenset({"email"})
+
+
 def stored_column_key(dest_type: str | None, landed: Any) -> str:
     """The identity a destination gives the column a writer names ``landed``.
 
     Two targets with the same key are one column there. One rule for Validate
-    (``ddl_compatibility``) and every writer (``resolve_target_columns``), via
-    :mod:`services.target_name_collision`:
+    (``ddl_compatibility``), every writer (``resolve_target_columns``) and the
+    COPY routes, via :mod:`services.target_name_collision`:
 
-    * kept exactly: document / search / key-value / stream / SaaS stores, file
-      and object-store exports, PostgreSQL (its writers quote every identifier
-      and keep case, so ``"Name"`` and ``"name"`` are two columns), and an
-      unknown destination (no proof the names fold);
-    * Oracle through SQLAlchemy: an all-lowercase name is case-insensitive
-      (stored upper case), any capital makes it a quoted exact name, so
-      ``name``/``NAME`` are one column and ``Name``/``name`` two;
-    * case-folded everywhere else: SQLite, MySQL/MariaDB, SQL Server, DuckDB,
-      BigQuery, Databricks, Redshift (case-insensitive by default), and
-      Snowflake, whose writer matches existing columns by ``.upper()``.
-      Iceberg folds too: the format is case-sensitive, but Glue and Hive
-      catalogs store column names lower-cased.
+    * kept exactly: document / search / key-value / stream / SaaS stores, file,
+      object-store and e-mailed exports, PostgreSQL (its writers quote every
+      identifier and keep case, so ``"Name"`` and ``"name"`` are two columns)
+      and ClickHouse (case-sensitive identifiers);
+    * case-folded everywhere else, failing closed for an unknown or unnamed
+      destination: SQLite, MySQL/MariaDB, SQL Server, DuckDB, BigQuery,
+      Databricks, Redshift (case-insensitive by default); Snowflake, whose
+      writer matches existing columns by ``.upper()``; Oracle and DB2, whose
+      writer binds an existing column by its case-folded stored spelling
+      (``generic_sql._resolve_physical_column_idents``); Iceberg, whose Glue
+      and Hive catalogs store column names lower-cased.
     """
     name = str(landed or "")
     kind = dest_kind(dest_type)
-    if (
-        not kind
-        or kind in EXACT_NAME_STORES
+    if kind and (
+        kind in EXACT_NAME_STORES
         or kind in FILE_EXPORTS
         or kind in OBJECT_STORE_EXPORTS
+        or kind in CASE_EXACT_SQL
+        or kind in CASE_EXACT_OTHER
         or kind == "postgresql"
     ):
         return name
-    if kind == "oracle":
-        return name.upper() if name == name.lower() else name
     return name.casefold()
 
 

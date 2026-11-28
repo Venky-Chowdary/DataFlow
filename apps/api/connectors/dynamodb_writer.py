@@ -795,7 +795,7 @@ def write_mapped_rows(
     # dials the table.
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True,
-        identifier=writer_identifier("dynamodb"),
+        identifier=writer_identifier("dynamodb"), dest_db="dynamodb",
     )
     # Connect + describe before the write: AttributeDefinitions / sample must
     # win over Studio VARCHAR stamps (empty→NULL invent on live N/BOOL attrs).
@@ -807,7 +807,7 @@ def write_mapped_rows(
         # key and the mapped columns are what CREATE TABLE receives (D298).
         target_cols, logical_types = resolve_target_columns(
             mappings, column_types, preserve_case=True,
-            identifier=writer_identifier("dynamodb"),
+            identifier=writer_identifier("dynamodb"), dest_db="dynamodb",
             table_exists=False,
         )
     live_dest = _kwargs.get("destination_column_types")

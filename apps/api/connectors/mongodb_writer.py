@@ -603,6 +603,7 @@ def write_mapped_rows(
         preserve_case=True,
         table_exists=False if create_table else None,
         identifier=_field,
+        dest_db="mongodb",
     )
     path_error = target_refusal(target_cols)
     if path_error:

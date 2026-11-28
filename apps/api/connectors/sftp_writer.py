@@ -196,7 +196,9 @@ def write_mapped_rows(
             error="SFTP remote path is required. Provide it via the connection_string or database/table fields.",
         )
 
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True, dest_db="sftp"
+    )
     dest_types, cov_err = resolve_object_store_write_dest_types(
         target_cols,
         mappings,

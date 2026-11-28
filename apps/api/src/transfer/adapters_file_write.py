@@ -85,7 +85,7 @@ def write_destination_file(
 
         # G11: a file export keeps the mapped header's case (was lowercased).
         target_cols, _ = resolve_target_columns(
-            mappings, types, identifier=writer_identifier(fmt)
+            mappings, types, identifier=writer_identifier(fmt), dest_db=fmt
         )
         error_policy = transform_error_policy_for_validation_mode(validation_mode)
         mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(

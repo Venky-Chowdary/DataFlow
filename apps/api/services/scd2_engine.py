@@ -279,11 +279,15 @@ def _qualified_name(table: str, schema: str | None, dialect: str = "") -> str:
     return f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
 
 
-def _target_columns(records_columns: list[str], mappings: list[dict[str, Any]] | None) -> list[str]:
+def _target_columns(
+    records_columns: list[str], mappings: list[dict[str, Any]] | None, dest_db: str = ""
+) -> list[str]:
     from connectors.writer_common import resolve_target_columns
 
     if mappings:
-        target_cols, _ = resolve_target_columns(mappings, {}, preserve_case=True)
+        # The destination decides which targets are one column (refused before
+        # any DDL); without it the check fails closed and folds case.
+        target_cols, _ = resolve_target_columns(mappings, {}, preserve_case=True, dest_db=dest_db)
         return target_cols
     return records_columns
 
@@ -1009,7 +1013,9 @@ def _scd2_map_context(
     if not pk_columns:
         raise ValueError("SCD2 sync requires a primary key / conflict column")
 
-    target_cols = _target_columns(columns, mappings)
+    target_cols = _target_columns(
+        columns, mappings, resolve_driver_type(str(getattr(endpoint, "format", "") or ""))
+    )
     effective_mappings = mappings or [{"source": c, "target": c} for c in columns]
     dest_types = {c: (schema or {}).get(c, "string") for c in target_cols}
     # Prefer Map target_type stamps when present (DECIMAL(p,s) / VARCHAR(n)).

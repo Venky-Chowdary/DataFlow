@@ -180,7 +180,7 @@ def write_mapped_rows(
     # A new object is create-new. Leaving table_exists unset dropped every
     # pending_dest_schema mapping and the parquet file was 0 columns (DEF-C-043).
     target_cols, logical_types = resolve_target_columns(
-        mappings, column_types, preserve_case=True, table_exists=False
+        mappings, column_types, preserve_case=True, table_exists=False, dest_db="s3"
     )
     dest_types, cov_err = resolve_object_store_write_dest_types(
         target_cols,

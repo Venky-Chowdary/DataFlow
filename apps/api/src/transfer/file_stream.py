@@ -166,6 +166,7 @@ def _resolve_file_stream_target_columns(
         preserve_case=True,
         table_exists=False if dest_type in ("s3", "gcs", "adls") else None,
         identifier=writer_identifier(dest_type, preserve_case=True),
+        dest_db=dest_type,
     )
 
 

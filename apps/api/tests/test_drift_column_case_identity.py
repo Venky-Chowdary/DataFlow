@@ -101,3 +101,27 @@ def test_resolve_columns_keeps_map_names_when_the_catalog_is_unreadable(
         lambda *_args, **_kw: {},
     )
     assert _resolve_physical_column_idents(engine, "T", "S", ["id"]) == {}
+
+
+def test_resolve_columns_binds_an_exact_quoted_spelling_first(monkeypatch) -> None:
+    """T2 round 4: the stored-name rule — an exact quoted spelling wins over the fold."""
+    engine = _Engine("oracle")
+    monkeypatch.setattr(
+        "connectors.generic_sql._stored_column_spellings",
+        lambda *_args, **_kw: {"id": "ID", "label": "label"},
+    )
+    assert _resolve_physical_column_idents(engine, "T", "S", ["id", "label", "id"]) == {"id": "ID"}
+
+
+def test_resolve_columns_refuses_two_columns_bound_to_one_stored_column(monkeypatch) -> None:
+    """``Name`` and ``name`` both bind the stored ``NAME``: refused by name before the
+    write, not ORA-00957 duplicate column name."""
+    import pytest
+
+    engine = _Engine("oracle")
+    monkeypatch.setattr(
+        "connectors.generic_sql._stored_column_spellings",
+        lambda *_args, **_kw: {"id": "ID", "name": "NAME"},
+    )
+    with pytest.raises(ValueError, match="'Name' and 'name' would both land in destination column 'NAME'"):
+        _resolve_physical_column_idents(engine, "T", "S", ["id", "Name", "name"])
