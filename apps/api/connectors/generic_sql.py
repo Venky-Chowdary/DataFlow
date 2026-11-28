@@ -1861,7 +1861,7 @@ def _refuse_sqlserver_datetime_rounding(
     raise ValueError(
         f"SQL Server DATETIME cannot store microsecond {us:06d} "
         f"({value.isoformat(sep='T')}) — column keeps 1/300 s "
-        "(.000/.003/.007). Quarantine; refuse round-after-commit."
+        "(last millisecond digit 0, 3 or 7). Quarantine; refuse round-after-commit."
     )
 
 
