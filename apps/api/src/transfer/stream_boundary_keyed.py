@@ -249,7 +249,8 @@ def _landed(run, headers, rows, *, cursor_dest_col, watermark, keyed, record):
     dialect = cfg.dest_bind_dialect or cfg.dest_type
     types = dict(cfg.digest_dest_types or {})
     targets = list(cfg.target_cols or [])
-    mapped = remap_boundary_rows(cfg, headers, rows)
+    # Keyless peers are compared on every column, so as the recipe wrote them.
+    mapped = remap_boundary_rows(cfg, headers, rows, shape=not keyed)
     summary = _summary(run)
     tie = None
     if summary is not None and record:

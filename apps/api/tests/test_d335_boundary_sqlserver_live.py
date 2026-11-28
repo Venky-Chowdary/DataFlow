@@ -152,3 +152,50 @@ def test_live_pg_to_sqlserver_datetime_destination_compares_at_1_300_s(store):
         ts=lambda i: f"2026-11-24 10:{i:02d}:00.{(i * 10 + (3, 7, 0)[i % 3]) % 1000:03d}",
         pre_create=_pre_create,
     )
+
+
+def _rows(table: str) -> list[tuple]:
+    from tests.c3_live_helpers import sqlalchemy_sql
+
+    cols = [
+        str(r[0]).lower()
+        for r in sqlalchemy_sql(
+            _cfg(),
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' "
+            f"AND TABLE_NAME = '{table}' ORDER BY ORDINAL_POSITION",  # nosec B608 - test-owned name
+            fetch=True,
+        )
+        or []
+    ]
+    if not cols:
+        return []
+    wanted = [c for c in ("id", "name", "note", "region") if c in cols]
+    rows = sqlalchemy_sql(
+        _cfg(), f"SELECT {', '.join(wanted)} FROM dbo.{table}", fetch=True  # nosec B608
+    )
+    out = []
+    for row in rows or []:
+        rec = dict(zip(wanted, row))
+        out.append((int(rec["id"]), rec.get("name"), rec.get("note"), rec.get("region")))
+    return out
+
+
+def test_live_pg_to_sqlserver_transformed_append_chain_is_exact(store):
+    """D359 (QA r67/r72: run 3 after ADD COLUMN failed "Transform-applied proof
+    failed ... changed: 31" over the boundary key's two copies). The 3-run chain
+    of ``tests/helpers/d359_ia_chain_scenario.py``: keyless destination, recipe
+    on ``name``, Map transform on ``note``, ADD COLUMN before run 2. Every run
+    green, the destination equal to the model row by row."""
+    from tests.c3_live_helpers import pg_endpoint, pg_sql
+    from tests.helpers.d359_ia_chain_scenario import run_chain
+
+    run_chain(
+        store,
+        src_exec=pg_sql,
+        src_endpoint=pg_endpoint,
+        dest_endpoint=_endpoint,
+        dest_rows=_rows,
+        drop_dest=_drop,
+        cursor_type="TIMESTAMP(6)",
+        upper_dest=True,
+    )

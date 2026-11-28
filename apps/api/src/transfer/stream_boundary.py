@@ -5,6 +5,8 @@ Split out of ``stream`` (module size budget); ``stream`` re-exports it.
 
 from __future__ import annotations
 
+from typing import Any
+
 from connectors.writer_common import map_rows_for_fingerprint, row_fingerprints
 
 
@@ -23,6 +25,7 @@ def _boundary_append_dedupe(
     dest_bind_dialect: str,
     remap_dest_types: dict | None = None,
     destination_pk_columns: list[str] | None = None,
+    shape_runner: Any = None,
 ) -> set[int]:
     """Indices of re-read boundary rows whose ``match_cols`` the destination holds.
 
@@ -49,7 +52,21 @@ def _boundary_append_dedupe(
     window check, a silently dropped row is not. A peer the remap itself holds
     out is kept (the writer quarantines it again); it no longer switches the
     drop off for its landed neighbours.
+
+    ``shape_runner`` is the run's approved recipe: the peers are compared as it
+    wrote them (:func:`shape_boundary_peers`, D359).
     """
+    if shape_runner is not None:
+        headers, shaped = shape_boundary_peers(shape_runner, headers, boundary_rows)
+        live_idx = [i for i, r in enumerate(shaped) if r is not None]
+        inner = _boundary_append_dedupe(
+            headers, [shaped[i] for i in live_idx], dest_fps, match_cols=match_cols,
+            new_cols=new_cols, mappings=mappings, target_cols=target_cols,
+            column_types=column_types, stream_error_policy=stream_error_policy,
+            digest_dest_types=digest_dest_types, dest_bind_dialect=dest_bind_dialect,
+            remap_dest_types=remap_dest_types, destination_pk_columns=destination_pk_columns,
+        )
+        return {live_idx[j] for j in inner}
     remap_kw = dict(
         mappings=mappings,
         target_cols=target_cols,
@@ -105,8 +122,60 @@ def _boundary_append_dedupe(
     return landed
 
 
-def remap_boundary_rows(cfg, headers: list[str], rows: list[list[str]]) -> list:
-    """Re-read peers mapped as the writer maps them; ``None`` where the remap holds one out."""
+def shape_boundary_peers(
+    shape_runner: Any, headers: list[str], rows: list[list[Any]]
+) -> tuple[list[str], list[list[Any] | None]]:
+    """The re-read peers as the write sees them: after the run's approved recipe.
+
+    The tie dedupe runs on the page the source handed over, before the recipe
+    shapes it; the destination holds the recipe's output. Compared raw, a
+    transformed column (``name`` trimmed and lowered) never matched its stored
+    copy, so on a keyless append every watermark row was appended again under a
+    green run, and the post-write duplicate check counted the same raw rows and
+    found nothing (D359). Each peer is shaped on a fork of the run's runner, so
+    the run's own effect ledger is untouched.
+
+    The result is aligned with ``rows``: ``None`` where the recipe removes the
+    row (the write drops it too, so it is never "already landed"). A recipe
+    that turns one row into several, or holds rows until end-of-stream, has no
+    one-to-one image to compare: that is structural, and is refused by name.
+    """
+    if shape_runner is None or not rows:
+        return list(headers or []), list(rows)
+    from .stream_boundary_read import BoundaryStructural
+
+    probe = shape_runner.fork()
+    out_headers = list(headers or [])
+    shaped: list[list[Any] | None] = []
+    for row in rows:
+        held = int(probe.effect.rows_buffered or 0)
+        out_headers, got = probe.matrix(list(headers or []), [row])
+        if len(got) > 1 or (not got and int(probe.effect.rows_buffered or 0) > held):
+            raise BoundaryStructural(
+                f"the approved transform recipe ({shape_runner.recipe_hash}) does not turn "
+                "each source row into exactly one written row, so a re-read watermark row "
+                "cannot be compared with its stored copy"
+            )
+        shaped.append(got[0] if got else None)
+    return out_headers, shaped
+
+
+def remap_boundary_rows(
+    cfg, headers: list[str], rows: list[list[str]], *, shape: bool = False
+) -> list:
+    """Re-read peers mapped as the writer maps them; ``None`` where the remap holds one out.
+
+    ``shape`` first applies the run's recipe (:func:`shape_boundary_peers`), so
+    every column is compared as it was written.
+    """
+    if shape:
+        headers, shaped = shape_boundary_peers(getattr(cfg, "shape_runner", None), headers, rows)
+        live = [i for i, r in enumerate(shaped) if r is not None]
+        mapped = remap_boundary_rows(cfg, headers, [shaped[i] for i in live])
+        out_aligned: list = [None] * len(rows)
+        for j, i in enumerate(live):
+            out_aligned[i] = mapped[j]
+        return out_aligned
     remap_kw = dict(
         mappings=cfg.mappings,
         target_cols=list(cfg.target_cols or []),

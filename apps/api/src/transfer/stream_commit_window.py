@@ -691,6 +691,8 @@ def replay_rows_already_landed(
                 dest_bind_dialect=cfg.dest_bind_dialect,
                 remap_dest_types=cfg.fingerprint_dest_types,
                 destination_pk_columns=list(cfg.pk_target_cols or []),
+                # An append compares what the recipe wrote (D359).
+                shape_runner=None if requires_upsert(cfg.effective_sync) else cfg.shape_runner,
             )
             landed.update(group[i] for i in drop)
         if not verify:
