@@ -119,6 +119,8 @@ _REASON = {
     "recipe_invertible": "is touched only by the recipe step {op}, which keeps every value",
     "cast": "is cast {stype} to {ttype}; reversible only if every value round-trips exactly",
     "normalize": "is normalised ({transform}); reversible only if no value changes",
+    "json_document": ("is written as JSON text ({transform}); reversible only if every document reads back as "
+                      "the same document"),
     "replace": "has text replaced ({transform}); reversible only if no value changes",
     "default": "has blanks filled ({transform}); reversible only if no value is blank",
     "assume_timezone": "is read with an assumed zone ({transform}); reversible only if no value changes",
@@ -220,6 +222,50 @@ def round_trips(value: Any, transform: str) -> bool:
         return True
     out, error = apply_transform(text, transform)
     return error is None and strict_text(out) == text
+
+
+def _literal_document(value: Any) -> Any:
+    """A JSON document with every number kept as its literal text (1.50 is not 1.5)."""
+    import json
+
+    text = value if isinstance(value, str) else strict_text(value)
+    literal = lambda token: ("number", token)  # noqa: E731
+    return json.loads(text, parse_float=literal, parse_int=literal, parse_constant=literal)
+
+
+def same_json_document(raw: Any, written: Any) -> bool:
+    """D388: a JSONB value written as JSON text is unchanged when it reads back as the same document.
+
+    PostgreSQL stores ``jsonb`` already parsed (keys de-duplicated and ordered,
+    whitespace gone): its text ``{"k": 1}`` and the writer's ``{"k":1}`` are
+    one document. Numbers compare by their literal text, so ``1.50`` → ``1.5``
+    is still a change; anything that is not JSON on either side is a change.
+    """
+    from services.reversibility_enforce import _is_null
+
+    if _is_null(raw) or _is_null(written):
+        return _is_null(raw) and _is_null(written)
+    try:
+        return _literal_document(raw) == _literal_document(written)
+    except (TypeError, ValueError):
+        return False
+
+
+def check_json_documents(values: Iterable[Any], transform: str) -> dict[str, Any]:
+    """:func:`check_values` for a ``jsonb`` source serialised to text (document equality)."""
+    from services.reversibility_enforce import _is_null
+    from services.transform_engine import apply_transform
+
+    checked = failing = 0
+    for value in values:
+        if _is_null(value):
+            continue  # SQL NULL (or the reader's NULL marker) stays NULL through ``json``
+        checked += 1
+        out, error = apply_transform(value if isinstance(value, str) else strict_text(value), transform)
+        if error is not None or not same_json_document(value, out):
+            failing += 1
+    status = "not_checked" if not checked else ("does_not_fit" if failing else "fits")
+    return {"status": status, "rows_checked": checked, "rows_not_fitting": failing}
 
 
 def _null_changes(transform: str) -> bool:
@@ -421,6 +467,10 @@ def classify_mapping(
 
         if kind == INVERTIBLE and _is_passthrough_transform(transform, slog, tlog):
             return _entry(source, target, stype, ttype, [], INVERTIBLE, "type_preserving_bind")
+        if named == "json" and _norm(stype).split("(")[0].strip().lower() == "jsonb":
+            return _entry(source, target, stype, ttype, transforms, CONDITIONAL, "json_document",
+                          _covered(check_json_documents(values, transform), covers_population, enforce),
+                          transform=named)
         tcode = next((c for c in ("replace", "default", "assume_timezone") if transform.startswith(c)),
                      "normalize")
         from services.reversibility_render import renders_rule

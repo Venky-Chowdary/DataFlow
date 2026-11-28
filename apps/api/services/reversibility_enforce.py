@@ -149,6 +149,11 @@ def changes(rule: Mapping[str, Any], raw: Any, converted: Any, error: str | None
         return True  # a value the writer cannot convert does not land: that is a change
     if _is_null(raw):
         return not _is_null(converted)  # NULL filled in (``default:``)
+    if rule.get("code") == "json_document":
+        from services.reversibility import same_json_document
+
+        # The gate's own rule (D388): a jsonb document is unchanged when it reads back as itself.
+        return _is_null(converted) or not same_json_document(raw, converted)
     if isinstance(raw, str) and rule.get("code") in {"cast", "normalize"}:
         # A cast from text (or a transform that only casts into the target's type): what the destination
         # renders, not the Python conversion, decides; the gate's sample check asks the same rule (review 4,
