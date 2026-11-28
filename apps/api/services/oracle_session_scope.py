@@ -42,7 +42,10 @@ _ORACLE = frozenset({"oracle", "oracledb", "oracle_db", "oracle_autonomous", "or
                      "amazon_rds_oracle"})
 _UNCHECKED = (False, "the Oracle destination session time zone was not checked")
 _PIN: ContextVar[tuple[bool, str] | None] = ContextVar("df_oracle_utc_pin", default=None)
-_SERVER_SIDE: ContextVar[bool] = ContextVar("df_oracle_server_side_copy", default=False)
+#: ``None`` outside a run's :func:`server_side_copy_scope`: a copy that runs
+#: there (a direct call, a test) marks nothing, so no mark outlives its run on
+#: a reused thread and exempts another route's Oracle instants.
+_SERVER_SIDE: ContextVar[bool | None] = ContextVar("df_oracle_server_side_copy", default=None)
 _ROWS_WRITTEN: ContextVar[list[int] | None] = ContextVar("df_oracle_rows_written", default=None)
 
 #: Job field stamped on every run into Oracle from this release on; a job
@@ -101,19 +104,20 @@ def mark_server_side_oracle_copy(source_cfg: Mapping[str, Any], dest_cfg: Mappin
     from services.copy_oracle_oracle import oracle_same_instance
 
     same = oracle_same_instance(dict(source_cfg or {}), dict(dest_cfg or {}))
-    if same:
+    if same and _SERVER_SIDE.get() is not None:
         _SERVER_SIDE.set(True)
     return same
 
 
 def clear_server_side_oracle_copy() -> None:
     """The copy declined or failed after marking: the row writer takes over."""
-    _SERVER_SIDE.set(False)
+    if _SERVER_SIDE.get() is not None:
+        _SERVER_SIDE.set(False)
 
 
 def oracle_same_instance() -> bool:
     """True only after this run committed to the server-side Oracle copy."""
-    return _SERVER_SIDE.get()
+    return _SERVER_SIDE.get() is True
 
 
 @contextmanager
