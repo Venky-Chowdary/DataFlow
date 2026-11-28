@@ -809,7 +809,11 @@ ROUTES = sorted(LIVE_MATRIX)
 #: Source fields the matrix does not move. A run without Validate refuses a
 #: source column that is neither mapped nor declared omitted (G13), so they are
 #: declared here (the Stripe stub's customers carry ``object`` and ``email``).
-_UNMOVED_SOURCE_FIELDS = {"stripe": ("object", "email")}
+_UNMOVED_SOURCE_FIELDS = {
+    "stripe": ("object", "email"),
+    # The pgvector seed table carries a RAG chunk shape next to id/amount.
+    "pgvector": ("content", "embedding", "metadata", "source_id", "chunk_index", "created_at"),
+}
 
 
 def _declared_omissions(src_fmt: str) -> list[dict[str, Any]]:
