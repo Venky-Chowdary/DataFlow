@@ -9,6 +9,8 @@ backwards and carries the commit-order bound only once the rows are at rest.
 
 from __future__ import annotations
 
+from collections import Counter
+
 import dataclasses
 import logging
 from typing import Any
@@ -599,6 +601,19 @@ def replay_rows_already_landed(
             )
             live = {str(k).lower() for k in (probe[0] if probe else {})}
             read_cols = [c for c in all_cols if c.lower() in live] or all_cols
+            from .stream_boundary_recipe import RecipeBoundaryStructural, run_stamped_targets
+
+            # A run-stamped column differs between the stored copy and the probe
+            # by construction: never part of a content match (D359).
+            stamped = {c.lower() for c in run_stamped_targets(cfg.shape_runner, cfg.mappings)}
+            content_cols = [c for c in read_cols if c.lower() not in stamped]
+            if not content_cols:
+                raise RecipeBoundaryStructural(
+                    "Every column this route writes is stamped with the run's start by its "
+                    "transform recipe (run_timestamp), so a re-read row cannot be told apart "
+                    "from its stored copy. Add a source column to the route, or run it as "
+                    "full_refresh_overwrite."
+                )
             # Below the stored mark a re-read row is recognised as a row
             # *version*: its cursor value and its identity. Content is not part
             # of it — a row edited in place without moving its cursor is
@@ -618,7 +633,7 @@ def replay_rows_already_landed(
                 # Without a proven unique key a row is its whole content: two
                 # rows that share (cursor, part of a key) are never one row.
                 if getattr(cfg, "replay_key_complete", True)
-                else read_cols
+                else content_cols
             )
             keyed_append = bool(
                 not requires_upsert(cfg.effective_sync)
@@ -628,16 +643,17 @@ def replay_rows_already_landed(
             state.update(
                 replay_cols=read_cols,
                 replay_match=version,
-                replay_tie_match=version if keyed_append else read_cols,
+                replay_tie_match=version if keyed_append else content_cols,
                 replay_seen=set(),
-                replay_tie_fps=set(),
+                # Stored copies are counted: one copy absorbs one re-read row.
+                replay_tie_fps=Counter(),
                 # Columns this run adds: an upsert keeps a tie peer that carries
                 # a value there (it rewrites the key in place) — D335.
                 new_cols=[c for c in all_cols if c.lower() not in live]
                 if probe and requires_upsert(cfg.effective_sync)
                 else [],
             )
-            state["fps"] = state.get("fps") or set()
+            state["fps"] = state.get("fps") or Counter()
         read_cols, match_cols = state["replay_cols"], state["replay_match"]
         tie_cols = state["replay_tie_match"]
         seen: set = state["replay_seen"]
@@ -720,10 +736,16 @@ def replay_rows_already_landed(
 
         if isinstance(exc, BoundaryStructural):
             # Every run would fail the same way (D359: a recipe with no
-            # one-to-one image): name the remedy instead of retrying forever.
-            from .stream_boundary_keyed import BoundaryRefused, _refused_message
+            # per-row image): name the remedy instead of retrying forever,
+            # unless the route recorded the audited acknowledgement.
+            from .stream_boundary_keyed import BoundaryRefused, _accepted
+            from .stream_boundary_recipe import refusal_text
 
-            raise BoundaryRefused(_refused_message(str(exc))) from exc
+            if _accepted(getattr(cfg, "destination", None), cfg.dest_table,
+                         str(cfg.dest_cfg.get("schema") or "")) is not None:
+                logger.warning("Re-read window dedupe not possible (%s); duplicates accepted", exc)
+                return set()
+            raise BoundaryRefused(refusal_text(exc)) from exc
         # D335: an append that cannot tell which re-read rows are already at the
         # destination stops before writing them and keeps its cursor.
         from .stream_boundary_keyed import BoundaryHeldBack, held_back_message

@@ -139,7 +139,10 @@ def _boundary_rows_already_landed(
             for dr in dest_rows or []:
                 low = {str(k).lower(): v for k, v in dr.items()}
                 dest_tups.append(tuple(low.get(str(c).lower()) for c in match_cols))
-            cur._boundary_fps_state["fps"] = {
+            from collections import Counter
+
+            # Stored copies are counted: one copy absorbs one re-read peer.
+            cur._boundary_fps_state["fps"] = Counter(
                 fp
                 for _k, fp in row_fingerprints(
                     dest_tups,
@@ -147,7 +150,7 @@ def _boundary_rows_already_landed(
                     dest_db_type=cfg.dest_bind_dialect,
                     dest_types=cfg.digest_dest_types,
                 )
-            }
+            )
         dest_fps = cur._boundary_fps_state["fps"]
         if not dest_fps:
             return set()

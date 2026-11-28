@@ -198,7 +198,9 @@ def append_boundary_rows_landed(
         )
         summary = _summary(run)
         if ack is None:
-            raise BoundaryRefused(_refused_message(str(exc))) from exc
+            from .stream_boundary_recipe import refusal_text
+
+            raise BoundaryRefused(refusal_text(exc)) from exc
         if summary is not None:
             summary.setdefault(BOUNDARY_TIE_KEY, {})["accepted"] = {**ack, "why": str(exc)}
         import logging
@@ -250,7 +252,12 @@ def _landed(run, headers, rows, *, cursor_dest_col, watermark, keyed, record):
     types = dict(cfg.digest_dest_types or {})
     targets = list(cfg.target_cols or [])
     # Keyless peers are compared on every column, so as the recipe wrote them.
-    mapped = remap_boundary_rows(cfg, headers, rows, shape=not keyed)
+    from .stream_boundary_recipe import recipe_touches
+
+    mapped = remap_boundary_rows(
+        cfg, headers, rows,
+        shape=not keyed and recipe_touches(getattr(cfg, "shape_runner", None), cfg.mappings, targets),
+    )
     summary = _summary(run)
     tie = None
     if summary is not None and record:
@@ -261,6 +268,11 @@ def _landed(run, headers, rows, *, cursor_dest_col, watermark, keyed, record):
         return _keyed_landed(run, headers, rows, mapped, tie, dialect=dialect, types=types,
                              cursor_dest_col=cursor_dest_col, watermark=watermark)
     if "keyless_pool" not in state:
+        from .stream_boundary_recipe import run_stamped_targets
+
+        # A run-stamped column holds the earlier run's start on the stored copy
+        # and this run's start on the probe: never part of the match (D359).
+        stamped = {c.lower() for c in run_stamped_targets(getattr(cfg, "shape_runner", None), cfg.mappings)}
         live = live_columns(dialect=dialect, dest_cfg=cfg.dest_cfg, table=cfg.dest_table)
         stored = read_candidates(
             dialect=dialect, dest_cfg=cfg.dest_cfg, table=cfg.dest_table,
@@ -272,12 +284,23 @@ def _landed(run, headers, rows, *, cursor_dest_col, watermark, keyed, record):
         for r in stored:
             if cols is None:
                 have = live if live is not None else set(r.keys())
-                cols = [c for c in targets if c.lower() in have and c != cursor_dest_col]
+                cols = [c for c in targets if c.lower() in have and c != cursor_dest_col
+                        and c.lower() not in stamped]
             k = _fp(tuple(r.get(c.lower()) for c in cols), cols, dialect, types)
             pool[k] = pool.get(k, 0) + 1
         if cols is None:
             have = live if live is not None else set()
-            cols = [c for c in targets if c.lower() in have and c != cursor_dest_col]
+            cols = [c for c in targets if c.lower() in have and c != cursor_dest_col
+                    and c.lower() not in stamped]
+        if stamped and not cols:
+            from .stream_boundary_recipe import RecipeBoundaryStructural
+
+            raise RecipeBoundaryStructural(
+                "Every column this route writes besides the cursor is stamped with the run's "
+                "start by its transform recipe (run_timestamp), so a re-read row at the stored "
+                "watermark cannot be told apart from its stored copy. Declare a key on this "
+                "route, add a source column to it, or run it as full_refresh_overwrite."
+            )
         state["keyless_pool"], state["keyless_cols"] = pool, cols
     pool = dict(state["keyless_pool"])  # the verify pass asks the same question
     cols = state["keyless_cols"]

@@ -9,11 +9,15 @@ from typing import Any
 
 from connectors.writer_common import map_rows_for_fingerprint, row_fingerprints
 
+from .stream_boundary_recipe import recipe_touches, shape_boundary_peers
+
+__all__ = ["_boundary_append_dedupe", "remap_boundary_rows", "shape_boundary_peers"]
+
 
 def _boundary_append_dedupe(
     headers: list[str],
     boundary_rows: list[list[str]],
-    dest_fps: set,
+    dest_fps: Any,
     *,
     match_cols: list[str],
     new_cols: list[str] | None = None,
@@ -54,9 +58,14 @@ def _boundary_append_dedupe(
     drop off for its landed neighbours.
 
     ``shape_runner`` is the run's approved recipe: the peers are compared as it
-    wrote them (:func:`shape_boundary_peers`, D359).
+    wrote them (:func:`shape_boundary_peers`, D359) - unless no recipe step
+    writes a column ``match_cols`` come from, e.g. a keyed (cursor, key) match.
+
+    ``dest_fps`` counts the stored copies of each fingerprint (a ``Counter``;
+    a plain set counts one each): one stored copy absorbs one re-read peer, so
+    two distinct source rows with the same image are not both dropped.
     """
-    if shape_runner is not None:
+    if shape_runner is not None and recipe_touches(shape_runner, mappings, list(match_cols)):
         headers, shaped = shape_boundary_peers(shape_runner, headers, boundary_rows)
         live_idx = [i for i, r in enumerate(shaped) if r is not None]
         inner = _boundary_append_dedupe(
@@ -104,60 +113,27 @@ def _boundary_append_dedupe(
     ]
     if len(fps) != len(live):
         return set()
-    landed = {live[j] for j, fp in enumerate(fps) if fp in dest_fps}
-    if new_cols:
-        from services.value_serializer import is_missing_sentinel, is_reader_null_cell
+    from collections import Counter
 
-        new_pos = [target_cols.index(c) for c in new_cols if c in target_cols]
-        landed = {
-            i
-            for i in landed
-            if all(
-                mapped[i][p] is None
-                or is_missing_sentinel(mapped[i][p])
-                or is_reader_null_cell(mapped[i][p])
-                for p in new_pos
-            )
-        }
+    from services.value_serializer import is_missing_sentinel, is_reader_null_cell
+
+    pool = Counter(dest_fps)  # a copy: the verify pass asks the same question
+    new_pos = [target_cols.index(c) for c in new_cols or [] if c in target_cols]
+    landed: set[int] = set()
+    for j, fp in enumerate(fps):
+        i = live[j]
+        if pool.get(fp, 0) <= 0:
+            continue
+        if new_pos and not all(
+            mapped[i][p] is None
+            or is_missing_sentinel(mapped[i][p])
+            or is_reader_null_cell(mapped[i][p])
+            for p in new_pos
+        ):
+            continue
+        pool[fp] -= 1
+        landed.add(i)
     return landed
-
-
-def shape_boundary_peers(
-    shape_runner: Any, headers: list[str], rows: list[list[Any]]
-) -> tuple[list[str], list[list[Any] | None]]:
-    """The re-read peers as the write sees them: after the run's approved recipe.
-
-    The tie dedupe runs on the page the source handed over, before the recipe
-    shapes it; the destination holds the recipe's output. Compared raw, a
-    transformed column (``name`` trimmed and lowered) never matched its stored
-    copy, so on a keyless append every watermark row was appended again under a
-    green run, and the post-write duplicate check counted the same raw rows and
-    found nothing (D359). Each peer is shaped on a fork of the run's runner, so
-    the run's own effect ledger is untouched.
-
-    The result is aligned with ``rows``: ``None`` where the recipe removes the
-    row (the write drops it too, so it is never "already landed"). A recipe
-    that turns one row into several, or holds rows until end-of-stream, has no
-    one-to-one image to compare: that is structural, and is refused by name.
-    """
-    if shape_runner is None or not rows:
-        return list(headers or []), list(rows)
-    from .stream_boundary_read import BoundaryStructural
-
-    probe = shape_runner.fork()
-    out_headers = list(headers or [])
-    shaped: list[list[Any] | None] = []
-    for row in rows:
-        held = int(probe.effect.rows_buffered or 0)
-        out_headers, got = probe.matrix(list(headers or []), [row])
-        if len(got) > 1 or (not got and int(probe.effect.rows_buffered or 0) > held):
-            raise BoundaryStructural(
-                f"the approved transform recipe ({shape_runner.recipe_hash}) does not turn "
-                "each source row into exactly one written row, so a re-read watermark row "
-                "cannot be compared with its stored copy"
-            )
-        shaped.append(got[0] if got else None)
-    return out_headers, shaped
 
 
 def remap_boundary_rows(
