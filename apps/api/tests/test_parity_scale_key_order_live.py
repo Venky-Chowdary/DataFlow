@@ -106,13 +106,20 @@ def _mysql_usable() -> bool:
 
 
 @pytest.mark.skipif(not _mysql_usable(), reason="MySQL not usable (DATAFLOW_TEST_MYSQL_*)")
-@pytest.mark.parametrize("collation, portable", [("utf8mb4_nopad_bin", True), ("utf8mb4_bin", False)])
+@pytest.mark.parametrize("collation, portable", [("nopad_bin", True), ("utf8mb4_bin", False)])
 def test_mysql_key_collations_are_read_from_the_catalog(collation: str, portable: bool) -> None:
     from services.parity_scale import verification
     from services.parity_scale.plan import build_plan
 
     table = f"psd1_kc_{uuid.uuid4().hex[:8]}"
     conn = parity_engines.connect("mysql")
+    if collation == "nopad_bin":
+        # The server's own byte-order NO PAD collation: MariaDB names it utf8mb4_nopad_bin,
+        # MySQL 8 (the CI server) utf8mb4_0900_bin; neither server knows the other's name.
+        with conn.cursor() as cur:
+            cur.execute("SELECT VERSION()")
+            mariadb = "mariadb" in str(cur.fetchone()[0]).lower()
+        collation = "utf8mb4_nopad_bin" if mariadb else "utf8mb4_0900_bin"
     with conn.cursor() as cur:
         cur.execute(f"CREATE TABLE `{table}` (code VARCHAR(20) CHARACTER SET utf8mb4 COLLATE {collation} "
                     "PRIMARY KEY, v INT) ENGINE=InnoDB")
