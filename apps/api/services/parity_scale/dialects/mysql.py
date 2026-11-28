@@ -126,6 +126,26 @@ def field_sql(col: ColumnPlan, *, column: str, role: str, dest_engine: str) -> s
     return f"(CASE WHEN {x} IS NULL THEN 'N' ELSE {body} END)"
 
 
+_NAME = r"(?:`((?:[^`]|``)+)`|([A-Za-z0-9_$\u0080-￿]+))"
+
+
+def names_table(info: Any, waiter_db: str, db: str, table: str) -> bool:
+    """Whether a statement's text names ``db.table`` (qualified, or bare in the waiter's own
+    database). Names compare without case, as table names do on most servers."""
+    import re
+
+    if not info or not table:
+        return False
+    want = (db.lower(), table.lower())
+    for m in re.finditer(_NAME + r"(?:\s*\.\s*" + _NAME + ")?", str(info)):
+        first = (m.group(1) or "").replace("``", "`") or m.group(2) or ""
+        second = (m.group(3) or "").replace("``", "`") or m.group(4) or ""
+        ref = (first, second) if second else (waiter_db, first)
+        if (ref[0].lower(), ref[1].lower()) == want:
+            return True
+    return False
+
+
 class MySQLSide(SqlSide):
     """A MySQL 8 or MariaDB table."""
 
@@ -194,8 +214,8 @@ class MySQLSide(SqlSide):
             "AND TABLE_NAME = %s", [self.schema or None, self.table])
         return int(rows[0][0]) if rows and rows[0][0] is not None else None
 
-    def _timeout(self, cur: Any) -> None:
-        seconds = self.timeout_seconds
+    def _timeout(self, cur: Any, seconds: float | None = None) -> None:
+        seconds = seconds or self.timeout_seconds
         if not seconds:
             return
         if self.server == "mariadb":
@@ -203,38 +223,187 @@ class MySQLSide(SqlSide):
         else:
             cur.execute("SET SESSION max_execution_time = %s", (max(1, int(seconds * 1000)),))
 
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+    def pin(self, max_hold_s: float | None = None) -> dict[str, Any]:
+        """``START TRANSACTION WITH CONSISTENT SNAPSHOT``: one InnoDB snapshot for the rest of the scan.
+
+        Only InnoDB keeps a consistent read view; any other storage engine is
+        not pinned. A statement error (a timeout) rolls back the statement
+        only, so the snapshot is kept.
+        """
+        try:
+            return self._pin()
+        except Exception as exc:  # noqa: BLE001 — an engine that cannot pin is read statement by statement
+            self.unpin()
+            return {"kind": "not_established", "reason": f"the snapshot could not be taken ({type(exc).__name__})"}
+
+    def unpin(self) -> None:
+        self.pinned = False
+        try:
+            self.conn.rollback()
+        except Exception:  # noqa: BLE001 — a broken connection fails its next statement instead
+            return
+
+    def _pin(self) -> dict[str, Any]:
+        self.conn.rollback()
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT ENGINE FROM information_schema.TABLES "
+                "WHERE TABLE_SCHEMA = COALESCE(NULLIF(%s, ''), DATABASE()) AND TABLE_NAME = %s",
+                (self.schema or "", self.table),
+            )
+            row = cur.fetchone()
+            engine = str((row or [""])[0] or "")
+            if engine.lower() != "innodb":
+                return {"kind": "not_established",
+                        "reason": f"the table's storage engine ({engine or 'unknown'}) keeps no consistent snapshot"}
+            cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
+            cur.execute("SELECT UTC_TIMESTAMP(6)")
+            at = cur.fetchone()[0]
+        self.pinned = True
+        return {"kind": "pinned", "method": "consistent_snapshot_transaction", "at": str(at)}
+
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         import pymysql
 
+        self.tick()
         try:
             with self.conn.cursor() as cur:
                 self._timeout(cur)
                 cur.execute(sql, list(params))
                 rows = list(cur.fetchall())
-            self.conn.commit()
+            if not self.pinned:
+                self.conn.commit()
             return rows
         except pymysql.err.OperationalError as exc:
-            self.conn.rollback()
+            if not self.pinned:
+                self.conn.rollback()
             if exc.args and exc.args[0] in _TIMEOUT_CODES:
                 raise timeout_error(exc) from exc
             raise
         except UnitTimeout:
             raise
         except Exception:
-            self.conn.rollback()
+            if not self.pinned:
+                self.conn.rollback()
             raise
+
+    # the lock watch (a pinned snapshot yields to sessions waiting on its metadata locks) --
+    #: An unbuffered result is being read: the watch cancels the query (KILL QUERY) first.
+    release_idle_stream = False
+
+    def session_id(self) -> Any:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT CONNECTION_ID(), DATABASE()")
+            session, database = cur.fetchone()
+        #: The database the pinned table is in (the lock watch matches waits on exactly it).
+        self._lock_db = str(self.schema or database or "")
+        return int(session)
+
+    def prepare_monitor(self, monitor: Any) -> None:
+        monitor.autocommit(True)
+
+    #: How the watch sees waits: "performance_schema" (MySQL 8) or "processlist" (PROCESS).
+    _watch_via = ""
+
+    def watch_refusal(self, monitor: Any, session: Any = None) -> str:
+        """Prove, from the watch's own connection, that it sees other logins' lock waits; if it
+        cannot be proven the snapshot is not held. MySQL 8: performance_schema's metadata locks,
+        readable, with the mdl instrument on. Otherwise the PROCESS privilege, probed by using it
+        (SHOW ENGINE INNODB STATUS needs exactly PROCESS; SUPER alone does not grant it on
+        MariaDB 10.5+), and the scan's own pinned session must show in the process list."""
+        with monitor.cursor() as cur:
+            if self.server == "mysql" and self._metadata_locks_visible(cur):
+                self._watch_via = "performance_schema"
+                return ""
+            try:
+                cur.execute("SHOW ENGINE INNODB STATUS")
+                cur.fetchall()
+                cur.execute("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = %s", (int(session),))
+                sees_scan = int(cur.fetchone()[0] or 0) == 1
+            except Exception:  # noqa: BLE001 — no PROCESS: other logins' sessions are invisible
+                sees_scan = False
+            if sees_scan:
+                self._watch_via = "processlist"
+                return ""
+        return ("the scan's login cannot see other sessions (no PROCESS privilege"
+                + (", and performance_schema's metadata-lock instrument is off or unreadable"
+                   if self.server == "mysql" else "")
+                + "), so a held snapshot could block writers unseen")
+
+    @staticmethod
+    def _metadata_locks_visible(cur: Any) -> bool:
+        try:
+            cur.execute("SELECT ENABLED FROM performance_schema.setup_instruments "
+                        "WHERE NAME = 'wait/lock/metadata/sql/mdl'")
+            row = cur.fetchone()
+            if not row or str(row[0]).upper() != "YES":
+                return False
+            cur.execute("SELECT COUNT(*) FROM performance_schema.metadata_locks")
+            cur.fetchone()
+            return True
+        except Exception:  # noqa: BLE001 — performance_schema off or not readable by this login
+            return False
+
+    def lock_waiters(self, monitor: Any, session: Any) -> list[str]:
+        """Sessions waiting for a metadata lock on exactly this table.
+
+        MySQL 8 names the holder (performance_schema.metadata_locks). Otherwise a
+        session in the "Waiting for table metadata lock" state counts only when its
+        statement names this database's table (in its own default database, or
+        qualified); its text is only matched, never kept.
+        """
+        with monitor.cursor() as cur:
+            if self._watch_via == "performance_schema":
+                return self._metadata_lock_waiters(cur, session)
+            cur.execute(
+                "SELECT ID, DB, INFO FROM information_schema.PROCESSLIST "
+                "WHERE STATE LIKE 'Waiting for table metadata lock%%' AND ID <> %s",
+                (int(session),),
+            )
+            rows = cur.fetchall()
+        db = str(getattr(self, "_lock_db", "") or self.schema or "")
+        return [f"session {pid} (waiting for a metadata lock on {self.table})"
+                for pid, waiter_db, info in rows if names_table(info, str(waiter_db or ""), db, self.table)]
+
+    def _metadata_lock_waiters(self, cur: Any, session: Any) -> list[str]:
+        """MySQL 8: who waits on a metadata lock this session holds."""
+        cur.execute(
+            "SELECT DISTINCT wt.PROCESSLIST_ID, w.LOCK_TYPE FROM performance_schema.metadata_locks w "
+            "JOIN performance_schema.metadata_locks g ON g.OBJECT_TYPE = w.OBJECT_TYPE "
+            "AND g.OBJECT_SCHEMA = w.OBJECT_SCHEMA AND g.OBJECT_NAME = w.OBJECT_NAME "
+            "JOIN performance_schema.threads gt ON gt.THREAD_ID = g.OWNER_THREAD_ID "
+            "JOIN performance_schema.threads wt ON wt.THREAD_ID = w.OWNER_THREAD_ID "
+            "WHERE g.LOCK_STATUS = 'GRANTED' AND w.LOCK_STATUS = 'PENDING' AND gt.PROCESSLIST_ID = %s",
+            (int(session),),
+        )
+        return [f"session {pid} (waiting for a {str(kind).lower()} metadata lock on {self.table})"
+                for pid, kind in cur.fetchall()]
+
+    def cancel_running(self, monitor: Any, session: Any) -> None:
+        with monitor.cursor() as cur:
+            cur.execute("KILL QUERY %s", (int(session),))
 
     def stream(self, sql: str, params: Sequence[Any], batch: int) -> Iterator[tuple[Any, ...]]:
         import pymysql
 
+        self.tick()
         cur = self.conn.cursor(pymysql.cursors.SSCursor)
         try:
+            # One streamed SELECT runs under the stream's own server-side timeout.
+            self._timeout(cur, self.stream_timeout_seconds)
             cur.execute(sql, list(params))
             while True:
                 rows = cur.fetchmany(batch)
+                self.tick()
                 if not rows:
                     break
                 yield from rows
         finally:
-            cur.close()
-            self.conn.commit()
+            try:
+                cur.close()
+            except Exception:  # noqa: BLE001 — a cancelled read: let the snapshot go, roll back below
+                if self.pinned:
+                    self.unpin()
+            if not self.pinned:  # a pinned scan keeps its transaction (and its snapshot)
+                self.conn.commit()

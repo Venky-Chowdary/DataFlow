@@ -1,0 +1,93 @@
+name: AI benchmarks (nightly, live provider)
+
+# The same suites as the PR job ai-benchmarks, against a real provider: the
+# reference cases of every AI feature, with the invariants still gated
+# (the LLM never changes a mapping decision, fix ids stay within the fix list).
+# It runs only when a provider key secret exists. Without one the live job is
+# skipped at the job level (grey, never green) and the summary and a warning say
+# NOT RUN. A key that gets no model answer fails the live job (the script exits 78).
+# A live Anthropic run also records its answers as cassettes (artifact) so the
+# offline replay can be refreshed from real responses.
+
+on:
+  schedule:
+    # 04:17 UTC nightly, away from the full-suite run at 07:00 UTC.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  key-check:
+    runs-on: ubuntu-latest
+    outputs:
+      has_key: ${{ steps.check.outputs.has_key }}
+    steps:
+      - name: Is a provider key configured?
+        id: check
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$OPENAI_API_KEY" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=AI benchmarks not run::No ANTHROPIC_API_KEY or OPENAI_API_KEY secret; the live AI benchmark did not run."
+            {
+              echo "### ai-benchmarks (live)"
+              echo
+              echo "**NOT RUN** — no provider key secret (ANTHROPIC_API_KEY or OPENAI_API_KEY). This is not a pass."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  live:
+    needs: key-check
+    if: ${{ needs.key-check.outputs.has_key == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements-dev.txt
+
+      - name: Live AI benchmarks
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set +e
+          python scripts/run_ai_benchmarks.py --mode live --record "$RUNNER_TEMP/cassettes" \
+            --holdout tests/fixtures/witness/holdout_minimal_synthetic.json \
+            --out "$RUNNER_TEMP/ai_benchmarks_live.json" --summary "$RUNNER_TEMP/ai_benchmarks_live.md"
+          status=$?
+          cat "$RUNNER_TEMP/ai_benchmarks_live.md" >> "$GITHUB_STEP_SUMMARY"
+          # 78 = not run (no usable key): fail loudly rather than finish green.
+          exit $status
+
+      - name: Upload live report and recorded cassettes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-benchmarks-live
+          path: |
+            ${{ runner.temp }}/ai_benchmarks_live.*
+            ${{ runner.temp }}/cassettes/

@@ -149,6 +149,7 @@ export function useJobRunActions({
       items.push({
         id: "cancel",
         label: "Cancel job",
+        tone: "danger",
         disabled: !writeGate.allowed || cancelling === job._id,
         title: writeGate.reason || "Stops the job at its next checkpoint.",
         onSelect: () => void cancelRun(job),

@@ -183,6 +183,12 @@ export function signedInHelpArticleFromHash(hash: string): HelpDocId | "help" | 
  * ``#/jobs?jobId=<id>`` load is not rewritten to ``#/jobs`` before it is read.
  */
 export function normalizedAppHash(screen: Screen, currentHash: string, replace: boolean): string {
+  if (replace && screen === "exit") {
+    // An Exit readiness deep link (`#/exit?rehearsal=…`) must survive the
+    // shell's normalising write: it can run before the screen reads the ids.
+    const exit = exitFocusFromHash(currentHash);
+    if (exit?.system || exit?.rehearsal) return exitHash(exit);
+  }
   const focus = replace ? focusFromHash(currentHash) : null;
   if (focus?.screen === screen) return hashForScreen(screen, focus);
   return hashForScreen(screen);

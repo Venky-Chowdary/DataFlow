@@ -258,6 +258,20 @@ def key_for(key_id: str) -> bytes | None:
     return key
 
 
+def server_key_for(key_id: str) -> bytes | None:
+    """``key_for``, plus the node-local keys this process generated or read.
+
+    For server-issued tokens (signed risk contracts, Check-now requests) that
+    are verified by id: a node-local key this process holds is this
+    deployment's secret even when the data directory it came from is not the
+    current one (a process that re-points its data directory).
+    """
+    key = key_for(key_id)
+    if key is not None:
+        return key
+    return next((k for k in list(_generated.values()) if key_id_for(k) == key_id), None)
+
+
 def legacy_keys() -> list[bytes]:
     """Candidate keys for records with no ``key_id``: the login secret, then retired keys."""
     out: list[bytes] = []

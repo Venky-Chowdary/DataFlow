@@ -1159,6 +1159,12 @@ def _tile_proven(catalog_id: str, driver: str) -> bool:
     return driver_proven(driver)
 
 
+def _proof_word(scope: str, proven: bool) -> str:
+    if not proven:
+        return "implemented"
+    return "proven on an emulator only" if scope == "emulator" else "Certified"
+
+
 def role_label(source_ok: bool, dest_ok: bool) -> str:
     """Which side a tile takes, worded from the same flags the pickers use (CLM-17)."""
     if source_ok and dest_ok:
@@ -1241,6 +1247,21 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     out["ci_evidence"] = proof_for(
         catalog_id, driver, alias=catalog_id in _WIRE_COMPATIBLE_UNCERTIFIED_BRANDS
     )
+    # Proven only against an emulator (Snowflake on fakesnow, BigQuery on the
+    # goccy emulator): the label says so wherever the tile is shown, so no
+    # reader takes it for a certified real-account run (P0-4).
+    out["proof_scope"] = (
+        "emulator" if tier == "certified" and out["ci_evidence"].get("emulated")
+        else "live" if tier == "certified"
+        else ""
+    )
+    if out["proof_scope"] == "emulator":
+        from services.connector_proof import emulator_label
+
+        label = (
+            "Emulator-proven — driver not installed" if env_gap else emulator_label(label)
+        )
+        out["capability_label"] = label
     # Only a CI-proven connector is offered for production schedules.
     out["production_schedules"] = tier == "certified"
     if planned_reason(catalog_id):
@@ -1261,7 +1282,7 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     out["environment_gap"] = env_gap
     if env_gap:
         out["environment_gap_reason"] = (
-            f"{catalog_id} is {'Certified' if proven else 'implemented'} but its driver "
+            f"{catalog_id} is {_proof_word(out['proof_scope'], proven)} but its driver "
             "package is not loadable here — "
             f"{_driver_install_hint(driver)}. "
             "This is an environment gap, not a Planned connector."
@@ -1455,8 +1476,12 @@ def driver_environment_gap(catalog_id: str) -> str:
         and not driver_available(driver, cid)
         and not _is_uncertified_driver_alias(cid, driver)
     ):
+        from services.connector_proof import proof_for
+
+        evidence = proof_for(cid, driver)
+        word = _proof_word("emulator" if evidence.get("emulated") else "live", True)
         return (
-            f"{cid} is Certified but its driver package is not loadable here — "
+            f"{cid} is {word} but its driver package is not loadable here — "
             f"{_driver_install_hint(driver)}. "
             "This is an environment gap, not a Planned connector."
         )

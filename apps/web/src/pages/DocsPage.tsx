@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { DtIcon } from "../components/DtIcon";
+import { DtIcon, type IconName } from "../components/DtIcon";
 import { DocsShotReel } from "../components/docs/DocsShotReel";
 import { Button } from "../components/ui/Button";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -290,7 +290,7 @@ function ArchitectureDiagram() {
 }
 
 function ConnectorOrbit() {
-  const categories = [
+  const categories: { label: string; icon: IconName; examples: string }[] = [
     { label: "Relational", icon: "database", examples: "PostgreSQL · MySQL · SQL Server · Oracle · SQLite" },
     { label: "Document / NoSQL", icon: "layers", examples: "MongoDB · DynamoDB · Cassandra · Redis · Elasticsearch" },
     { label: "Cloud Warehouses", icon: "cloud", examples: "Snowflake · BigQuery · Redshift · Databricks · ClickHouse" },
@@ -318,7 +318,7 @@ function ConnectorOrbit() {
   );
 }
 
-const PREFLIGHT_RULES = [
+const PREFLIGHT_RULES: { id: string; title: string; icon: IconName; desc: string }[] = [
   {
     id: "G1",
     title: "File Integrity",
@@ -389,7 +389,7 @@ function PreflightRules() {
 }
 
 function TrustPillars() {
-  const pillars = [
+  const pillars: { icon: IconName; title: string; desc: string }[] = [
     {
       icon: "shield",
       title: "No silent data loss",

@@ -25,9 +25,9 @@ releases every schedule parked on it (``release_continuity_parks``).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
+from services import schedule_clock
 from services.append_continuity import CONTINUITY_ERROR_CODE
 
 logger = logging.getLogger(__name__)
@@ -119,7 +119,7 @@ def _close_finding(sched: Any, *, action: str, actor: str, reason: str, due_now:
     from services.schedule_approvals import STATUS_APPROVED, _resolved
     from services.schedule_store import next_run_for, update_schedule
 
-    now = datetime.now(timezone.utc)
+    now = schedule_clock.utc_now()
     patch: dict[str, Any] = {
         "next_run_at": now.isoformat() if due_now else next_run_for(sched, now),
         "retry_at": None,
@@ -146,7 +146,7 @@ def _note_rebuild_on_finding(sched: Any, *, job_id: str, actor: str, reason: str
     return update_schedule(sched.id, {"approval_request": {
         **finding,
         "recovery": {"action": ACTION_REBUILD, "job_id": job_id, "actor": actor,
-                     "reason": reason, "started_at": datetime.now(timezone.utc).isoformat()},
+                     "reason": reason, "started_at": schedule_clock.utc_now().isoformat()},
     }})
 
 
@@ -173,7 +173,7 @@ def note_rebuild_failure(schedule_id: str, job_id: str, error: str) -> dict[str,
         failed = recovery
     else:
         failed = {**recovery, "outcome": "failed", "error": str(error or "")[:500],
-                  "finished_at": datetime.now(timezone.utc).isoformat()}
+                  "finished_at": schedule_clock.utc_now().isoformat()}
         update_schedule(schedule_id, {"approval_request": {**req, "recovery": failed}})
         _audit(
             sched,

@@ -138,7 +138,7 @@ export function TableParityBars({ tables }: { tables: ParityTable[] }) {
                     <span className="df2-parity-num">{tableParityLabel(table)}</span>
                   </div>
                 </td>
-                <td>{checkLabel(table.check)}</td>
+                <td>{checkLabel(table.check, table.check_label)}</td>
                 <td>
                   <span className={badgeClass(status.tone)}>{status.label}</span>
                 </td>

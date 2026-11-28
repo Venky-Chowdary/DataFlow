@@ -20,7 +20,7 @@ describe("validateDecisionPath", () => {
       "Execution Policy",
       "Preview Changes",
       "Risk Contract",
-      "Execute",
+      "Run",
     ]);
   });
 
@@ -108,6 +108,7 @@ describe("validateDecisionPath", () => {
     assert.equal(path.executeUnlocked, true);
     assert.equal(path.migrationProven, false);
     assert.equal(path.steps[7].status, "unlocked");
-    assert.match(path.steps[7].summary, /migration_proven/i);
+    // Not migration proven, said in the user's words: proof is made after the write.
+    assert.match(path.steps[7].summary, /proof come after the write/i);
   });
 });

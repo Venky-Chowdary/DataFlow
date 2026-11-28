@@ -16,6 +16,8 @@ import {
   PROVEN_DRIVERS,
   PROVEN_EVIDENCE,
   catalogHonestyLead,
+  EMULATOR_PROVEN_NAMES,
+  emulatorScopeNote,
 } from "./provenEvidence";
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -104,8 +106,37 @@ test("catalog lead states the CI-proven driver count, never the tile count (CLM-
   assert.match(lead, new RegExp(`^${PROVEN_DRIVERS} drivers? proven in CI`));
   if (PENDING_DRIVERS > 0) assert.match(lead, new RegExp(`${PENDING_DRIVERS} more are implemented`));
   assert.doesNotMatch(lead, /650|700\+|717|certified connectors|transfer-ready/i);
-  assert.equal(catalogHonestyLead(3, 0), "3 drivers proven in CI: each one's CI jobs ran green with no skipped test.");
+  assert.equal(catalogHonestyLead(3, 0, []), "3 drivers proven in CI: each one's CI jobs ran green with no skipped test.");
   assert.doesNotMatch(catalogHonestyLead(), /verifies the load/);
+});
+
+test("emulator-proven warehouses are never presented as certified on a real account (P0-4)", () => {
+  const emulated = CONNECTOR_CLAIMS.families.flatMap((f) => f.items.filter((i) => i.proven && i.emulated).map((i) => i.name));
+  assert.deepEqual([...EMULATOR_PROVEN_NAMES].sort(), [...new Set(emulated)].sort());
+  if (EMULATOR_PROVEN_NAMES.length > 0) {
+    const lead = catalogHonestyLead();
+    for (const name of EMULATOR_PROVEN_NAMES) assert.match(lead, new RegExp(name));
+    assert.match(lead, /not real cloud accounts/);
+  }
+  assert.equal(
+    catalogHonestyLead(3, 0, ["Snowflake", "BigQuery"]),
+    "3 drivers proven in CI: each one's CI jobs ran green with no skipped test. Snowflake and BigQuery are proven against emulators, not real cloud accounts.",
+  );
+  assert.equal(emulatorScopeNote(["Snowflake"]), "Snowflake is proven against an emulator, not real cloud accounts.");
+  assert.equal(emulatorScopeNote([]), "");
+  // The warehouse family note and the marketing "who it's for" row say it too.
+  const warehouses = MARKETING_STACK.find((r) => r.family === "Warehouses & lakehouse");
+  assert.ok(warehouses);
+  assert.match(warehouses.note, /emulators, not real cloud accounts/);
+  const subpage = readFileSync(path.join(SRC, "pages", "marketing", "MarketingSubpage.tsx"), "utf8");
+  assert.doesNotMatch(subpage, /Snowflake, BigQuery, Apache Iceberg — MERGE \+ verified"/);
+  // The warehouse solution page states the emulator scope beside its warehouse claims.
+  const story = readFileSync(path.join(SRC, "pages", "marketing", "StoryPages.tsx"), "utf8");
+  assert.match(story, /WAREHOUSE_EMULATOR_NOTE = emulatorScopeNote\(\)/);
+  // The catalog's status chip is "Proven in CI", not "Certified".
+  const panel = readFileSync(path.join(SRC, "components", "ConnectorCatalogPanel.tsx"), "utf8");
+  assert.match(panel, /id: "certified", label: "Proven in CI"/);
+  assert.match(panel, /proof_scope === "emulator"/);
 });
 
 test("the catalog lists every driver the copy counts, once", () => {
@@ -147,8 +178,15 @@ test("marketing stack badges are derived from CI evidence", () => {
     const members = ALL_CONNECTORS.filter((c) => c.family === row.family);
     assert.ok(members.length, row.family);
     const proven = members.filter((i) => i.proven).length;
-    const expected = proven === members.length ? "Proven in CI" : proven > 0 ? "Partly proven in CI" : "Implemented";
+    const onEmulators = proven > 0 && members.filter((i) => i.emulated).length === proven;
+    const suffix = onEmulators ? " on emulators" : "";
+    const expected =
+      proven === members.length ? `Proven in CI${suffix}` : proven > 0 ? `Partly proven in CI${suffix}` : "Implemented";
     assert.equal(row.badge, expected, row.family);
+    // An emulator-proven member is named as such wherever it is listed proven.
+    for (const item of members.filter((i) => i.emulated)) {
+      assert.match(row.proven, new RegExp(`${item.name} \\(emulator\\)`), row.family);
+    }
     assert.doesNotMatch(row.items, planned, `${row.family} names a planned driver`);
     assert.doesNotMatch(row.note, planned, `${row.family} note names a planned driver`);
     assert.doesNotMatch(row.note, /Native MERGE/i);

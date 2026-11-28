@@ -1,10 +1,9 @@
-import { DtIcon } from "../DtIcon";
+import { DtIcon, type IconName } from "../DtIcon";
 
 interface Step {
   n: number;
   label: string;
-  icon: string;
-  shortLabel?: string;
+  icon: IconName;
 }
 
 interface WizardStepsProps {
@@ -51,9 +50,6 @@ export function WizardSteps({ steps, current, onStepClick, canGoTo, variant = "d
                   {done ? <DtIcon name="check" size={12} /> : <DtIcon name={s.icon} size={14} />}
                 </span>
                 <span className="df2-wizard-label">{s.label}</span>
-                <span className="df2-wizard-label-short" aria-hidden>
-                  {s.shortLabel || s.label}
-                </span>
               </button>
               {!isLast && <div className={`df2-wizard-line ${done ? "done" : ""}`} aria-hidden />}
             </div>

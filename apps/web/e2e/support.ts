@@ -74,31 +74,22 @@ export async function isolateDrafts(page: Page): Promise<void> {
 }
 
 /**
- * Toasts dock in-flow in the studio header chrome (D-BP-20), so one that is
- * still on screen, or that expires mid-capture, changes the header band and with
- * it the height of everything under it. A visual capture must never depend on
- * how long the sample-load toast lives. Hide toasts for good (a style tag, so a
- * late arrival is hidden too) and wait until every toast has left the DOM; the
- * dock then holds its idle layout, which is what the baselines show.
- *
- * Hiding the pill is not enough at <=480px: the dock reserves an 8px band
- * below itself while it holds any toast (`.df2-toast-dock:has(.dt-toast)`),
- * and :has() matches a display:none toast too. A toast that arrived after the
- * count reached 0 left the pill hidden but the band in place, so the stepper
- * and everything under it sat 8px lower (wizard-transform-light-390 rendered
- * both ways on the runner). The style drops that band as well.
+ * Toasts live in one fixed region on <body> (sonner, `[data-sonner-toaster]`),
+ * outside the page flow, so they never move the layout under them. A visual
+ * capture must still never show one: whether the sample-load toast is on
+ * screen depends on timing, and error toasts stay until dismissed. Hide the
+ * region for good (a style tag, so a late arrival is hidden too) and wait until
+ * no toast region is visible.
  */
 export async function settleToasts(page: Page): Promise<void> {
   await page.evaluate(() => {
     if (document.getElementById("df-e2e-quiet-toasts")) return;
     const style = document.createElement("style");
     style.id = "df-e2e-quiet-toasts";
-    style.textContent =
-      ".dt-toast, .dt-toast-more { display: none !important; }" +
-      " .df2-page-transfer-studio .df2-toast-dock { margin-bottom: 0 !important; }";
+    style.textContent = "[data-sonner-toaster] { display: none !important; }";
     document.head.appendChild(style);
   });
-  await expect(page.locator(".dt-toast, .dt-toast-more")).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.locator("[data-sonner-toaster]")).toBeHidden({ timeout: 30_000 });
 }
 
 /**

@@ -644,8 +644,18 @@ html[data-theme="dark"] .df2-ms-templates {
 .df2-ms-automap-why {
   display: block;
   margin-top: 2px;
+  max-width: 28ch;
   color: var(--df-text-secondary);
   font-size: var(--df-fs-xs);
+}
+
+.df2-ms-automap-why > summary {
+  cursor: pointer;
+  width: fit-content;
+}
+
+.df2-ms-automap-table input[type="checkbox"] {
+  accent-color: var(--df-action-bg);
 }
 
 .df2-ms-automap-was {
@@ -674,6 +684,15 @@ html[data-theme="dark"] .df2-ms-templates {
   display: block;
   height: 100%;
   background: var(--df-brand);
+}
+
+/* Below the mode's floor: amber bar and text, so 78% never reads like 86%. */
+.df2-ms-confidence.is-below-floor {
+  color: var(--df-warning-text);
+}
+
+.df2-ms-confidence.is-below-floor .df2-ms-confidence-bar > span {
+  background: var(--df-warning);
 }
 
 /* ---- computed column, templates, mapping-as-code ----------------------- */
@@ -838,8 +857,13 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   flex: 1 1 320px;
 }
 
-.df2-map-step-head .df2-card-title {
+/* The step title: same size and weight as Transform's (one type ladder). */
+.df2-map-step-head .df2-map-step-title {
   margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+  font-weight: 700;
+  color: var(--df-text-primary);
 }
 
 .df2-map-route {
@@ -978,8 +1002,28 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   color: var(--df-text-primary);
 }
 
-.df2-map-issues.is-block .df2-map-issues-summary svg { color: var(--df-danger); }
-.df2-map-issues.is-warn .df2-map-issues-summary svg { color: var(--df-warning); }
+/* Tone is the icon and a hairline border (Callout pattern), never a side stripe. */
+.df2-map-issues-icon { display: inline-flex; flex: none; }
+.df2-map-issues.is-block { border-color: var(--df-danger-border); }
+.df2-map-issues.is-warn { border-color: var(--df-warning-border); }
+.df2-map-issues.is-block .df2-map-issues-icon { color: var(--df-danger-text); }
+.df2-map-issues.is-warn .df2-map-issues-icon { color: var(--df-warning-text); }
+
+/* Map: destination columns that block Validate, listed under Needs attention. */
+.df2-column-review-dest-attention > td {
+  padding: 8px 12px;
+  background: var(--df-surface-muted);
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-primary);
+}
+
+.df2-column-review-dest-attention-copy {
+  margin-right: 12px;
+}
+
+.df2-column-review-dest-attention code {
+  font-family: var(--df-font-mono);
+}
 
 .df2-map-issues-list {
   display: grid;
@@ -1135,7 +1179,7 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
 .df2-column-source-type {
   flex: none;
   font-family: var(--df-font-mono);
-  text-transform: uppercase;
+  text-transform: none;
 }
 
 .df2-column-source-meta .df2-column-sample-value {
@@ -1229,8 +1273,8 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   margin: 0;
   font-size: var(--df-fs-xs);
   font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: normal;
+  text-transform: none;
   color: var(--df-text-tertiary);
 }
 
@@ -1396,9 +1440,6 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   gap: 6px 8px;
   min-height: 32px;
 }
-
-.df2-map-issues.is-block .df2-map-issues-bar > svg { color: var(--df2-ms-danger-ink); flex: none; }
-.df2-map-issues.is-warn .df2-map-issues-bar > svg { color: var(--df-warning); flex: none; }
 
 .df2-map-issues-bar .df2-map-issues-summary {
   display: flex;
@@ -1662,6 +1703,13 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
 
   .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer .df2-map-footer-actions > .df2-btn-primary {
     flex: 1 0 100%;
+    order: 2;
+  }
+
+  /* Back, Clear key and Advanced share one row; why Continue is disabled sits
+     on its own line right above it. */
+  .df2-page-transfer-studio .df2-map-step-panel .df2-map-footer .df2-map-footer-actions > .df2-step-footer-reason {
+    order: 1;
   }
 }
 
@@ -1758,4 +1806,77 @@ input[type="file"]:focus-visible + .df2-ms-file-label {
   text-overflow: ellipsis;
   white-space: nowrap;
   overflow-wrap: normal;
+}
+
+/* ---- Mapping Witness flag (evidence on one mapped pair) --------------- */
+
+.df2-witness {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-1) var(--df-space-2);
+  min-width: 0;
+}
+
+.df2-witness-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--df-space-1);
+  padding: 1px 6px;
+  border-radius: var(--df-radius-sm);
+  border: 1px solid var(--df-warning-border);
+  background: var(--df-warning-bg);
+  color: var(--df-warning-text);
+  font: inherit;
+  font-size: var(--df-fs-xs);
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.df2-witness-chip:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+
+.df2-witness-why {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-1) var(--df-space-2);
+  flex-basis: 100%;
+  min-width: 0;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+}
+
+.df2-witness-reason {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.df2-witness-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-1) var(--df-space-2);
+  margin-top: var(--df-space-2);
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-xs);
+}
+
+.df2-witness-bar.is-error {
+  color: var(--df2-ms-danger-ink);
+}
+
+.df2-witness-chip.is-kept {
+  border-color: var(--df-border);
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-witness-error {
+  flex-basis: 100%;
+  color: var(--df2-ms-danger-ink);
 }

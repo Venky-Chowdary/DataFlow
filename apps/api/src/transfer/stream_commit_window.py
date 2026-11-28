@@ -560,8 +560,9 @@ def replay_rows_already_landed(
     the destination by its identity column — once, before this run writes it,
     so the verify pass judges against the same pre-run state — and dropped when
     the destination already holds it.
-    Fail-open like the tie-group dedupe: a duplicate is caught by Gate-8's
-    window check, a silently dropped row is not.
+    A destination that does not answer fails open on an upsert (it rewrites by
+    key) and closed on an append: the run stops before writing the re-read rows
+    and keeps its cursor (D335, ``stream_boundary_keyed.BoundaryHeldBack``).
     """
     from connectors.writer_common import row_fingerprints
     from services.sync_cursor import compare_cursor_values, requires_upsert
@@ -708,6 +709,16 @@ def replay_rows_already_landed(
 
             _record_landed_boundary_keys(run, headers, peers)
         return landed
-    except Exception as exc:  # noqa: BLE001 — fail open: dedupe must never lose a row
-        logger.warning("Re-read window dedupe skipped (fail-open): %s", exc)
-        return set()
+    except Exception as exc:  # noqa: BLE001 — see below: an upsert fails open, an append closed
+        if requires_upsert(cfg.effective_sync):
+            # An upsert rewrites a re-read row by key: writing it again is harmless.
+            logger.warning("Re-read window dedupe skipped (upsert, fail-open): %s", exc)
+            return set()
+        # D335: an append that cannot tell which re-read rows are already at the
+        # destination stops before writing them and keeps its cursor.
+        from .stream_boundary_keyed import BoundaryHeldBack, held_back_message
+
+        logger.warning("Re-read window dedupe unmeasured (append, held back): %s", exc)
+        raise BoundaryHeldBack(
+            held_back_message(len(rows), through, f"the destination read failed ({type(exc).__name__})")
+        ) from exc

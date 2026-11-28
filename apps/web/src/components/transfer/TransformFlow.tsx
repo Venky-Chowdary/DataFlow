@@ -21,7 +21,7 @@ import {
   type OnNodesChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { DtIcon } from "../DtIcon";
+import { DtIcon, type IconName } from "../DtIcon";
 import {
   classifyPortLink,
   insertIndexAtPoint,
@@ -58,7 +58,7 @@ export interface StudioNodeData extends Record<string, unknown> {
   title: string;
   summary: string;
   op: string;
-  icon: string;
+  icon: IconName;
   stripe: NodeStripe;
   status: NodeStatus;
   ports: CanvasPort[];

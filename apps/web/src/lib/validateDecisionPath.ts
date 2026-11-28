@@ -79,7 +79,7 @@ function riskContractState(preflight: PreflightResult | null | undefined): {
       incomplete: true,
       summary: missing.length
         ? `Migration Risk Contract required for: ${missing.join(", ")}`
-        : "Migration Risk Contract required before Execute-approve.",
+        : "A Risk Contract is required before Run.",
       status: "action",
     };
   }
@@ -113,7 +113,7 @@ function stepsForBlocker(
   ].filter(Boolean) as string[];
   const preview = (item.issues ?? []).slice(0, 4).join(" · ")
     || (item.suggested_actions?.[0]?.label
-      ?? "Preview remap / policy on Map before Execute.");
+      ?? "Preview the remap or policy on Map before Run.");
 
   const byId: Record<DecisionPathStepId, DecisionPathStep> = {
     root_cause: {
@@ -133,7 +133,7 @@ function stepsForBlocker(
     business_impact: {
       id: "business_impact",
       label: "Business Impact",
-      summary: item.impact || item.why || "Execute stays locked until this root cause is resolved.",
+      summary: item.impact || item.why || "Run stays locked until this root cause is resolved.",
       detail: [
         typeof item.affectedRowsSample === "number"
           ? `Affected sample rows: ${item.affectedRowsSample}`
@@ -186,10 +186,10 @@ function stepsForBlocker(
     },
     execute: {
       id: "execute",
-      label: "Execute",
+      label: "Run",
       summary: executeUnlocked
-        ? "Execute unlocked — still not migration_proven until post-write Gate-8 full_checksum."
-        : "Execute locked until root causes and required Risk Contracts clear.",
+        ? "Run unlocked. Row-count and checksum proof come after the write."
+        : "Run is locked until the root causes and required Risk Contracts clear.",
       status: executeUnlocked ? "unlocked" : "locked",
     },
   };
@@ -247,13 +247,13 @@ export function buildValidateDecisionPath(
         {
           id: "affected_gates",
           label: "Affected Gates",
-          summary: "All required gates clear or skipped with honesty",
+          summary: "All required gates passed or do not apply",
           status: "ready",
         },
         {
           id: "business_impact",
           label: "Business Impact",
-          summary: "Execute may proceed under the active validation mode contract",
+          summary: "The run may proceed under the active validation mode",
           status: "ready",
         },
         {
@@ -282,10 +282,10 @@ export function buildValidateDecisionPath(
         },
         {
           id: "execute",
-          label: "Execute",
+          label: "Run",
           summary: unlocked
-            ? "Execute unlocked — migration_proven requires post-write full_checksum"
-            : "Execute locked",
+            ? "Run unlocked. Row-count and checksum proof come after the write"
+            : "Run locked",
           status: unlocked ? "unlocked" : "locked",
         },
       ],
@@ -296,12 +296,9 @@ export function buildValidateDecisionPath(
       decisionArtifactHash: decisionArtifactHash ? String(decisionArtifactHash) : null,
       decisionArtifactPresent,
       headline: unlocked
-        ? "Execute unlocked · not migration proven"
-        : "Validate to unlock Execute",
-      note:
-        "Execute consumes the Decision Artifact hash from Validate. "
-        + "Execute-ready is not migration proven — post-write Gate-8 full_checksum required. "
-        + "Sample Validate never claims population uniqueness.",
+        ? "Ready to run"
+        : "Run Validate to unlock Run",
+      note: "Validate checks a sample. Row-count and checksum proof are made after the write.",
     };
   }
 
@@ -313,10 +310,8 @@ export function buildValidateDecisionPath(
     riskContractIncomplete: risk.incomplete,
     decisionArtifactHash: decisionArtifactHash ? String(decisionArtifactHash) : null,
     decisionArtifactPresent,
-    headline: `${decisions.length} root cause(s) · follow decision path before Execute`,
-    note:
-      "One root cause may affect many gates. Decision Artifact is Execute authority. "
-      + "Risk Contract is required for intentional lossy paths. Sample Validate never claims population proof.",
+    headline: `${decisions.length === 1 ? "1 root cause" : `${decisions.length} root causes`} to fix before Run`,
+    note: "One root cause can block several gates. Validate checks a sample, not the whole population.",
   };
 }
 
@@ -329,6 +324,6 @@ export function decisionPathStepLabels(): string[] {
     "Execution Policy",
     "Preview Changes",
     "Risk Contract",
-    "Execute",
+    "Run",
   ];
 }

@@ -135,6 +135,10 @@ def _destination_schema_probe(
     """
     if destination.kind != "database":
         return {}, None
+    from .source_column_coverage import DEST_EXISTED_PROBE_KEY
+
+    destination.extra = dict(destination.extra or {})
+    destination.extra.pop(DEST_EXISTED_PROBE_KEY, None)  # unknown until probed
     try:
         from .endpoint_intelligence import introspect_endpoint
 
@@ -167,6 +171,8 @@ def _destination_schema_probe(
         probe_err = str(info.get("sample_error") or info.get("error") or "").strip()
         probe_msg = str(info.get("message") or "").strip()
         extra = dict(destination.extra or {})
+        # Existence before the run wrote anything: False is a table this run creates.
+        extra[DEST_EXISTED_PROBE_KEY] = exists
         if exists is None:
             detail = probe_err or probe_msg or (
                 "Destination schema unknown — existence not proven (fail-closed)"

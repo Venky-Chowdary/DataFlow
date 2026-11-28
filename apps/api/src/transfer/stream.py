@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 _stream = sys.modules[__name__]
 
+from .cancel_restore import mark_write_complete
 from .models import EndpointConfig
 from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
 
@@ -296,6 +297,7 @@ def stream_database_transfer(
     mappings_inherited: bool = False,
     initial_batch: Any = None,
     workspace_id: str = "",
+    per_stream_coverage: dict[str, Any] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -339,6 +341,7 @@ def stream_database_transfer(
             mappings_inherited=mappings_inherited,
             initial_batch=initial_batch,
             workspace_id=workspace_id,
+            per_stream_coverage=per_stream_coverage,
         )
         ok = True
         return result
@@ -394,6 +397,7 @@ def _stream_database_transfer_impl(
     mappings_inherited: bool = False,
     initial_batch: Any = None,
     workspace_id: str = "",
+    per_stream_coverage: dict[str, Any] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -778,6 +782,7 @@ def _stream_database_transfer_impl(
             dest_cfg=run.cfg.dest_cfg,
             dest_table=resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
             job_id=str(run.cfg.job_id or ""),
+            sync_mode=str(run.cfg.effective_sync or ""),
         )
     _copy_profile = PhaseProfile()
     _copy_started = time.perf_counter()
@@ -790,6 +795,8 @@ def _stream_database_transfer_impl(
     try:
         from services.export_dialect import tsv_null_from
 
+        from .source_column_coverage import copy_declined_for_stream_map
+        from .stream_dest_procedure import copy_declined_for_borrowed_map
         from .stream_dest_procedure import decline_copy_for_destination_sql
 
         decline_copy_for_destination_sql(dest_proc_plan)
@@ -805,6 +812,9 @@ def _stream_database_transfer_impl(
                 or bool(risk_contract_columns)
                 or keyless_merge_target
                 or copy_declined_for_replay(run.cfg)
+                or copy_declined_for_borrowed_map(run.cfg, inherited=mappings_inherited)
+                or (per_stream_coverage is not None and not mappings_inherited
+                    and copy_declined_for_stream_map(run.cfg, per_stream_coverage.get("dest_types")))
                 # G7-F3: engine COPY routes write the default TSV codec only.
                 or tsv_null_from(run.cfg.dest_cfg) != "empty"
             ) else _try_copy_fast_path(
@@ -838,6 +848,9 @@ def _stream_database_transfer_impl(
     if fast is not None:
         rows_copied, run.cfg.ddl_log, run.tally.dest_summary, run.cfg.columns = fast
         run.tally.dest_summary["copy_fast_path"] = "used"
+        mark_write_complete(run.cfg.destination, str(run.cfg.dest_table or ""))  # D302: kept on a later cancel
+        if run.cfg.coverage_record:  # this table's verdict (multi-table run, own map)
+            run.tally.dest_summary["schema_propagation"] = run.cfg.coverage_record
         if run.cfg.pk_target_cols:
             run.tally.dest_summary.setdefault("conflict_columns", list(run.cfg.pk_target_cols))
             run.tally.dest_summary.setdefault("primary_key_columns", list(run.cfg.pk_target_cols))
@@ -1008,7 +1021,7 @@ def _stream_database_transfer_impl(
             run, scope, _src_rich_catalog, contract,
             "" if is_callable_source(run.cfg.source) or is_callable_source(run.cfg.src_cfg) else run.cfg.table,
         )
-        cursor_key = scope.cursor_key
+        cursor_key = run.cfg.boundary_route_key = scope.cursor_key  # D335 hold-back count
         run.cfg.watermark = scope.read_watermark
         from services.preflight_cursor_gate import refuse_unusable_cursor_state
         from services.sync_cursor import reconcile_cursor_tiebreak
@@ -1566,6 +1579,11 @@ def _stream_database_transfer_impl(
     from services.shape_contract import write_ready_mappings
 
     # Pending extras and intentional omits stay off INSERT/MERGE (name-addressed).
+    from .source_column_coverage import enforce_stream_coverage, omitted_source_names
+
+    if per_stream_coverage is not None:  # one table of a multi-table run: its own map
+        enforce_stream_coverage(run, probe, write_columns, per_stream_coverage)
+    run.cfg.omitted_sources = omitted_source_names(run.cfg.mappings)
     run.cfg.mappings = write_ready_mappings(run.cfg.mappings)
     # Schemaless sources: always allow ADD COLUMN when attrs appear mid-transfer.
     if run.cfg.src_type in ("dynamodb", "mongodb", "elasticsearch", "redis", "kafka"):
@@ -1681,6 +1699,8 @@ def _stream_database_transfer_impl(
     run.tally.dest_summary: dict[str, Any] = {"resumed_checkpoint_rows": run.tally.written} if resumed_pass else {}
     if run.cfg.resume_write_complete:
         _seed_write_complete_summary(run.tally.dest_summary, checkpoint)
+    if run.cfg.coverage_record:  # this table's verdict (multi-table run, own map)
+        run.tally.dest_summary["schema_propagation"] = run.cfg.coverage_record
     # Failed-Gate-8 restore guard: renamed-aside route tables (armed once,
     # inside the held txn) — stamped onto dest_summary at stream end.
     run.tally.route_backup_state: dict[str, Any] = {}
@@ -1863,6 +1883,7 @@ def _stream_database_transfer_impl(
             dest_cfg=run.cfg.dest_cfg,
             dest_table=str(run.cfg.dest_table),
             job_id=str(run.cfg.job_id or ""),
+            sync_mode=str(run.cfg.effective_sync or ""),
         )
         if _route_backups:
             run.tally.dest_summary["route_backups"] = dict(_route_backups)
@@ -2630,6 +2651,8 @@ def _stream_database_transfer_impl(
             run.cur.kafka_cursor = _kafka_accumulate_offsets(run.tally.dest_summary, run.cur.kafka_cursor)
             checkpoint.kafka_cursor = run.cur.kafka_cursor
             checkpoint_service.require_save(checkpoint)
+        if run.cfg.total_rows and int(run.tally.written or 0) >= int(run.cfg.total_rows):
+            mark_write_complete(run.cfg.destination, str(run.cfg.dest_table or ""))  # every row committed (D302)
         if on_checkpoint:
             on_checkpoint(idx, run.cfg.chunks, run.tally.written, _checkpoint_for_job(run, checkpoint))
 
@@ -2696,6 +2719,8 @@ def _stream_database_transfer_impl(
             or not run.tally.rejected_total
             or run.tally.dest_summary.get("skipped_identity_keys")
         )
+        if row_path_ok:
+            mark_write_complete(run.cfg.destination, str(run.cfg.dest_table or ""))  # reader exhausted (D302)
     except BaseException as _row_exc:
         # X-9: same undo as the file path — a transform refusal / writer
         # reject must not leave committed batches.
@@ -3720,36 +3745,9 @@ def _typed_value_source(fmt: str) -> bool:
         return False
 
 
-class _NoOpCheckpointService:
-    """A checkpoint service that does not persist anything.
-
-    Used for temporary staging transfers so the parent job's checkpoint is not
-    overwritten by an internal phase.
-
-    Module 14 honesty: this phase is not crash-recoverable on its own.
-    """
-
-    failed_saves = 0
-    durable = False
-    resume_supported = False
-
-    @property
-    def has_failed_saves(self) -> bool:
-        return False
-
-    def save(self, checkpoint: Any) -> bool:  # noqa: ARG002
-        return True
-
-    def require_save(self, checkpoint: Any) -> None:  # noqa: ARG002
-        return None
-
-    def load(self, job_id: str) -> Any | None:  # noqa: ARG002
-        return None
-
-    def honesty(self) -> dict:
-        from services.execution_engine_contract import noop_checkpoint_posture
-
-        return noop_checkpoint_posture()
+# The no-op checkpoint service lives in its own module (size budget) and is
+# re-exported here because callers import it from this module.
+from .stream_noop_checkpoint import _NoOpCheckpointService  # noqa: E402,F401 — re-export
 
 
 def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> bool:

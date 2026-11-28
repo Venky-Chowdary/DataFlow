@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import type { PreflightResult, ValidationIssue } from "./types.js";
 import { gateLabel } from "./preflightGates.js";
 import {
+  checksPassedLine,
   buildBlockingGateSummaries,
   buildDisplayBlockers,
   buildExecutiveSummary,
@@ -506,7 +507,7 @@ describe("buildExecutiveSummary", () => {
     });
     const summary = buildExecutiveSummary(pf);
     assert.ok(summary);
-    assert.equal(summary!.title, "Review before Execute");
+    assert.equal(summary!.title, "Review before you run");
     assert.match(summary!.subtitle, /review-grade/i);
     assert.ok(!/Execute unlocked/i.test(summary!.subtitle));
   });
@@ -537,8 +538,12 @@ describe("buildExecutiveSummary", () => {
     });
     const summary = buildExecutiveSummary(pf);
     assert.ok(summary);
-    assert.match(summary!.title, /sample-only/i);
+    assert.match(summary!.title, /checked on a sample/i);
     assert.ok(!/Ready to transfer/i.test(summary!.title));
+    // A file export writes a new file: key uniqueness does not apply (P1-20).
+    const file = buildExecutiveSummary(pf, undefined, { fileExport: true });
+    assert.equal(file!.title, "Ready to run");
+    assert.equal(file!.aiPromptHint, null);
   });
 });
 
@@ -718,4 +723,17 @@ describe("upsert key gate remedies are not duplicate rows (guard)", () => {
     )), null);
   });
 
+});
+
+describe("checksPassedLine (the label matches the ring)", () => {
+  it("counts passed of the applicable gates and names the rest not applicable", () => {
+    const gates = [
+      ...Array.from({ length: 16 }, (_, i) => ({ id: `p${i}`, status: "pass" })),
+      { id: "w", status: "warn" },
+      ...Array.from({ length: 5 }, (_, i) => ({ id: `s${i}`, status: "skip" })),
+    ];
+    const pf = { passed_count: 16, total_gates: 22, gates } as unknown as PreflightResult;
+    assert.equal(checksPassedLine(pf), "16 of 17 checks passed · 5 not applicable");
+    assert.equal(checksPassedLine({ passed_count: 1, total_gates: 1, gates: [] } as unknown as PreflightResult), "1 of 1 check passed");
+  });
 });

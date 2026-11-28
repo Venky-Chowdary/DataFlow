@@ -751,6 +751,11 @@ def _fail_runtime_job(
     from .overwrite_outcome import apply_to_job_failure
 
     display, error_details = apply_to_job_failure(exc, display, error_details)
+    stopped_stream = getattr(exc, "stopped_stream", None)
+    if stopped_stream:
+        # The table a multi-table pass stopped on, written with the failed status
+        # itself (one update): the Run screen blames this table (re-review D).
+        error_details = {**(error_details or {}), "stopped_stream": str(stopped_stream)}
     status_kwargs: dict[str, Any] = {
         "error": display,
         "phase": status,
@@ -824,6 +829,10 @@ def _fail_runtime_job(
         )
         if per_stream:
             outcome["streams"] = list(getattr(exc, "destination_streams", None) or [])
+        from .cancel_restore import stamp_cancel_outcome
+
+        # A cancelled overwrite put its pre-run rows back (or kept them aside).
+        outcome = stamp_cancel_outcome(exc, outcome)
         status_kwargs["cancel_outcome"] = outcome
         if outcome.get("rows_committed_source") == "destination_count":
             # D199 — the destination's own count replaces the committed-batch
@@ -847,6 +856,19 @@ def _fail_runtime_job(
                 outcome["rows_committed"],
             )
     already_complete = "" if cancelled else transfer_already_complete(exc, prev)
+    from .stream_boundary_keyed import BoundaryHeldBack
+
+    if isinstance(exc, BoundaryHeldBack) and not already_complete:
+        from services.validation_mode_contract import normalize_validation_mode
+
+        if normalize_validation_mode(getattr(request, "validation_mode", "strict")) not in {
+            "strict", "maximum",
+        }:
+            # D335: a non-strict run that held its tie group back wrote nothing
+            # past the watermark and kept its cursor: a warning, never green.
+            status = "completed_with_warnings"
+            status_kwargs.update(phase="completed", progress_pct=100, failed_at_phase="")
+            setattr(exc, "completes_with_warnings", True)  # the API result agrees
     if already_complete:
         status = "completed"
         display = already_complete

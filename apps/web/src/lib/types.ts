@@ -199,6 +199,14 @@ export interface TransferJob {
    * was recorded. The full report stays on the detail document.
    */
   verification_summary?: Gate8ReconciliationPayload;
+  /**
+   * Jobs grid only (client-merged from GET /parity/verdicts): the Trust
+   * Report verdict of a finished run. Undefined while it loads, null when it
+   * could not be read.
+   */
+  parity_verdict?: import("./verdict").ListVerdict | null;
+  /** List rows only: parity version and stored-summary time (changes when the verdict can). */
+  parity_stamp?: string;
   /** List rows only: destination_summary.multi_stream of a multi-table run. */
   multi_stream?: boolean;
   /** List rows only: len(destination_summary.streams), which the Gate-8 relabel counts. */
@@ -641,7 +649,23 @@ export interface OpenedJournal extends ParsedUpload {
   };
 }
 
+/** One table of a multi-table run (job.stream_progress, services/multi_stream_resume.py). */
+export interface StreamProgressEntry {
+  status: "running" | "completed" | string;
+  stream?: string;
+  table?: string;
+  /** Rows this pass wrote to the table (completed entries). */
+  rows?: number;
+  started_at?: string;
+  at?: string;
+  /** The job's row counter when the table started: each table's writer counts its own rows. */
+  counter_at_start?: number;
+}
+
 export interface JobProgress extends TransferJob {
+  /** Per-table progress of a multi-table run: the table loading now and the finished ones. */
+  stream_progress?: Record<string, StreamProgressEntry>;
+
   /** True when the API recorded the count as unknown (null), e.g. a cancel it could not attribute. */
   records_processed_unknown?: boolean;
   progress_pct: number;
@@ -1593,6 +1617,8 @@ export interface ScheduleInput {
   retry_backoff_seconds: number;
   notify_on_failure: boolean;
   notify_on_success: boolean;
+  /** Parity at Scale: the next run waits while the previous one is verified (default true). */
+  wait_for_verification?: boolean;
   enabled: boolean;
   /** upsert (default) | skip_duplicates | append. Empty stays the runner default. */
   duplicate_policy?: "upsert" | "skip_duplicates" | "append" | "dedupe_skip" | string;
@@ -1714,6 +1740,8 @@ export interface PipelineSchedule {
   retry_backoff_seconds: number;
   notify_on_failure: boolean;
   notify_on_success: boolean;
+  /** Parity at Scale: the next run waits while the previous one is verified (default true). */
+  wait_for_verification?: boolean;
   enabled: boolean;
   duplicate_policy?: string;
   in_file_dedupe?: string;

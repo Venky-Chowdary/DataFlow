@@ -2166,6 +2166,9 @@ def _convert_mapped_cell(
     return converted, err
 
 
+convert_mapped_cell = _convert_mapped_cell  # the one per-cell write pipeline (services.write_replay)
+
+
 def build_mapped_rows_with_details(
     *,
     headers: list[str],

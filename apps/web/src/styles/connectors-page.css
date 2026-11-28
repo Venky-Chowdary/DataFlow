@@ -185,7 +185,7 @@
 
 .df2-connector-row-used {
   font-size: var(--df-list-row-meta);
-  color: #64748b;
+  color: var(--df-text-secondary);
   white-space: nowrap;
 }
 

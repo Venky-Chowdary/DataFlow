@@ -79,8 +79,8 @@
 
 .df2-breadcrumb span {
   font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  text-transform: none;
+  letter-spacing: normal;
   color: var(--df-ink-muted);
 }
 

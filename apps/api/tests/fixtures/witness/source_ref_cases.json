@@ -1,0 +1,270 @@
+{
+  "note": "One Map state per case: the web test checks witnessSourceRef() and callableSourceExtra() produce map_source_ref and the run's source_extra; the API test posts map_source_ref to /transfer/mapping-witness and run_form to /transfer/run and checks the job takes that evidence. 'attaches' false: the evidence is for another source and must not attach.",
+  "cases": [
+    {
+      "id": "single_table",
+      "ui": {
+        "sourceKind": "database",
+        "activeStream": null,
+        "primaryStream": "Customers",
+        "readMode": "table",
+        "statement": "",
+        "engine": "postgresql"
+      },
+      "map_source_ref": {
+        "kind": "database",
+        "name": "Customers",
+        "statement": "",
+        "engine": "postgresql"
+      },
+      "run_form": {
+        "source_kind": "database",
+        "source_format": "postgresql",
+        "source_host": "src.internal.test",
+        "source_port": "5432",
+        "source_database": "crm",
+        "source_table": "Customers"
+      },
+      "run_source_extra": null,
+      "attaches": true
+    },
+    {
+      "id": "multi_stream_primary",
+      "ui": {
+        "sourceKind": "database",
+        "activeStream": "orders",
+        "primaryStream": "orders",
+        "readMode": "table",
+        "statement": "",
+        "engine": "postgresql"
+      },
+      "map_source_ref": {
+        "kind": "database",
+        "name": "orders",
+        "statement": "",
+        "engine": "postgresql"
+      },
+      "run_form": {
+        "source_kind": "database",
+        "source_format": "postgresql",
+        "source_host": "src.internal.test",
+        "source_port": "5432",
+        "source_database": "crm",
+        "source_table": "orders",
+        "stream_contracts_json": "[{\"name\": \"orders\", \"selected\": true}, {\"name\": \"returns\", \"selected\": true}]"
+      },
+      "run_source_extra": null,
+      "attaches": true
+    },
+    {
+      "id": "multi_stream_other_stream",
+      "ui": {
+        "sourceKind": "database",
+        "activeStream": "returns",
+        "primaryStream": "orders",
+        "readMode": "table",
+        "statement": "",
+        "engine": "postgresql"
+      },
+      "map_source_ref": {
+        "kind": "database",
+        "name": "returns",
+        "statement": "",
+        "engine": "postgresql"
+      },
+      "run_form": {
+        "source_kind": "database",
+        "source_format": "postgresql",
+        "source_host": "src.internal.test",
+        "source_port": "5432",
+        "source_database": "crm",
+        "source_table": "orders",
+        "stream_contracts_json": "[{\"name\": \"orders\", \"selected\": true}, {\"name\": \"returns\", \"selected\": true}]"
+      },
+      "run_source_extra": null,
+      "attaches": false
+    },
+    {
+      "id": "query_source",
+      "ui": {
+        "sourceKind": "database",
+        "activeStream": null,
+        "primaryStream": "",
+        "readMode": "query",
+        "statement": "  SELECT cust_id, given, family, mail, login\n  FROM customers  ",
+        "engine": "postgresql"
+      },
+      "map_source_ref": {
+        "kind": "database",
+        "name": "",
+        "statement": "SELECT cust_id, given, family, mail, login\n  FROM customers",
+        "engine": "postgresql"
+      },
+      "run_form": {
+        "source_kind": "database",
+        "source_format": "postgresql",
+        "source_host": "src.internal.test",
+        "source_port": "5432",
+        "source_database": "crm"
+      },
+      "run_source_extra": {
+        "source_read_mode": "query",
+        "source_query": "SELECT cust_id, given, family, mail, login\n  FROM customers"
+      },
+      "attaches": true
+    },
+    {
+      "id": "query_source_other_statement",
+      "ui": {
+        "sourceKind": "database",
+        "activeStream": null,
+        "primaryStream": "",
+        "readMode": "query",
+        "statement": "SELECT cust_id, given, family, mail, login FROM customers_archive",
+        "engine": "postgresql"
+      },
+      "map_source_ref": {
+        "kind": "database",
+        "name": "",
+        "statement": "SELECT cust_id, given, family, mail, login FROM customers_archive",
+        "engine": "postgresql"
+      },
+      "run_form": {
+        "source_kind": "database",
+        "source_format": "postgresql",
+        "source_host": "src.internal.test",
+        "source_port": "5432",
+        "source_database": "crm"
+      },
+      "run_source_extra": {
+        "source_read_mode": "query",
+        "source_query": "SELECT cust_id, given, family, mail, login\n  FROM customers"
+      },
+      "attaches": false
+    },
+    {
+      "id": "cloud_object",
+      "ui": {
+        "sourceKind": "cloud",
+        "cloudPath": "exports/2026/customers.csv",
+        "activeStream": "customers",
+        "primaryStream": "customers",
+        "engine": "s3"
+      },
+      "map_source_ref": {
+        "kind": "database",
+        "name": "exports/2026/customers.csv",
+        "statement": "",
+        "engine": "s3"
+      },
+      "run_form": {
+        "source_kind": "database",
+        "source_format": "s3",
+        "source_host": "s3.internal.test",
+        "source_table": "exports/2026/customers.csv",
+        "source_collection": "exports/2026/customers.csv"
+      },
+      "run_source_extra": null,
+      "attaches": true
+    },
+    {
+      "id": "file",
+      "ui": {
+        "sourceKind": "file",
+        "fileName": "customers.csv"
+      },
+      "map_source_ref": {
+        "kind": "file",
+        "name": "customers.csv",
+        "statement": "",
+        "engine": ""
+      },
+      "run_form": {
+        "source_kind": "file",
+        "source_format": "csv"
+      },
+      "run_file": "customers.csv",
+      "run_source_extra": null,
+      "attaches": true
+    },
+    {
+      "id": "postgres_table_other_case",
+      "ui": {
+        "sourceKind": "database",
+        "activeStream": null,
+        "primaryStream": "Customers",
+        "readMode": "table",
+        "statement": "",
+        "engine": "postgres"
+      },
+      "map_source_ref": {
+        "kind": "database",
+        "name": "Customers",
+        "statement": "",
+        "engine": "postgres"
+      },
+      "run_form": {
+        "source_kind": "database",
+        "source_format": "postgresql",
+        "source_host": "src.internal.test",
+        "source_port": "5432",
+        "source_database": "crm",
+        "source_table": "customers"
+      },
+      "run_source_extra": null,
+      "attaches": true
+    },
+    {
+      "id": "mysql_table_other_case",
+      "ui": {
+        "sourceKind": "database",
+        "activeStream": null,
+        "primaryStream": "Customers",
+        "readMode": "table",
+        "statement": "",
+        "engine": "mysql"
+      },
+      "map_source_ref": {
+        "kind": "database",
+        "name": "Customers",
+        "statement": "",
+        "engine": "mysql"
+      },
+      "run_form": {
+        "source_kind": "database",
+        "source_format": "mysql",
+        "source_host": "src.internal.test",
+        "source_port": "3306",
+        "source_database": "crm",
+        "source_table": "customers"
+      },
+      "run_source_extra": null,
+      "attaches": false
+    },
+    {
+      "id": "cloud_object_other_case",
+      "ui": {
+        "sourceKind": "cloud",
+        "cloudPath": "exports/Data/customers.csv",
+        "activeStream": "customers",
+        "primaryStream": "customers",
+        "engine": "s3"
+      },
+      "map_source_ref": {
+        "kind": "database",
+        "name": "exports/Data/customers.csv",
+        "statement": "",
+        "engine": "s3"
+      },
+      "run_form": {
+        "source_kind": "database",
+        "source_format": "s3",
+        "source_host": "s3.internal.test",
+        "source_table": "exports/data/customers.csv",
+        "source_collection": "exports/data/customers.csv"
+      },
+      "run_source_extra": null,
+      "attaches": false
+    }
+  ]
+}

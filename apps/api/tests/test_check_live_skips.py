@@ -444,3 +444,65 @@ def test_every_api_tests_skip_ci_flagged_at_9be296013_is_resolved() -> None:
     for s in wired:
         result = check("api-tests", [Case(s["test"], "skipped", s["reason"])], manifest)
         assert result.unexpected, f"{s['test']} must be fixed by wiring, not allowlisted"
+
+
+ORACLE_LIVE_SKIPS = ROOT / "tests" / "fixtures" / "live_skips" / "oracle_live_44932873967_skips.json"
+
+
+def _oracle_live_cases(extra: list[tuple[str, str]] = ()) -> list:
+    """The skips oracle-live recorded on 3e0a9cd53, plus its 740 executed tests."""
+    from scripts.check_live_skips import Case
+
+    data = json.loads(ORACLE_LIVE_SKIPS.read_text(encoding="utf-8"))
+    cases = [Case(s["test"], "skipped", s["message"]) for s in data["skips"]]
+    cases += [Case(f"tests/test_oracle_ran.py::test_{i}", "passed") for i in range(data["executed"])]
+    cases += [Case(t, "skipped", m) for t, m in extra]
+    return cases
+
+
+def test_oracle_live_is_strict_and_every_recorded_skip_is_allowlisted_with_a_reason() -> None:
+    """REVIEW_ORACLE finding 2: engine_scoped ignored 80 Oracle-job skips whose
+    message named no job engine (MinIO, Iceberg REST, the CDC restart flag,
+    Timescale, peers the job does not start). Strict: each one is listed."""
+    manifest = load_manifest()
+    assert manifest["jobs"]["oracle-live"]["mode"] == "strict"
+    result = check("oracle-live", _oracle_live_cases(), manifest)
+    assert not result.unexpected, [u["test"] + " — " + u["reason"] for u in result.unexpected]
+    assert result.status == "green"
+    assert len(result.expected) == len(json.loads(ORACLE_LIVE_SKIPS.read_text())["skips"])
+    assert not result.ignored
+    for entry in manifest["jobs"]["oracle-live"]["expected_skips"]:
+        assert entry["why"].strip()
+
+
+@pytest.mark.parametrize(("test", "message"), [
+    # Ignored before: names no job engine.
+    ("tests/test_oracle_new_copy.py::test_live_oracle_x", "Iceberg REST catalog not reachable at http://127.0.0.1:8181"),
+    ("tests/test_oracle_story_live_retests.py::test_d382", "Oracle not configured (DATAFLOW_ORACLE_PASSWORD)"),
+    ("tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_postgresql_to_database_oracle]",
+     "destination database/oracle not reachable"),
+    ("tests/test_cdc_oracle_logminer_transfer_e2e.py::test_x", "set DATAFLOW_SOMETHING=1 to run"),
+])
+def test_an_unexpected_oracle_live_skip_turns_the_job_red(test: str, message: str) -> None:
+    result = check("oracle-live", _oracle_live_cases([(test, message)]), load_manifest())
+    assert result.status == "red" and result.exit_code() == 1
+    assert [u["test"] for u in result.unexpected] == [test]
+
+
+def test_the_oracle_live_replay_is_the_real_82_and_no_allowlist_entry_is_stale() -> None:
+    """Round 2 F: the fixture holds the 82 skips of that run, and every
+    oracle-live allowlist entry matches one of them (none is stale)."""
+    data = json.loads(ORACLE_LIVE_SKIPS.read_text(encoding="utf-8"))
+    assert len(data["skips"]) == 82
+    assert len({s["test"] for s in data["skips"]}) == 82
+    result = check("oracle-live", _oracle_live_cases(), load_manifest())
+    # d356 / d357 are allowlisted but this run's MariaDB legs are both present.
+    assert not result.stale_allowlist, result.stale_allowlist
+
+
+def test_the_no_endpoint_template_entry_never_excuses_oracle_itself() -> None:
+    """Round 2 G: a missing template for the oracle driver is a real gap."""
+    test = "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[database_postgresql_to_database_oracle]"
+    result = check("oracle-live", _oracle_live_cases([(test, "No endpoint template for driver 'oracle'")]),
+                   load_manifest())
+    assert [u["test"] for u in result.unexpected] == [test]

@@ -385,6 +385,7 @@ def test_registry_matches_the_stores_that_really_have_a_shared_backend():
     for module in (
         "services.notification_store", "services.shape_draft_store", "services.preflight_run_store",
         "services.cdc_mapping_review", "services.mcp_invocation_log", "services.audit_anchor",
+        "services.validate_execute_ledger",
     ):
         importlib.import_module(module)
     registered = set(shared_doc_store.registered_stores())

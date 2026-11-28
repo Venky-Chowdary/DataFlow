@@ -146,6 +146,16 @@ _ROW_RULE_PROPS: dict[str, dict] = {
         "type": "string",
         "description": "Column(s) that identify a duplicate row; used as the key when upsert_key is not given.",
     },
+    "dedupe_key_equality": {
+        "type": "string",
+        "enum": ["exact", "destination"],
+        "description": (
+            "When dedupe_key values differ by exact text but are one key to the destination "
+            "('a'/'A' under a case-insensitive collation, 'b'/'b ' under PAD SPACE): "
+            "destination collapses them by the destination's rules (last row wins); exact "
+            "keeps both as distinct keys. Unset refuses such a file before any write."
+        ),
+    },
     "rule_questions": {
         "type": "array",
         "items": {"type": "string"},
@@ -1203,7 +1213,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     "enum": ["block", "keep_last"],
                     "description": (
                         "Duplicates inside one file. block refuses the file. "
-                        "keep_last writes the last row for each key."
+                        "keep_last writes the last row for each key. Unset follows "
+                        "the plan: dedupe_key on a file overwrite is keep_last."
                     ),
                 },
                 "file_wait_seconds": {
@@ -2727,7 +2738,7 @@ class DataPilotTools:
     def _get_job(self, job_id: str = "") -> ToolResult:
         from services.quarantine_from_preflight import merge_job_quarantine
 
-        from services.job_status import job_timestamp_iso
+        from services.job_status import job_rows_skipped, job_timestamp_iso
 
         from services.phase_profile import job_phase_timings
 
@@ -2837,6 +2848,9 @@ class DataPilotTools:
                 "source_type": job.get("source_type"),
                 "destination_type": job.get("destination_type"),
                 "records_processed": job.get("records_processed", 0),
+                # D376(a): rows a skip_duplicates run kept as stored. Without it
+                # a correct skip read as "0 processed" on the tool QA reads.
+                "rows_skipped": job_rows_skipped(job),
                 "rejected_rows": reported_rejected,
                 "coerced_null_rows": job.get("coerced_null_rows", 0),
                 "quarantine_issue_count": len(quarantine),
@@ -4683,6 +4697,7 @@ class DataPilotTools:
         upsert_key: str = "",
         primary_key: str = "",
         dedupe_key: str = "",
+        dedupe_key_equality: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
         cursor_lookback_days: int = 0,
@@ -4724,6 +4739,7 @@ class DataPilotTools:
             upsert_key=upsert_key or primary_key,
             primary_key=primary_key,
             dedupe_key=dedupe_key,
+            dedupe_key_equality=dedupe_key_equality,
             cursor_column=cursor_column,
             cursor_semantics=cursor_semantics,
             cursor_lookback_days=cursor_lookback_days,
@@ -4765,6 +4781,7 @@ class DataPilotTools:
         upsert_key: str = "",
         primary_key: str = "",
         dedupe_key: str = "",
+        dedupe_key_equality: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
         cursor_lookback_days: int = 0,
@@ -4806,6 +4823,7 @@ class DataPilotTools:
             upsert_key=upsert_key or primary_key,
             primary_key=primary_key,
             dedupe_key=dedupe_key,
+            dedupe_key_equality=dedupe_key_equality,
             cursor_column=cursor_column,
             cursor_semantics=cursor_semantics,
             cursor_lookback_days=cursor_lookback_days,
@@ -4893,6 +4911,7 @@ class DataPilotTools:
         upsert_key: str = "",
         primary_key: str = "",
         dedupe_key: str = "",
+        dedupe_key_equality: str = "",
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         limit: int = 0,
@@ -4900,7 +4919,7 @@ class DataPilotTools:
         schema_drift_acknowledged: bool = False,
         pii_acknowledgement: dict | None = None,
         duplicate_policy: str = "",
-        in_file_dedupe: str = "block",
+        in_file_dedupe: str = "",
         file_wait_seconds: int = 0,
         risk_acceptance: dict | None = None,
         require_reversibility: bool = False,
@@ -4933,6 +4952,7 @@ class DataPilotTools:
             upsert_key=upsert_key or primary_key,
             primary_key=primary_key,
             dedupe_key=dedupe_key,
+            dedupe_key_equality=dedupe_key_equality,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             limit=limit,

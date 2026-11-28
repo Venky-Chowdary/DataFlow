@@ -35,7 +35,7 @@ test.describe("wizard baseline", () => {
     await page.locator(".df2-xform-builder-actions").getByRole("button", { name: "Add step", exact: true }).click();
     await expect(page.locator("#xform-step-1")).toContainText(/trim/i);
 
-    const primary = page.locator(".df2-xform-actions .df2-btn-primary");
+    const primary = page.locator(".df2-step-footer .df2-step-primary");
     const color = await primary.evaluate((node) => getComputedStyle(node).backgroundColor);
     // The primary fill is the --df-action-bg token (#0f766e): white label text
     // needs >= 4.5:1, which --df-brand (#0d9488, non-text accents only) misses;

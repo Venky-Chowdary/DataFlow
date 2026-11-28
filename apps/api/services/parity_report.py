@@ -51,7 +51,9 @@ from services.parity_stats import CONFIDENCE_LEVEL, clopper_pearson_upper, forma
 
 logger = logging.getLogger(__name__)
 
-_FULL_CHECKS = frozenset({"full_checksum", "key_diff"})
+#: Checks that compared every row. ``segment_diff`` / ``multiset_digest`` are
+#: Parity at Scale's in-engine compares (keyed / "Content match (no key)").
+_FULL_CHECKS = frozenset({"full_checksum", "key_diff", "segment_diff", "multiset_digest"})
 #: A mirror / SCD2 run whose Gate-8 digests matched: every live destination row
 #: was re-read after the write (a streamed SELECT, D394, proven by
 #: tests/test_trust_d394_mirror_readback_provenance.py) and its digest equals
@@ -555,7 +557,9 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
         upper = None  # Gate-8 did not count these rows: nothing bounds how many differ
     if ev.capped or ev.gate8_unaccounted or at_least:
         pct = None  # the census stopped naming keys, Gate-8 failed on rows it did not name or count
-    if bad:
+    if ev.check == "verifying":
+        status = "verifying"
+    elif bad:
         status = "unexplained"
     elif ev.check in {"none", "count_only"} or ev.capped or ev.gate8_unaccounted:
         status = "unverifiable"
@@ -578,6 +582,15 @@ def _table(ev: TableEvidence, diffs: list[dict[str, Any]]) -> dict[str, Any]:
         "_unaccounted": ev.gate8_unaccounted,
         "_capped": ev.capped,
         "_note": ev.note,
+        **({
+            "check_label": ev.scale.get("check_label"),
+            "key_attribution": ev.scale.get("key_attribution"),
+            "certified": ev.scale.get("certified"),
+            "certification_pair": ev.scale.get("certification_pair"),
+            "consistency": ev.scale.get("consistency"),
+            "snapshots_ms_apart": ev.scale.get("snapshots_ms_apart"),
+            "consistency_reasons": ev.scale.get("consistency_reasons") or [],
+        } if ev.scale else {}),
     }
 
 
@@ -723,6 +736,21 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
         return "unverifiable", "The job has not finished; parity is decided once it completes."
     if not isinstance(job.get("reconciliation"), dict) or not job.get("reconciliation"):
         return "unverifiable", "Gate-8 recorded no reconciliation for this job, so nothing was compared."
+    verifying = [t["name"] for t in tables if t["status"] == "verifying"]
+    from services.parity_scale.verification import is_queued
+
+    if verifying and is_queued(job):
+        return "verifying", (
+            f"Verification of {', '.join(verifying[:5])} is queued: it starts when capacity frees up. "
+            "Sign-off and cutover wait until every row has been compared."
+        )
+    if verifying:
+        # Its own state, not a verdict (owner decision 2): the write finished,
+        # the comparison of every row is still running.
+        return "verifying", (
+            f"Verification is running for {', '.join(verifying[:5])}: every row is being compared. "
+            "Sign-off and cutover wait until it finishes."
+        )
     bad = sum(t["unexplained"] for t in tables)
     if bad:
         names = ", ".join(t["name"] for t in tables if t["unexplained"])
@@ -782,6 +810,34 @@ def _verdict(job: dict[str, Any], tables: list[dict[str, Any]], confidence: dict
             "Compared cells match, and the certificate will not say proven: "
             + "; ".join(str(item) for item in blockers[:3])
             + "."
+        )
+    uncertified = [t["name"] for t in tables if t.get("certified") is False]
+    if uncertified:
+        # Design §4.4: nothing says proven on a rendering no live engine certified.
+        return "no_difference_found", (
+            f"Every row of {', '.join(uncertified[:5])} was compared and none differs, but this engine pair "
+            "is not certified for every column type, so the report does not say proven."
+        )
+    moving = [t["name"] for t in tables if t.get("check") in {"segment_diff", "multiset_digest"}
+              and t.get("consistency") != "pinned"]
+    if moving:
+        # Design §4.2: proven needs each side read from one snapshot (pinned).
+        why = next((r for t in tables for r in (t.get("consistency_reasons") or [])), "")
+        return "no_difference_found", (
+            f"Every row of {', '.join(moving[:5])} was compared and none differs. The tables matched at "
+            "scan time, but writes during the scan were not ruled out"
+            + (f" ({why})." if why else ".")
+        )
+    pinned = [t for t in tables if t.get("check") in {"segment_diff", "multiset_digest"}]
+    if pinned:
+        apart = max((t.get("snapshots_ms_apart") or 0) for t in pinned)
+        content = [t["name"] for t in pinned if t.get("check") == "multiset_digest"]
+        return "proven", (
+            f"No differences: each side was read from one snapshot (taken {apart:,} ms apart). The destination "
+            "as of its snapshot matches the source as of its snapshot; a change to the source after its "
+            "snapshot is not part of this result."
+            + (f" {', '.join(content[:5])}: content match (no key) — every row has an identical counterpart; "
+               "the table has no key, so a difference could not be attributed to a key." if content else "")
         )
     return "proven", "No differences: the destination matches the source."
 
@@ -859,7 +915,7 @@ def _evidence_block(job: dict[str, Any], tables_ev: list[TableEvidence]) -> dict
 
 
 def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
-    from services.parity_signoff import content_sha256, valid_approvals
+    from services.parity_signoff import content_digests, content_sha256, one_content_version, valid_approvals
 
     verdict, unexplained = report["verdict"], report["parity"]["unexplained"]
     roles = list(state.get("required_roles") or [])
@@ -870,10 +926,12 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
         sealed = sealed_report.get("signoff") or {}
         approvals, invalidated = list(sealed.get("approvals") or []), []
         # The signed content is final; what the data shows now may have moved since.
-        attested = next((a.get("content_sha256") for a in approvals if a.get("content_sha256")), None)
+        attested_by = next((a for a in approvals if a.get("content_sha256")), None)
+        attested = (attested_by or {}).get("content_sha256")
+        attested_version = int((attested_by or {}).get("content_version") or 1)
         drift = {
             "signed_verdict": sealed_report.get("verdict"),
-            "drift_since_signing": (content_sha256(report) != attested) if attested else None,
+            "drift_since_signing": (content_sha256(report, attested_version) != attested) if attested else None,
         }
         # The pack names the rules it was signed under (absent = version 1).
         sealed_rules = stored_fingerprint_version(signed.get("pack"))
@@ -888,10 +946,22 @@ def _signoff(state: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
                 "current": FINGERPRINT_VERSION,
             }
     else:
-        approvals, invalidated = valid_approvals(state, content_sha256(report))
+        approvals, invalidated = valid_approvals(state, content_digests(report))
+        approvals, superseded = one_content_version(approvals)
+        invalidated = invalidated + superseded
     blocked_reason = None
     if signed:
         status = "signed"
+    elif verdict == "verifying":
+        status = "blocked"
+        blocked_reason = (
+            "Verification is queued; sign once every row has been compared."
+            if (report.get("verification") or {}).get("state") == "queued"
+            else "Verification is still running; sign once every row has been compared.")
+    elif (report.get("verification") or {}).get("state") == "error":
+        # A verification that did not finish decides nothing: an earlier result is not signed in its place.
+        status = "blocked"
+        blocked_reason = "Verification did not finish; re-verify the table, then sign."
     elif unexplained > 0:
         status = "blocked"
         blocked_reason = f"{unexplained:,} row(s) still hold an unexplained difference."
@@ -956,7 +1026,7 @@ def build_parity_report(
     for ev in tables_ev:
         resolved = set((state.get("resolved") or {}).get(ev.name) or [])
         checking = set((recheck or {}).get(ev.name) or [])
-        if reread and terminal and ev is tables_ev[0]:
+        if reread and terminal and ev is tables_ev[0] and ev.check != "verifying":
             _apply_reread(job, ev, engine, resolved | checking,
                           version=int(state.get("version") or 0), cache=cache)
             if ev.reread.get("status") != "ok":
@@ -981,6 +1051,27 @@ def build_parity_report(
     if carried:
         confidence["statement"] = f"{confidence['statement']} Representation: {'; '.join(carried)}."
     verdict, reason = _verdict(job, tables, confidence)
+    # The compare covers the columns the run wrote. A source column it left
+    # out is named with the confidence, and one nobody decided on is never
+    # "proven" (docs/migration-rules.md rules 4 and 12; R9).
+    from services.column_coverage_report import column_coverage_of, undecided_columns
+
+    left_out = column_coverage_of(job) if terminal and recon else None
+    if left_out:
+        confidence["statement"] = f"{confidence['statement']} {left_out['statement']}"
+        undecided = undecided_columns(left_out)
+        if verdict == "proven" and undecided:
+            verdict, reason = "unverifiable", (
+                f"Compared cells match, but {len(undecided)} source column(s) were left out with "
+                f"no recorded decision: {', '.join(undecided[:8])}. Map them or declare them "
+                "omitted, then run again."
+            )
+        elif verdict == "proven" and left_out.get("not_migrated"):
+            reason = "No differences in the columns this run wrote."
+    if verdict == "verifying":
+        # Nothing is decided while every row is being compared: no earlier figure is restated.
+        confidence = {**confidence, "statement": "Every row is being compared now. How sure this is follows when "
+                      "verification finishes."}
     parity = _parity_block(tables)
     report: dict[str, Any] = {
         "job_id": job_id or job_id_of(job),
@@ -995,20 +1086,90 @@ def build_parity_report(
         "explanation": state.get("explanation"),
         "rounds": list(state.get("rounds") or []),
         "evidence": _evidence_block(job, tables_ev),
+        "column_coverage": left_out,
         "_representation_notes": carried,
         "_tables_ev": tables_ev,
         "_sync_mode": sync_mode_of(job),
         "_cache": cache,
     }
     report["fixes"] = propose_fixes(job, report, state, reread=reread)
+    verification = _verification_block(job)
+    if verification:
+        # Only on a job verified after the write: other reports (and their digests) are unchanged.
+        report["verification"] = verification
+    # What approvers attest includes the AI decisions ledger's decision rows (content v2).
+    from services.ai_decision_ledger import attested_digest_for_job
+
+    report["ai_decisions_attested_sha256"] = attested_digest_for_job(job)
     report["signoff"] = _signoff(state, report)
     return report
 
 
+def _verification_block(job: dict[str, Any]) -> dict[str, Any] | None:
+    """The Parity at Scale verification phase as the Trust Report shows it (no evidence bodies)."""
+    from services.parity_scale.verification import effective_block, table_state
+
+    # As readers must see it: a run whose worker stopped is not "running".
+    block = effective_block(job)
+    if not block:
+        return None
+    return {
+        "state": block.get("state"),
+        "started_at": block.get("started_at"),
+        "finished_at": block.get("finished_at"),
+        "reason": block.get("reason") or "",
+        "tables": [
+            {
+                "name": t.get("name"),
+                # running, passed, failed, incomplete or error (the block's own words).
+                "status": table_state(t),
+                "progress": t.get("progress") or {},
+                "queue_position": t.get("queue_position"),
+                "error": t.get("error"),
+                "outcome": (t.get("evidence") or {}).get("outcome"),
+                "mode": (t.get("evidence") or {}).get("mode"),
+                "check_kind": (t.get("evidence") or {}).get("check_kind"),
+                "consistency": _consistency_view((t.get("evidence") or {}).get("consistency")),
+            }
+            for t in block.get("tables") or []
+            if isinstance(t, dict)
+        ],
+    }
+
+
+def _consistency_view(consistency: Any) -> dict[str, Any] | None:
+    """Whether each side was read from one snapshot, and for how long it was held (no positions)."""
+    if not isinstance(consistency, dict):
+        return None
+
+    def side(info: Any) -> dict[str, Any]:
+        info = info if isinstance(info, dict) else {}
+        return {"pinned": info.get("kind") == "pinned", "held_s": info.get("held_s"),
+                "reason": info.get("reason") or ""}
+
+    return {"kind": consistency.get("kind"), "snapshots_ms_apart": consistency.get("snapshots_ms_apart"),
+            "reasons": list(consistency.get("reasons") or []),
+            "source": side(consistency.get("source")), "destination": side(consistency.get("destination"))}
+
+
 def summary_stamp(job: dict[str, Any]) -> dict[str, str]:
-    """The job state a stored summary was computed for: a different one makes it stale."""
-    return {"job_status": str(job.get("status") or "").strip().lower(),
-            "job_updated_at": str(job.get("updated_at") or "")}
+    """The job state a stored summary was computed for: a different one makes it stale.
+
+    Verification after the write writes without touching ``updated_at`` (it is
+    not job progress), so its state and finish time are part of the stamp: a
+    summary stored while it ran is stale once it ends (or stops).
+    """
+    from services.parity_scale.verification import effective_block
+
+    stamp = {"job_status": str(job.get("status") or "").strip().lower(),
+             "job_updated_at": str(job.get("updated_at") or "")}
+    block = effective_block(job)
+    if block:
+        # Only a job verified after the write carries these: every other stamp (and the
+        # summaries stored with it) is exactly what it was before Parity at Scale.
+        stamp.update(verification_state=str(block.get("state") or ""),
+                     verification_finished_at=str(block.get("finished_at") or ""))
+    return stamp
 
 
 def compact_summary(report: dict[str, Any], job: dict[str, Any] | None = None) -> dict[str, Any]:

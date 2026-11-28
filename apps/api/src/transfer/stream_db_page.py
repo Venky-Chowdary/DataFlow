@@ -78,10 +78,26 @@ def _boundary_rows_already_landed(
             and cfg.pk_target_cols
             and all(c in all_cols for c in cfg.pk_target_cols)
         )
-        if keyed_append:
-            match_cols = [cursor_dest_col] + [
-                c for c in cfg.pk_target_cols if c != cursor_dest_col
-            ]
+        if not requires_upsert(cfg.effective_sync):
+            # D335: an append (keyed or not) asks the destination with typed
+            # binds and compares at the carrier's precision; what it cannot
+            # measure it withholds (fail closed). See stream_boundary_keyed.
+            from .stream_boundary_keyed import append_boundary_rows_landed
+
+            peers = [rows[i] for i in boundary_idx]
+            drop = append_boundary_rows_landed(
+                run, list(headers or []), peers, cursor_dest_col=cursor_dest_col,
+                watermark=str(cur_val), keyed=keyed_append, verify=verify,
+            )
+            if drop:
+                _stream.logger.info(
+                    "Boundary re-read dedupe dropped %d row(s) at watermark %r.",
+                    len(drop),
+                    str(cur_val),
+                )
+                if keyed_append:
+                    _record_landed_boundary_keys(run, headers, [peers[i] for i in drop])
+            return {boundary_idx[i] for i in drop}
         if cur._boundary_fps_state["fps"] is None:
             # A run that ADDs a column (approved schema evolution) re-reads
             # tie peers whose new column the destination does not have yet.
@@ -164,9 +180,26 @@ def _boundary_rows_already_landed(
                     run, headers, [rows[boundary_idx[i]] for i in drop]
                 )
         return {boundary_idx[i] for i in drop}
-    except Exception as exc:  # fail open — dedupe must never lose a row
-        _stream.logger.warning("Boundary dedupe skipped (fail-open): %s", exc)
-        return set()
+    except Exception as exc:
+        from .stream_boundary_keyed import BoundaryHeldBack, BoundaryRefused
+
+        if isinstance(exc, (BoundaryHeldBack, BoundaryRefused)):
+            raise
+        if requires_upsert(cfg.effective_sync):
+            # An upsert rewrites a re-read peer by key: appending it is harmless.
+            _stream.logger.warning("Boundary dedupe skipped (upsert, fail-open): %s", exc)
+            return set()
+        # D335: an append fails closed. The tie group could not even be told
+        # apart, so the run stops before writing it and keeps its cursor.
+        from .stream_boundary_keyed import held_back_message
+
+        _stream.logger.warning("Boundary dedupe unmeasured (append, fail-closed): %s", exc)
+        raise BoundaryHeldBack(
+            held_back_message(
+                len(rows), cfg.watermark,
+                f"the watermark's tie group could not be identified ({type(exc).__name__})",
+            )
+        ) from exc
 
 
 #: dest_summary list of ``{target key column: value}`` for keyed-append tie

@@ -181,6 +181,30 @@ CLAIM_REGISTRY: list[dict[str, Any]] = [
             "transfer or a Map UI session."
         ),
     },
+    {
+        "id": "holdout_mapping",
+        "claim": "Map's mapping on an inspected held-out set (dev2), production path",
+        "buyer_line": (
+            "Through Map's own pipeline (no AI model) on the dev2 split of the held-out set "
+            "(renames, abbreviations, five languages, JSON paths, public schemas), "
+            "auto-approved mappings meet the precision floor and no column without a right "
+            "answer is auto-approved. The blind number from a separate author is pending."
+        ),
+        # Floors mirror services.mapping_holdout_eval.HOLDOUT_FLOORS["pipeline"]["dev2"].
+        "floors": {
+            "top1": 0.6727,
+            "top3": 0.8727,
+            "auto_precision": 0.98,
+            "neg_auto_zero": 1,
+            "min_matchable": 100,
+        },
+        "honesty": (
+            "dev2 is inspected, not blind: it was re-measured while tuning. One author, 14 "
+            "tables; intervals are a cluster bootstrap over tables. Few rows are "
+            "auto-approved on the pipeline, so the precision floor rests on few rows. "
+            "Not an external benchmark (Valentine, MIMIC-OMOP)."
+        ),
+    },
 ]
 
 
@@ -609,6 +633,19 @@ def measure_create_new_type_risk() -> dict[str, Any]:
     }
 
 
+def measure_holdout_mapping() -> dict[str, Any]:
+    from services.mapping_holdout_eval import evaluate
+
+    overall = evaluate("dev2", engine="pipeline")["overall"]
+    return {
+        **{k: v for k, v in overall.items()},
+        "neg_auto_zero": int(overall["neg_auto"] == 0),
+        "min_matchable": overall["n_matchable"],
+        "split": "dev2",
+        "engine": "pipeline",
+    }
+
+
 _MEASUREMENTS: dict[str, Callable[[], dict[str, Any]]] = {
     "hungarian_assignment": measure_hungarian_vs_greedy,
     "native_type_canonicalization": measure_native_types,
@@ -619,6 +656,7 @@ _MEASUREMENTS: dict[str, Callable[[], dict[str, Any]]] = {
     "pair_assurance_offline": measure_pair_assurance_offline,
     "abbreviation_coverage": measure_abbreviation_coverage,
     "create_new_type_risk_stamp": measure_create_new_type_risk,
+    "holdout_mapping": lambda: measure_holdout_mapping(),
 }
 
 

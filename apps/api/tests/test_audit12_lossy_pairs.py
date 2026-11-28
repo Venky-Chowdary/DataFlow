@@ -135,6 +135,12 @@ _KNOWN_LOSSY_CREATE_NEW: set[tuple[str, str, str]] = {
     ("oracle", "NUMBER(10)", "sqlserver"),
     ("oracle", "NUMBER(10)", "oracle"),
     ("oracle", "NUMBER(10)", "snowflake"),
+    # Oracle FLOAT is a 38-digit decimal ranging to 1E+125: no MySQL, SQL Server
+    # or Snowflake carrier keeps every value, so create-new there needs approval
+    # (accuracy review 8; PostgreSQL gets NUMERIC, which keeps them).
+    ("oracle", "FLOAT", "mysql"),
+    ("oracle", "FLOAT", "sqlserver"),
+    ("oracle", "FLOAT", "snowflake"),
 }
 
 

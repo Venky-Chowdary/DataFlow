@@ -128,6 +128,35 @@ async function expectActionBarBelowCanvas(page: Page): Promise<void> {
   expect(barBox!.y + barBox!.height).toBeLessThanOrEqual(viewport!.height);
 }
 
+/**
+ * The bar is one pinned row that clips what does not fit. On a phone the long
+ * Back label and the primary once overflowed it and cut the primary off at the
+ * right edge (390 px). Nothing may overflow the bar, and the primary is whole.
+ */
+async function expectActionBarFits(page: Page): Promise<void> {
+  const bar = page.locator(".df2-xform-actions");
+  const fit = await bar.evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    const primary = node.querySelector(".df2-step-primary");
+    const primaryBox = primary?.getBoundingClientRect();
+    return {
+      scrollWidth: node.scrollWidth,
+      clientWidth: node.clientWidth,
+      barLeft: box.left,
+      barRight: box.right,
+      primaryLeft: primaryBox?.left ?? Number.NaN,
+      primaryRight: primaryBox?.right ?? Number.NaN,
+      primaryClipped: primary ? primary.scrollWidth > primary.clientWidth : true,
+    };
+  });
+  const viewport = page.viewportSize();
+  expect(fit.scrollWidth, "the action bar overflows").toBeLessThanOrEqual(fit.clientWidth);
+  expect(fit.primaryLeft).toBeGreaterThanOrEqual(fit.barLeft);
+  expect(fit.primaryRight).toBeLessThanOrEqual(Math.min(fit.barRight, viewport!.width));
+  expect(fit.primaryClipped, "the primary label is clipped").toBe(false);
+  await expect(bar.locator(".df2-step-primary")).toBeInViewport({ ratio: 1 });
+}
+
 async function apiUp(page: Page): Promise<boolean> {
   try {
     const response = await page.request.get("/api/v1/health");
@@ -198,11 +227,13 @@ test.describe("studio next", () => {
     await page.addStyleTag({ content: "* { caret-color: transparent !important; transition: none !important; animation: none !important; }" });
     await quietChrome(page);
     await expectActionBarBelowCanvas(page);
+    await expectActionBarFits(page);
     // xyflow edge antialiasing moves about one percent between captures.
     await shoot(page, "canvas-light-1440.png", [], 0.02);
     await page.setViewportSize({ width: 390, height: 844 });
     await quietChrome(page);
     await expectActionBarBelowCanvas(page);
+    await expectActionBarFits(page);
     await shoot(page, "canvas-light-390.png", [], 0.04);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.evaluate(() => {
@@ -213,10 +244,12 @@ test.describe("studio next", () => {
     await expect(page.locator(".react-flow")).toHaveClass(/dark/);
     await quietChrome(page);
     await expectActionBarBelowCanvas(page);
+    await expectActionBarFits(page);
     await shoot(page, "canvas-dark-1440.png", [], 0.02);
     await page.setViewportSize({ width: 390, height: 844 });
     await quietChrome(page);
     await expectActionBarBelowCanvas(page);
+    await expectActionBarFits(page);
     await shoot(page, "canvas-dark-390.png", [], 0.04);
   });
 
@@ -410,11 +443,12 @@ test.describe("studio next", () => {
     const toMap = page.getByRole("button", { name: "Continue with this transform" });
     await expect(toMap).toBeEnabled();
     await toMap.click();
-    const execute = page.getByRole("button", { name: /^Execute/ });
+    const execute = page.getByRole("button", { name: /^Run transfer/ });
     await expect(execute).toBeVisible({ timeout: 30_000 });
     await expect(execute).toBeEnabled({ timeout: 40_000 });
     await execute.click();
-    await expect(page.getByRole("heading", { name: "Transfer complete" })).toBeVisible({ timeout: 40_000 });
+    // The run result's h2 (RunResultHeader): "Transfer completed", or "... with quarantine / warnings".
+    await expect(page.getByRole("heading", { level: 2, name: /^Transfer completed/ })).toBeVisible({ timeout: 40_000 });
   });
 
   test("database source shows the configured schema tree", async ({ page }) => {
@@ -654,18 +688,19 @@ conn.commit()
   expect(inspector!.width).toBeGreaterThanOrEqual(240);
   expect(inspector!.height).toBeGreaterThanOrEqual(48);
 
+  // Overview is a checkable menu item: it says its state and the menu stays
+  // open while it is toggled (Radix CheckboxItem).
   await page.getByRole("button", { name: "More actions" }).click();
-  const overview = page.getByRole("menuitem", { name: "Overview", exact: true });
-  await expect(overview).toHaveAttribute("aria-pressed", "true");
+  const overview = page.getByRole("menuitemcheckbox", { name: "Overview", exact: true });
+  await expect(overview).toHaveAttribute("aria-checked", "true");
   await overview.click();
   await expect(minimap).toBeHidden();
-  await page.getByRole("button", { name: "More actions" }).click();
-  const overviewAgain = page.getByRole("menuitem", { name: "Overview", exact: true });
-  await overviewAgain.click();
+  await expect(overview).toHaveAttribute("aria-checked", "false");
+  await overview.click();
   await expect(minimap).toBeVisible();
-  await page.getByRole("button", { name: "More actions" }).click();
-  await expect(page.getByRole("menuitem", { name: "Overview", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await page.getByRole("button", { name: "More actions" }).click();
+  await expect(overview).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Escape");
+  await expect(overview).toBeHidden();
   await page.getByRole("button", { name: "Issues", exact: true }).click();
   const validation = page.getByRole("region", { name: "Issues" });
   await expect(validation.getByRole("button", { name: "Step 1 Valid" })).toBeVisible();
@@ -838,9 +873,9 @@ conn.commit()
     await expect(page.locator(".df2-transfer-analyzing-panel")).toBeHidden();
     await check("review");
 
-    await expect(page.getByRole("button", { name: /^Execute/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Run transfer/ })).toBeVisible();
 
-    const execute = page.getByRole("button", { name: /^Execute/ });
+    const execute = page.getByRole("button", { name: /^Run transfer/ });
     if (await execute.isEnabled()) await execute.click();
     await expect(page.getByRole("heading", { name: /Transfer complete|Run/ }).first()).toBeVisible();
     await check("run");
@@ -926,27 +961,27 @@ conn.commit()
     await page.getByRole("button", { name: /Continue to Destination/ }).click();
     await expect(page.getByRole("heading", { name: "Destination", exact: true })).toBeVisible();
     await expect(page.locator(".df2-source-step")).toHaveCount(0);
-    await page.getByRole("button", { name: "Back to source" }).click();
+    await page.getByRole("button", { name: "Back", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Detected structure", exact: true })).toBeVisible();
   });
 
   test("back from transform and review returns to connect without dropping the source", async ({ page }) => {
     await openStudio(page);
     await reachTransform(page);
-    await page.getByRole("button", { name: "Back to Connect" }).click();
+    await page.getByRole("button", { name: "Back to Destination" }).click();
     await expect(page.getByRole("heading", { name: "Transform", exact: true })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "Destination", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Back to source" }).click();
+    await page.getByRole("button", { name: "Back", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Detected structure", exact: true })).toBeVisible();
     await page.getByRole("button", { name: /Continue to Destination/ }).click();
     await page.getByRole("tab", { name: "File export" }).click();
     await page.getByRole("button", { name: /Continue to Review/ }).click();
     // The map title is hidden at laptop widths; the column filter is the review landmark.
     await expect(page.getByRole("tablist", { name: "Filter columns" })).toBeVisible({ timeout: 40_000 });
-    await page.getByRole("button", { name: "Back to Connect" }).click();
+    await page.getByRole("button", { name: "Back to Destination" }).click();
     await expect(page.getByRole("heading", { name: "Destination", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Detected structure", exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "Back to source" }).click();
+    await page.getByRole("button", { name: "Back", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Detected structure", exact: true })).toBeVisible();
   });
 
@@ -1263,6 +1298,23 @@ test.describe("schedules sync", () => {
       path: "/opt/cursor/artifacts/schedules-sync-confirmed-1440.png",
       fullPage: false,
     });
+  });
+
+  // The flake behind this suite's first-attempt failures: Jobs is a lazy screen,
+  // and the job to open was dropped 800 ms after the click. A cold browser took
+  // longer than that to load the Jobs code, so the page mounted without the job.
+  test("run now opens the new job even when the Jobs screen code loads slowly", async ({ page }) => {
+    await page.route(/\/(src\/pages\/JobsPage\.tsx|assets\/JobsPage-[^/]+\.js)(\?|$)/, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await route.continue();
+    });
+    await openSchedules(page);
+    await page.locator(".df2-pipeline-row").first().getByRole("button", { name: "Run now" }).click();
+    const dialog = page.getByRole("dialog", { name: "Run now" });
+    await dialog.getByRole("button", { name: "Run now" }).click();
+    await expect(page).toHaveURL(/#\/jobs/);
+    await expect(page.getByRole("heading", { name: "Nightly orders sync" })).toBeVisible();
+    await expect(page.locator("#job-item-job-child-91ab")).toBeVisible();
   });
 });
 

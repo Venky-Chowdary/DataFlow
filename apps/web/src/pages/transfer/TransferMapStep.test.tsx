@@ -84,7 +84,9 @@ describe("Map to Validate approval gate", () => {
     await render(safeUnapproved);
     const blocked = continueButton();
     assert.equal(blocked.disabled, true);
-    assert.match(blocked.title, /1 column\(s\) need Approve before Validate/);
+    // The reason is visible beside the button (P1-18), and is its description.
+    const reason = document.getElementById(blocked.getAttribute("aria-describedby") ?? "");
+    assert.match(reason?.textContent ?? "", /^Approve 1 column to continue$/);
     await act(async () => blocked.click());
     assert.equal(continueCount, 0);
 

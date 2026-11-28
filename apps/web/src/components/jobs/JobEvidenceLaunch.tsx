@@ -3,13 +3,13 @@
  * Keeps tab panes as clear overviews (not a wall of large cards).
  */
 import type { ReactNode } from "react";
-import { DtIcon } from "../DtIcon";
+import { DtIcon, type IconName } from "../DtIcon";
 
 export interface JobEvidenceLaunchItem {
   id: string;
   title: string;
   description: string;
-  icon: string;
+  icon: IconName;
   meta?: string;
   disabled?: boolean;
   tone?: "default" | "ok" | "warn" | "danger";

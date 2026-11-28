@@ -12,7 +12,8 @@
  * cards on this job; this tab links to them instead of drawing them twice.
  */
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { Info } from "lucide-react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
@@ -20,6 +21,9 @@ import { LoadingBlock } from "../LoadingState";
 import { useToast } from "../Toast";
 import { DifferenceSplitBar, ParityRing, TableParityBars } from "../charts/ParityCharts";
 import { SignoffPanel, type ParityBusy } from "./SignoffPanel";
+import { DifferenceExplorer } from "./DifferenceExplorer";
+import { VerificationCard } from "./VerificationCard";
+import { VerifiedAiSection } from "../trust/VerifiedAiSection";
 import {
   approveParityFix,
   dismissParityFix,
@@ -71,6 +75,7 @@ import {
   type ParityReport,
   type ParityTone,
 } from "../../lib/parity";
+import { explorableTables, reverifyTable, verificationRunning } from "../../lib/parityScale";
 
 /* ── Pieces ──────────────────────────────────────────────────── */
 
@@ -288,6 +293,18 @@ export interface TrustReportViewProps {
   pollStopped?: boolean;
   /** The job's status: a failed run that never reached verification is said plainly. */
   jobStatus?: string;
+  /** job.run: compare every row of one table again (Parity at Scale). */
+  canReverify?: boolean;
+  reverifyDeniedReason?: string;
+  /** Re-verify one table; the report then shows its verification running. */
+  onReverify?: (table: string) => void;
+  reverifyError?: string;
+  /** The automatic re-read while verification runs stopped at its limit. */
+  verificationPollStopped?: boolean;
+  /** Track W's AI decisions section, mounted as given (self-contained). */
+  aiDecisions?: ReactNode;
+  /** Verified AI evidence (Mapping Witness, AI decisions), mounted above sign-off. */
+  aiEvidence?: ReactNode;
 }
 
 function evidenceItems(report: ParityReport): Array<{ label: string; value: string; tone: ParityTone; detail?: string }> {
@@ -331,6 +348,13 @@ export function TrustReportView({
   onOpenDetail,
   pollStopped = false,
   jobStatus,
+  canReverify = false,
+  reverifyDeniedReason,
+  onReverify,
+  reverifyError,
+  verificationPollStopped = false,
+  aiDecisions,
+  aiEvidence,
 }: TrustReportViewProps) {
   const verdict = verdictPresentation(report);
   const { parity, confidence } = report;
@@ -339,11 +363,22 @@ export function TrustReportView({
   const openFixes = report.fixes.filter((f) => f.status === "proposed");
   const attemptsUsed = fixAttemptsUsed(report);
   const doneFixes = report.fixes.filter((f) => f.status !== "proposed");
-  const ringTone = report.verdict === "unexplained" ? "warn" : report.verdict === "unverifiable" ? "idle" : "ok";
+  const ringTone =
+    report.verdict === "unexplained" ? "warn" : report.verdict === "unverifiable" || report.verdict === "verifying" ? "idle" : "ok";
+  const verification = report.verification && report.verification.state !== "not_eligible" ? report.verification : null;
+  // Why the run was not compared at full scale; Gate-8's own verdict above stands unchanged.
+  const notVerifiedReason =
+    report.verification?.state === "not_eligible"
+      ? `${(report.verification.reason || "no comparison of every row was possible for this run").replace(/\.$/, "")}.`
+      : "";
+  const running = verificationRunning(report);
+  const explorable = running ? [] : explorableTables(verification);
   const signoffAnchor = `parity-signoff-${report.job_id}`;
   const shortcut = signoffShortcut(report);
   // The verdict pill is in the header; the notice says why it cannot be verified.
-  const notice = unverifiableNotice(report, jobStatus);
+  const stoppedVerification = report.verification?.state === "error";
+  // A verification that did not finish is explained once, on its own card below.
+  const notice = stoppedVerification ? null : unverifiableNotice(report, jobStatus);
   const reasonDetail = verdictReasonDetail(report);
   const differLabel = rowsDifferLabel(report);
   const kpis: Array<{ label: string; value: string; figure: boolean }> = [
@@ -431,6 +466,25 @@ export function TrustReportView({
         </p>
       )}
 
+      {notVerifiedReason && (
+        <p className="df2-pscale-banner" role="note">
+          <Info size={16} strokeWidth={2} aria-hidden="true" />
+          <span>Not verified at full scale: {notVerifiedReason}</span>
+        </p>
+      )}
+
+      {verification && (
+        <VerificationCard
+          verification={verification}
+          pollStopped={verificationPollStopped}
+          canReverify={canReverify}
+          reverifyDeniedReason={reverifyDeniedReason}
+          reverifying={busy?.kind === "reverify"}
+          onReverify={onReverify}
+          reverifyError={explorable.length ? undefined : reverifyError}
+        />
+      )}
+
       <div className="df2-parity-hero">
         <div className="df2-parity-card df2-parity-ring-card">
           <ParityRing
@@ -438,7 +492,9 @@ export function TrustReportView({
             tone={ringTone}
             lowerBound={parityIsLowerBound(report)}
             checked={parityRowsChecked(report)}
-            caption={parity.proven_equal_pct == null ? parityUnknownCaption(report) : undefined}
+            caption={
+              parity.proven_equal_pct == null ? (running ? "checking" : parityUnknownCaption(report)) : undefined
+            }
           />
         </div>
         <div className="df2-parity-card df2-parity-kpi-card">
@@ -466,6 +522,19 @@ export function TrustReportView({
           <p className="df2-parity-muted">No tables were checked in this run.</p>
         )}
       </section>
+
+      {explorable.length > 0 && onReverify && (
+        <DifferenceExplorer
+          jobId={report.job_id}
+          tables={explorable}
+          revision={`${report.verification?.finished_at ?? ""}|${report.version}`}
+          canReverify={canReverify}
+          reverifyDeniedReason={reverifyDeniedReason}
+          reverifying={busy?.kind === "reverify"}
+          reverifyError={reverifyError}
+          onReverify={onReverify}
+        />
+      )}
 
       <div className="df2-parity-grid2">
         <section className="df2-parity-card" aria-label="Differences">
@@ -595,6 +664,8 @@ export function TrustReportView({
         </div>
       </div>
 
+      {aiDecisions != null && <div className="df2-parity-ai-decisions">{aiDecisions}</div>}
+
       {report.rounds.length > 0 && (
         <section className="df2-parity-card" aria-label="Fix rounds">
           <h3 className="df2-parity-h3">Fix rounds</h3>
@@ -644,6 +715,8 @@ export function TrustReportView({
         </dl>
       </section>
 
+      {aiEvidence}
+
       <SignoffPanel
         report={report}
         busy={busy}
@@ -666,12 +739,20 @@ export interface TrustReportTabProps {
   jobStatus?: string;
   onOpenGate8?: () => void;
   onOpenDetail?: () => void;
+  /**
+   * Track W's AI decisions section for this report: mounted below the
+   * explanation as given. Omitted, the report shows no such section.
+   */
+  renderAiDecisions?: (ctx: { jobId: string; report: ParityReport }) => ReactNode;
 }
+
+/** How often, and for how long at most, the page re-reads while verification runs (30 minutes). */
+const VERIFY_POLL_LIMIT = 360;
 
 // Statuses of a run that has not finished (job_status UNFINISHED_JOB_STATUSES): no report yet.
 const IN_FLIGHT = new Set(["running", "pending", "queued", "retrying"]);
 
-export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: TrustReportTabProps) {
+export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail, renderAiDecisions }: TrustReportTabProps) {
   const { toast } = useToast();
   // Deciding a fix is a repair decision (the same as Repair proposals' decide): job.manage.
   const fixGate = useWriteGate(PERMISSIONS.jobManage, "approve or dismiss a fix");
@@ -680,11 +761,13 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
   // Signing attests the report: job.manage, and the API binds each sign-off role
   // to your role in the job's workspace (review finding 5).
   const signGate = useWriteGate(PERMISSIONS.jobManage, "sign off a trust report");
+  // Re-verifying reads both databases again: job.run, as the API enforces.
+  const reverifyGate = useWriteGate(PERMISSIONS.jobRun, "re-verify a table");
   const [report, setReport] = useState<ParityReport | null>(null);
   const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<ParityBusy>(null);
-  const [errors, setErrors] = useState<{ explain?: string; fix?: string; signoff?: string }>({});
+  const [errors, setErrors] = useState<{ explain?: string; fix?: string; signoff?: string; reverify?: string }>({});
   // Responses for a job the person has moved away from are dropped.
   const jobRef = useRef(jobId);
   jobRef.current = jobId;
@@ -750,6 +833,31 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
     return () => clearInterval(timer);
   }, [applying, load, pollEpoch]);
 
+  // Verification after the write runs on the server: re-read until it ends, bounded.
+  const verifying = report ? verificationRunning(report) : false;
+  const [verifyPollStopped, setVerifyPollStopped] = useState(false);
+  useEffect(() => {
+    setVerifyPollStopped(false);
+    if (!verifying) return;
+    let reads = 0;
+    const timer = setInterval(() => {
+      if (busyRef.current) return;
+      reads += 1;
+      const current = reportRef.current;
+      if (!current || !verificationRunning(current)) {
+        clearInterval(timer);
+        return;
+      }
+      if (reads > VERIFY_POLL_LIMIT) {
+        clearInterval(timer);
+        setVerifyPollStopped(true);
+        return;
+      }
+      void load();
+    }, PARITY_APPLYING_POLL_MS);
+    return () => clearInterval(timer);
+  }, [verifying, load, pollEpoch]);
+
   /**
    * Run one action at a time. Every control is disabled while it runs; the
    * response replaces the report only if it is newer, and a response that is
@@ -758,7 +866,7 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
   const run = useCallback(
     async (
       next: Exclude<ParityBusy, null>,
-      area: "explain" | "fix" | "signoff" | null,
+      area: "explain" | "fix" | "signoff" | "reverify" | null,
       call: () => Promise<ParityReport | void>,
       success?:
         | { title: string; message?: string }
@@ -788,6 +896,8 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
               ? "Could not complete this fix."
               : area === "signoff"
                 ? "Could not record your sign-off."
+                : area === "reverify"
+                  ? "Could not start verification of this table."
                 : next.kind === "export"
                   ? "Could not download the Markdown report."
                   : next.kind === "pack"
@@ -850,6 +960,7 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
   return (
     <TrustReportView
       report={report}
+      aiEvidence={<VerifiedAiSection jobId={jobId} />}
       busy={busy}
       canFix={fixGate.allowed}
       fixDeniedReason={fixGate.reason}
@@ -858,8 +969,25 @@ export function TrustReportTab({ jobId, jobStatus, onOpenGate8, onOpenDetail }: 
       canExplain={explainGate.allowed}
       errors={errors}
       pollStopped={pollStopped}
+      canReverify={reverifyGate.allowed}
+      reverifyDeniedReason={reverifyGate.reason}
+      reverifyError={errors.reverify}
+      verificationPollStopped={verifyPollStopped}
+      onReverify={(table) =>
+        void run(
+          { kind: "reverify" },
+          "reverify",
+          async () => {
+            await reverifyTable(jobId, table);
+            await load();
+          },
+          { title: `Verifying ${table} again`, message: "Every row is compared in both databases. The report updates when it finishes." },
+        )
+      }
+      aiDecisions={renderAiDecisions ? renderAiDecisions({ jobId, report }) : undefined}
       onRefresh={() => {
-        if (pollStopped) setPollEpoch((n) => n + 1); // a manual refresh restarts the bounded re-reads
+        // A manual refresh restarts the bounded re-reads (fix applying, verification running).
+        if (pollStopped || verifyPollStopped) setPollEpoch((n) => n + 1);
         void run({ kind: "refresh" }, null, () => fetchParityReport(jobId));
       }}
       onExplain={() =>

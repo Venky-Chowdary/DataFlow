@@ -39,9 +39,16 @@ def test_committed_snapshot_names_the_ci_run_it_came_from() -> None:
     assert str(doc.get("source_run") or "").startswith("https://github.com/"), doc.get("source_run")
     for engine, record in doc["engines"].items():
         assert record["live_verified"] == (record["status"] == "ci_green"), engine
-        for run in record.get("runs") or []:
-            if record["live_verified"]:
-                assert run["status"] == "green" and not run["engine_skips"], (engine, run)
+        if not record["live_verified"]:
+            continue
+        runs = record.get("runs") or []
+        # A live-verified engine has a green, skip-free proving run and no
+        # red one. An opt-in job that did not run (cdc-oracle without its
+        # secrets) is recorded as not_run beside it, never as a pass.
+        assert any(r["status"] == "green" for r in runs), (engine, runs)
+        for run in runs:
+            assert run["status"] in {"green", "not_run"}, (engine, run)
+            assert not run["engine_skips"], (engine, run)
 
 
 def test_generated_web_claims_match_the_evidence(monkeypatch) -> None:
@@ -66,9 +73,15 @@ def test_proven_count_is_the_evidence_not_a_constant(monkeypatch) -> None:
     assert claims["proven_count"] + claims["pending_count"] == len(declared)
     for driver in claims["proven_drivers"]:
         assert connector_proof.driver_proven(driver), driver
-    # Kafka and the vector stores have no proving CI job (CLM-11).
-    for driver in ("kafka", "qdrant", "weaviate", "pinecone", "milvus", "elasticsearch"):
+    # The vector stores and Elasticsearch have no proving CI job (CLM-11).
+    for driver in ("qdrant", "weaviate", "pinecone", "milvus", "elasticsearch"):
         assert driver in claims["pending_drivers"], driver
+    # Kafka and Oracle are proven only by their container jobs' green runs.
+    snap = connector_proof.evidence_snapshot()
+    for driver, job in (("kafka", "kafka-live"), ("oracle", "oracle-live")):
+        record = (snap.get("engines") or {}).get(driver) or {}
+        green_jobs = {r["job"] for r in record.get("runs") or [] if r["status"] == "green"}
+        assert (driver in claims["proven_drivers"]) == (job in green_jobs), (driver, green_jobs)
 
 
 def test_public_pages_carry_no_untraceable_evidence_block() -> None:
@@ -85,3 +98,21 @@ def test_public_pages_carry_no_untraceable_evidence_block() -> None:
         assert "_results.json" not in text, path  # artifacts that no longer ship
     evidence = (WEB / "lib" / "provenEvidence.ts").read_text(encoding="utf-8")
     assert 'from "./connectorClaims.generated"' in evidence
+
+
+def test_kafka_is_not_certified_until_kafka_live_is_green_twice_on_its_head_configuration(monkeypatch) -> None:
+    """Owner decision (review of feature/ci-live-oracle): one green kafka-live run
+    without the Redis peer is not enough. Kafka stays at its previous tier until
+    two consecutive green runs with the Redis peer; the lead flips it then."""
+    from services import connector_proof
+    from services.catalog_service import get_connector_by_id
+
+    monkeypatch.delenv(connector_proof.EVIDENCE_ENV, raising=False)
+    connector_proof.reset_cache()
+    claims = _report().build_claims()
+    assert "kafka" not in claims["proven_drivers"] and "kafka" in claims["pending_drivers"]
+    assert not connector_proof.driver_proven("kafka")
+    row = get_connector_by_id("kafka") or {}
+    assert row.get("certification_tier") != "certified", row.get("certification_tier")
+    # Oracle stays proven by oracle-live.
+    assert "oracle" in claims["proven_drivers"]

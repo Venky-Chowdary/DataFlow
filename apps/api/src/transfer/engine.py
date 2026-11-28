@@ -858,6 +858,7 @@ class UniversalTransferEngine:
             rollback_uncommitted_auto_creates,
         )
 
+        from services.oracle_session_scope import oracle_run_scope
         from services.source_engine_scope import bind_source_engine
 
         # Resolve first: a connector_id reference carries the engine id that
@@ -952,7 +953,9 @@ class UniversalTransferEngine:
         try:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
-            ), baseline_before_success(request, job_id) as pending_baseline:
+            ), oracle_run_scope(request, job_id, _probe_mongo), baseline_before_success(
+                request, job_id
+            ) as pending_baseline:
                 from services.destination_write_lock import hold_destination_write_lock
 
                 hold_destination_write_lock(request, job_id)  # released by tracked_job_scope
@@ -1811,7 +1814,7 @@ class UniversalTransferEngine:
                 dest_schema_types=dest_schema_types,
             )
             _record_schema_propagation(
-                mongo, job_id, columns, mappings, dest_schema_types
+                mongo, job_id, columns, mappings, dest_schema_types, request, records[:100]
             )
             mappings = _stamp_additive_mappings_for_write(
                 request,
@@ -3127,21 +3130,12 @@ class UniversalTransferEngine:
                     dest_summary=dest_summary,
                     recon=recon,
                 )
-            _settle_backup_after_error(request.destination, e)
+            _settle_backup_after_error(request.destination, e, request=request)
             finalize_contract(contract_id, success=False)
-            display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage, request=request
-            )
-            _undo_note = getattr(e, "failed_batch_undo_note", "")
-            if _undo_note and _undo_note not in display:
-                display = f"{display} {_undo_note}"
-            return TransferResult(
-                success=False,
-                job_id=job_id,
-                error=display,
-                error_details=error_details,
-                row_accounting=error_details.get("row_accounting") or {},
-                operation=request.operation,
+            from .engine_runtime_failure import runtime_failure_result
+
+            return runtime_failure_result(
+                _fail_runtime_job, mongo, job_id, e, lineage=lineage, request=request,
                 contract_id=contract_id,
             )
 
@@ -3312,7 +3306,7 @@ class UniversalTransferEngine:
                 dest_schema_types=dest_schema_types,
             )
             _record_schema_propagation(
-                mongo, job_id, columns, mappings, dest_schema_types
+                mongo, job_id, columns, mappings, dest_schema_types, request, sample_rows
             )
             mappings = _stamp_additive_mappings_for_write(
                 request,
@@ -4356,21 +4350,12 @@ class UniversalTransferEngine:
                     dest_summary=dest_summary,
                     recon=recon,
                 )
-            _settle_backup_after_error(request.destination, e)
+            _settle_backup_after_error(request.destination, e, request=request)
             finalize_contract(contract_id, success=False)
-            display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage, request=request
-            )
-            _undo_note = getattr(e, "failed_batch_undo_note", "")
-            if _undo_note and _undo_note not in display:
-                display = f"{display} {_undo_note}"
-            return TransferResult(
-                success=False,
-                job_id=job_id,
-                error=display,
-                error_details=error_details,
-                row_accounting=error_details.get("row_accounting") or {},
-                operation=request.operation,
+            from .engine_runtime_failure import runtime_failure_result
+
+            return runtime_failure_result(
+                _fail_runtime_job, mongo, job_id, e, lineage=lineage, request=request,
                 contract_id=contract_id,
             )
         finally:
@@ -4493,7 +4478,7 @@ class UniversalTransferEngine:
                 dest_schema_types=dest_schema_types,
             )
             _record_schema_propagation(
-                mongo, job_id, columns, mappings, dest_schema_types
+                mongo, job_id, columns, mappings, dest_schema_types, request, sample_rows
             )
             mappings = _stamp_additive_mappings_for_write(
                 request,
@@ -5192,21 +5177,12 @@ class UniversalTransferEngine:
                     dest_summary=dest_summary,
                     recon=recon,
                 )
-            _settle_backup_after_error(request.destination, e)
+            _settle_backup_after_error(request.destination, e, request=request)
             finalize_contract(contract_id, success=False)
-            display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage, request=request
-            )
-            _undo_note = getattr(e, "failed_batch_undo_note", "")
-            if _undo_note and _undo_note not in display:
-                display = f"{display} {_undo_note}"
-            return TransferResult(
-                success=False,
-                job_id=job_id,
-                error=display,
-                error_details=error_details,
-                row_accounting=error_details.get("row_accounting") or {},
-                operation=request.operation,
+            from .engine_runtime_failure import runtime_failure_result
+
+            return runtime_failure_result(
+                _fail_runtime_job, mongo, job_id, e, lineage=lineage, request=request,
                 contract_id=contract_id,
             )
         finally:

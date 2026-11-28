@@ -141,8 +141,13 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
     # The verdict is read first: a failed Gate-8 is failed however many rows
     # were fine. ``row_fidelity_score`` (0.999 = one bad row in a thousand) used
     # to be read before it and scored a failed job 89, grade B, tone ok.
+    boundary = recon.get("boundary_check") if isinstance(recon.get("boundary_check"), dict) else {}
+    accepted = boundary.get("status") == "accepted"
     if passed is False:
         recon_score = _FAILED_RECONCILE_SCORE
+    elif accepted:
+        # D335: possible boundary duplicates accepted for the route - explained, never verified.
+        recon_score = 60.0
     # A perfect score on the last table is not a perfect score for the job.
     elif last_stream:
         recon_score = 70.0
@@ -177,6 +182,12 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
     extra = int(recon.get("extra_key_count") or 0)
     if passed is False:
         r_note = str(recon.get("message") or "Gate-8 reconcile failed.")
+    elif accepted:
+        dups = boundary.get("duplicates")
+        r_note = (
+            f"boundary duplicates accepted by {boundary.get('actor')}: "
+            f"{'not measured' if dups is None else dups} this run ({boundary.get('reason')})."
+        )
     elif unproven:
         r_note = (
             "Gate-8 cell fidelity unproven (file/object export or skipped read-back) "
@@ -323,6 +334,15 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
     else:
         outcome = 55.0
         outcome_note = "In progress — score is provisional."
+    # Gate-8 covers the columns the run wrote; name the ones it left out, and
+    # never score a column nobody decided on as full completeness (R9).
+    from services.column_coverage_report import column_coverage_of, undecided_columns
+
+    left_out = column_coverage_of(j) if status in {"completed", "success"} else None
+    if left_out:
+        outcome_note = f"{outcome_note} {left_out['statement']}"
+        if undecided_columns(left_out):
+            outcome = min(outcome, 78.0)
     factors.append({
         "id": "completeness",
         "label": "Completeness",

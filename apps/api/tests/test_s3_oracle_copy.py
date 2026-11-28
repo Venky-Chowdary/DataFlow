@@ -26,6 +26,7 @@ from services.copy_sqlite_oracle import (  # noqa: E402
 )
 from services.copy_sqlite_s3 import copy_sqlite_to_s3  # noqa: E402
 from services.dest_precount import destination_row_count  # noqa: E402
+from tests.helpers.live_env import oracle_creds, oracle_dsn  # noqa: E402
 
 
 def _oracle_password() -> str:
@@ -40,6 +41,12 @@ def _oracle_password() -> str:
     if path.is_file():
         return path.read_text().strip()
     return "dataflow"
+
+
+def _ora_live() -> dict:
+    """Oracle from the environment (the oracle-live CI job exports DATAFLOW_ORACLE_*),
+    else the compose desktop lab's XE (XEPDB1)."""
+    return {**oracle_creds(default_service="XEPDB1"), "password": _oracle_password()}
 
 
 def _ora_or_skip():
@@ -84,13 +91,13 @@ def _s3_cfg(bucket: str, key: str) -> dict:
 
 def _ora_cfg() -> dict:
     return {
-        "host": "127.0.0.1",
-        "port": 1521,
-        "database": "XEPDB1",
-        "service_name": "XEPDB1",
-        "username": "dataflow",
-        "password": _oracle_password(),
-        "schema": "DATAFLOW",
+        "host": _ora_live()["host"],
+        "port": _ora_live()["port"],
+        "database": _ora_live()["database"],
+        "service_name": _ora_live()["database"],
+        "username": _ora_live()["username"],
+        "password": _ora_live()["password"],
+        "schema": _ora_live()["schema"],
     }
 
 
@@ -99,9 +106,9 @@ def _ora_connect():
     oracledb = pytest.importorskip("oracledb")
     try:
         return oracledb.connect(
-            user="dataflow",
-            password=_oracle_password(),
-            dsn="127.0.0.1:1521/XEPDB1",
+            user=_ora_live()["username"],
+            password=_ora_live()["password"],
+            dsn=oracle_dsn(_ora_live()),
         )
     except Exception as exc:
         pytest.skip(f"Oracle auth failed: {exc}")

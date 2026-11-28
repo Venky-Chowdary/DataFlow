@@ -483,6 +483,77 @@ def verify_body(
 def classify_post_write_assurance(
     reconciliation: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """Gate-8's classification, upgraded by a Parity at Scale scan that compared every row.
+
+    A scan recorded on ``reconciliation.parity_at_scale`` (phase 3, behind
+    ``DATAWRAP_PARITY_SCALE``) is an independent re-read of both populations.
+    It upgrades the claim to a full population proof (provenance
+    ``engine_segment_digest``) only where Gate-8 itself was merely
+    coverage-limited (it passed, nothing vetoed it, it claimed no more than a
+    sample): it never overrides a failed Gate-8, a fidelity veto (coerced
+    cells, a failed ladder layer) or a narrower scope. A scan that found
+    differences never adds to the claim.
+    """
+    base = _classify_gate8_assurance(reconciliation)
+    recon = reconciliation if isinstance(reconciliation, dict) else {}
+    scan = recon.get("parity_at_scale")
+    if not isinstance(scan, dict):
+        return base
+    if scan.get("outcome") == "differences_found":
+        return {**base, "migration_proven": False, "population_proof": False,
+                "note": f"{base.get('note') or ''} Parity at Scale compared every row and found differences "
+                        "(see the Trust Report).".strip()}
+    if scan_upgrades_assurance(recon, base):
+        return {**base, "claim_level": "full_checksum", "post_write_verified": True, "migration_proven": True,
+                "population_proof": True, "checksum_match": True,
+                "source_checksum_provenance": "engine_segment_digest",
+                "note": "Every row compared inside both databases (Parity at Scale) and none differs."}
+    return base
+
+
+#: Gate-8 claims a coverage-limited run ends with; anything else is decided by Gate-8 alone.
+_UPGRADABLE_CLAIMS = frozenset({"none", "sample"})
+
+
+def scan_upgrades_assurance(reconciliation: dict[str, Any] | None, base: dict[str, Any] | None = None) -> bool:
+    """True when a Parity at Scale scan may replace Gate-8's claim with a full population proof."""
+    recon = reconciliation if isinstance(reconciliation, dict) else {}
+    if not scan_proves_population(recon):
+        return False
+    if recon.get("passed") is not True or fidelity_veto(recon) is not None:
+        return False
+    coverage_limited = bool(recon.get("coverage_limit")) or (
+        recon.get("verification_verdict_qualifier") == "coverage_limited")
+    if not coverage_limited:
+        return False
+    base = base if base is not None else _classify_gate8_assurance(recon)
+    return base.get("claim_level") in _UPGRADABLE_CLAIMS
+
+
+def scan_proves_population(reconciliation: dict[str, Any] | None) -> bool:
+    """A Parity at Scale scan that may stand as a full population proof (design §4.2).
+
+    Every unit compared, nothing differs, every in-engine column kind
+    certified for the server pair, and each side read from one snapshot
+    (consistency ``pinned``): without that, writes during the scan were not
+    ruled out and the match proves only that the tables matched at scan time.
+    """
+    recon = reconciliation if isinstance(reconciliation, dict) else {}
+    scan = recon.get("parity_at_scale")
+    if not isinstance(scan, dict):
+        return False
+    consistency = scan.get("consistency") if isinstance(scan.get("consistency"), dict) else {}
+    return (
+        scan.get("outcome") == "match"
+        and scan.get("complete") is True
+        and scan.get("certified") is True
+        and consistency.get("kind") == "pinned"
+    )
+
+
+def _classify_gate8_assurance(
+    reconciliation: dict[str, Any] | None,
+) -> dict[str, Any]:
     """Classify Gate-8 evidence — never invent migration_proven from samples/preview.
 
     claim_level:
@@ -812,9 +883,13 @@ def collect_accepted_risks_from_job(job: dict[str, Any] | None) -> list[dict[str
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
 
+    from services.migration_risk_contract import verify_risk_contract
+
     def _absorb(raw: Any) -> None:
         if not isinstance(raw, dict):
             return
+        if not verify_risk_contract(raw):
+            return  # a contract this server did not sign is not an accepted risk
         rid = str(raw.get("risk_id") or "").strip()
         key = rid or canonical_json(raw)
         if key in seen:
@@ -822,13 +897,17 @@ def collect_accepted_risks_from_job(job: dict[str, Any] | None) -> list[dict[str
         seen.add(key)
         out.append(dict(raw))
 
+    from services.oracle_empty_not_null import CONTRACT_KEY
+
     for m in job.get("mappings") or []:
         if isinstance(m, dict):
             _absorb(m.get("risk_contract") or m.get("riskContract"))
+            _absorb(m.get(CONTRACT_KEY))
     pf = job.get("preflight") if isinstance(job.get("preflight"), dict) else {}
     for m in pf.get("mappings") or []:
         if isinstance(m, dict):
             _absorb(m.get("risk_contract") or m.get("riskContract"))
+            _absorb(m.get(CONTRACT_KEY))
     pb = pf.get("proof_bundle") if isinstance(pf.get("proof_bundle"), dict) else {}
     for raw in pb.get("accepted_risks") or pb.get("risk_contracts") or []:
         _absorb(raw)
@@ -950,7 +1029,9 @@ def proof_pack_evidence_completeness_errors(
         recon = reconciliation if isinstance(reconciliation, dict) else {}
         src = str(recon.get("source_checksum") or "").strip()
         tgt = str(recon.get("target_checksum") or "").strip()
-        if not src or not tgt or src != tgt:
+        # A complete, certified, pinned Parity at Scale match is an independent
+        # re-read of both populations, compared unit by unit (digests per segment).
+        if (not src or not tgt or src != tgt) and not scan_upgrades_assurance(recon):
             errors.append(
                 "migration_proven refused: independent matching checksums required"
             )
@@ -1013,6 +1094,7 @@ def build_signed_proof_pack(
     timing: dict[str, Any] | None = None,
     parity: dict[str, Any] | None = None,
     workspace_id: str | None = None,
+    ai_decisions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
@@ -1141,6 +1223,9 @@ def build_signed_proof_pack(
     from services.ai_egress import proof_pack_ai_egress
 
     body["ai_egress"] = proof_pack_ai_egress(job_id)
+    if ai_decisions is not None:
+        # Every AI proposal on the job and what became of it (services.ai_decision_ledger).
+        body["ai_decisions"] = ai_decisions
     # Normalize before anchoring: the anchor commits to the digest of the body,
     # and that has to be the digest of the body as exported.
     body = json_ready_body(body)
@@ -1447,7 +1532,14 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         timing=_timing_for_pack(dest),
         parity=parity_section_for_pack(job),
         workspace_id=str(job.get("workspace_id") or "") or None,
+        ai_decisions=_ai_decisions_for_pack(job),
     )
+
+
+def _ai_decisions_for_pack(job: dict[str, Any]) -> dict[str, Any]:
+    from services.ai_decision_ledger import ledger_for_pack
+
+    return ledger_for_pack(str(job.get("_id") or job.get("id") or ""), job)
 
 
 def parity_section_for_pack(job: dict[str, Any]) -> dict[str, Any] | None:
@@ -1516,5 +1608,13 @@ def build_signed_parity_pack(
         # later reading under other rules is not "drift since signing".
         "fingerprint_version": FINGERPRINT_VERSION,
         "parity": report,
+        # Every AI proposal on the job and what became of it, sealed with the report.
+        "ai_decisions": _parity_ai_decisions(job_id),
     }
     return sign_body(body, subject=pack_subject(body), workspace_id=workspace_id)
+
+
+def _parity_ai_decisions(job_id: str) -> dict[str, Any]:
+    from services.ai_decision_ledger import ledger_for_pack
+
+    return ledger_for_pack(job_id)

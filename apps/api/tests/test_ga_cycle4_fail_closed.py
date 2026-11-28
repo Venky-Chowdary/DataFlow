@@ -31,7 +31,7 @@ def test_hydrate_stamps_destination_table_on_unsigned_draft():
     assert out["table"] == "orders"
     assert out["migration_id"] == "mig-1"
     assert out["loss_classification"]
-    assert out["signature"].startswith("mrc-sha256:")
+    assert out["signature"].startswith("mrc-hmac:")
 
 
 def test_proof_pack_strips_proven_when_accepted_risks_missing():

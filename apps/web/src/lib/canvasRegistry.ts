@@ -8,6 +8,7 @@
  * executable join does not need a new canvas.
  */
 
+import type { IconName } from "../components/icons/iconMap";
 import {
   type ShapeCatalog,
   type ShapeOperation,
@@ -46,7 +47,7 @@ export interface NodeSpec {
   family: string;
   familyLabel: string;
   stripe: NodeStripe;
-  icon: string;
+  icon: IconName;
   executable: boolean;
   placement: NodePlacement;
   reason: string;
@@ -116,7 +117,7 @@ const SHORT: Record<string, string> = {
 };
 
 /** One stroke icon per operation. Unknown ops fall back to the family glyph. */
-const ICONS: Record<string, string> = {
+const ICONS: Record<string, IconName> = {
   drop_column: "trash",
   keep_columns: "layers",
   rename_column: "rename",
@@ -225,7 +226,7 @@ export function stripeFor(family: string): NodeStripe {
   return "values";
 }
 
-export function iconFor(op: string, family = ""): string {
+export function iconFor(op: string, family = ""): IconName {
   if (ICONS[op]) return ICONS[op];
   if (family === "structural") return "layers";
   if (family === "rows") return "activity";

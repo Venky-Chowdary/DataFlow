@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { launchStageState, ringDasharray, stagePercent, validateRingPercent } from "./progressRing.js";
+import { launchStageState, ratioPercent, ringDasharray, stagePercent, validateRingPercent } from "./progressRing.js";
 
 describe("progressRing", () => {
   it("closes the dash at 100% instead of leaving a mid-ring gap", () => {
@@ -41,6 +41,35 @@ describe("progressRing", () => {
       blockedCount: 0,
     });
     assert.equal(live.indeterminate, true);
+  });
+
+  it("P0-4: 16/22 passed · 5 skipped · 1 review reads 94%, not 100%", () => {
+    const ring = validateRingPercent({
+      running: false,
+      passed: true,
+      decision: "approve",
+      passedCount: 16,
+      blockedCount: 0,
+      totalCount: 22,
+      skippedCount: 5,
+      reviewCount: 1,
+    });
+    assert.deepEqual(ring, { pct: 94, indeterminate: false });
+    // A review decision with nothing left in review fills the ring only because every applicable gate passed.
+    assert.equal(validateRingPercent({ running: false, passed: true, decision: "review", passedCount: 17, blockedCount: 0, totalCount: 22, skippedCount: 5 }).pct, 100);
+    // The decision alone never fills the ring.
+    assert.equal(validateRingPercent({ running: false, passed: true, decision: "review", passedCount: 5, blockedCount: 0, reviewCount: 3 }).pct, 63);
+    // Blocked gates count against it, skipped ones do not.
+    assert.equal(validateRingPercent({ running: false, passed: false, decision: "block", passedCount: 10, blockedCount: 2, totalCount: 15, skippedCount: 3 }).pct, 83);
+  });
+
+  it("never rounds a partial pass up to 100%", () => {
+    assert.equal(ratioPercent(199, 200), 99);
+    assert.equal(ratioPercent(200, 200), 100);
+    assert.equal(ratioPercent(0, 22), 0);
+    assert.equal(ratioPercent(3, 0), 0);
+    const nearly = validateRingPercent({ running: false, passed: true, decision: "approve", passedCount: 999, blockedCount: 0, totalCount: 1000 });
+    assert.equal(nearly.pct, 99);
   });
 
   it("maps completed stages to percent without invented mid values", () => {

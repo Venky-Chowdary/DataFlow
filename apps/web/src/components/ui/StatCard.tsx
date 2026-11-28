@@ -1,11 +1,11 @@
-import { DtIcon } from "../DtIcon";
+import { DtIcon, type IconName } from "../DtIcon";
 
 interface StatCardProps {
   label: string;
   value: string | number;
   tone?: "default" | "blue" | "green" | "red" | "teal";
   sub?: string;
-  icon?: string;
+  icon?: IconName;
 }
 
 export function StatCard({ label, value, tone = "default", sub, icon }: StatCardProps) {

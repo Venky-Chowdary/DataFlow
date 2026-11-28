@@ -32,8 +32,10 @@ import contextvars
 import logging
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Callable, Iterator
+
+from services import schedule_clock
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ _CURRENT_RUN: contextvars.ContextVar[tuple[str, str] | None] = contextvars.Conte
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return schedule_clock.utc_now().isoformat()
 
 
 def _parse(value: Any) -> datetime | None:
@@ -424,7 +426,7 @@ def _skip_is_fresh(sched: Any, code: str, reason: str) -> bool:
     if idx < 0:
         return False
     seen = _parse(history[idx].get("last_seen_at") or history[idx].get("finished_at"))
-    return seen is not None and datetime.now(timezone.utc) - seen < _SKIP_REFRESH
+    return seen is not None and schedule_clock.utc_now() - seen < _SKIP_REFRESH
 
 
 def _skip_patch(sched: Any, entry: dict[str, Any]) -> dict[str, Any] | None:
@@ -624,7 +626,7 @@ def _sweep_one(sched: Any, row: dict[str, Any], job_is_live: Callable, dispatchi
 
     run_id = str(row.get("run_id") or "")
     job_id = str(row.get("job_id") or "")
-    now = datetime.now(timezone.utc)
+    now = schedule_clock.utc_now()
     seen = _parse(row.get("heartbeat_at") or row.get("started_at") or row.get("created_at"))
     age = (now - seen) if seen else timedelta.max
     if job_id:

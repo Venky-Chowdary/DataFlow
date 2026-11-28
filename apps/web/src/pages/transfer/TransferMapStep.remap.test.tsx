@@ -10,6 +10,10 @@ Object.assign(globalThis, {
   HTMLElement: dom.window.HTMLElement,
   Node: dom.window.Node,
   KeyboardEvent: dom.window.KeyboardEvent,
+  // The More menu (Radix) dispatches DOM CustomEvents and measures its trigger.
+  CustomEvent: dom.window.CustomEvent,
+  Element: dom.window.Element,
+  getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   MutationObserver: dom.window.MutationObserver,
   localStorage: dom.window.localStorage,
   sessionStorage: dom.window.sessionStorage,
@@ -262,7 +266,8 @@ describe("Map step: remap onto existing destination columns", () => {
     assert.match(full.textContent ?? "", /new rows get NULL/);
     assert.match(q('[data-testid="map-target-issues"]').textContent ?? "", /given_name is NOT NULL with no default/);
     assert.equal(continueButton().disabled, true);
-    assert.match(continueButton().title, /given_name/);
+    const reason = document.getElementById(continueButton().getAttribute("aria-describedby") ?? "");
+    assert.match(reason?.textContent ?? "", /Map 1 required destination column: given_name/);
   });
 
   it("picking a column another source writes moves it (one source per target) and undo restores both", async () => {
@@ -661,7 +666,9 @@ describe("Map step counts on screen come from one selector (W6 round 2)", () => 
     await render(ORDERS().map((r) => ({ ...r, approved: false })));
     const tabs = Array.from(q('[role="tablist"][aria-label="Filter columns"]').querySelectorAll('[role="tab"]'))
       .map((t) => t.textContent ?? "");
-    assert.deepEqual(tabs, ["All (4)", "Needs attention (0)", "Ready (4)"]);
+    // P1-18: the two NOT NULL destination columns that block Validate count
+    // under Needs attention too, so the tab never reads 0 while Continue is held.
+    assert.deepEqual(tabs, ["All (4)", "Needs attention (2)", "Ready (4)"]);
     const approve = Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find((b) => /Approve eligible/.test(b.textContent ?? ""));
     assert.match(approve?.textContent ?? "", /Approve eligible \(4\)/);
     const review = q<HTMLButtonElement>('[role="toolbar"][aria-label="Mapping actions"] button[aria-keyshortcuts="R"]');

@@ -1,12 +1,16 @@
-"""C3 live proof on Oracle (CI ``cdc-oracle`` job: Oracle only, opt-in).
+"""C3 live proof on Oracle (CI ``oracle-live`` job, and ``cdc-oracle`` when configured).
 
 An Oracle ``DATE`` keeps a time of day to the second. From a live Oracle table:
 
-* the catalog type the product introspects, with the row's live time of day,
-  is graded ``lossy_cast`` by the Validate verdict into an existing PostgreSQL
-  ``DATE``, and create-new picks ``TIMESTAMP(0)`` (graded clean);
-* real engine path into a SQLite file (the only destination that job has): an
-  existing ``DATE`` column is refused at Validate; create-new keeps the time.
+* the product introspects it as a timestamp carrier (``DATE`` or the logical
+  ``TIMESTAMP`` it maps Oracle DATE to, services/schema_introspect_enterprise),
+  and with the row's live time of day the Validate verdict into an existing
+  PostgreSQL ``DATE`` is ``lossy_cast``; create-new picks ``TIMESTAMP(0)``;
+* real engine path: an existing PostgreSQL ``DATE`` column (date only) is
+  refused at Validate and nothing is written; create-new into a SQLite file
+  keeps the time. (The existing-column leg first used a SQLite ``DATE``
+  column, but SQLite has no date-only storage, so nothing is lost there and
+  the product rightly does not refuse; oracle-live run 44917786754.)
 
 Skips unless ``DATAFLOW_ORACLE_ENABLE=1`` and the ``DATAFLOW_ORACLE_*`` login are set.
 """
@@ -93,7 +97,7 @@ def test_live_oracle_date_is_graded_by_what_oracle_stores(oracle_dates):
     cfg = _cfg()
     types = _introspect_table_schema("oracle", cfg, oracle_dates, ["ID", "AT"])
     declared = types.get("AT") or types.get("at") or ""
-    assert declared.upper().startswith("DATE"), types
+    assert declared.upper().startswith(("DATE", "TIMESTAMP")), types
     live = sqlalchemy_sql(cfg, f"SELECT TO_CHAR(AT, 'YYYY-MM-DD HH24:MI:SS') FROM {oracle_dates}", fetch=True)
     assert live == [("2024-03-10 13:45:07",)], live  # the time of day is stored
 
@@ -105,7 +109,10 @@ def test_live_oracle_date_is_graded_by_what_oracle_stores(oracle_dates):
         )
         carrier = create_new_mapping_target_type(declared, "postgresql", source_db="oracle")
     assert verdict["verdict"] == "lossy_cast" and verdict["requires_risk_contract"], verdict
-    assert carrier == "TIMESTAMP(0)", carrier
+    # From the catalog's DATE the carrier is TIMESTAMP(0); from the TIMESTAMP
+    # carrier the product introspects Oracle DATE as, a TIMESTAMP: both keep
+    # the time of day, which is the C3 claim.
+    assert carrier.upper().startswith("TIMESTAMP"), carrier
 
 
 def test_live_oracle_date_into_existing_date_is_refused_and_create_new_keeps_time(
@@ -113,14 +120,16 @@ def test_live_oracle_date_into_existing_date_is_refused_and_create_new_keeps_tim
 ):
     from src.transfer.models import EndpointConfig
 
-    refused_db = tmp_path / "refused.sqlite"
-    with sqlite3.connect(refused_db) as conn:
-        conn.execute(f"CREATE TABLE {oracle_dates} (ID INTEGER PRIMARY KEY, AT DATE)")
-    dest = EndpointConfig(kind="database", format="sqlite", database=str(refused_db), table=oracle_dates)
-    result = run_transfer(isolated, _endpoint(oracle_dates), dest)
-    assert refused_at_validate(result, "AT"), result.error
-    with sqlite3.connect(refused_db) as conn:
-        assert conn.execute(f"SELECT count(*) FROM {oracle_dates}").fetchone()[0] == 0
+    from tests.c3_live_helpers import pg_endpoint, pg_sql
+
+    pg_sql(f'DROP TABLE IF EXISTS public."{oracle_dates}"')
+    pg_sql(f'CREATE TABLE public."{oracle_dates}" ("ID" BIGINT PRIMARY KEY, "AT" DATE)')
+    try:
+        result = run_transfer(isolated, _endpoint(oracle_dates), pg_endpoint(oracle_dates))
+        assert refused_at_validate(result, "AT"), result.error
+        assert pg_sql(f'SELECT count(*) FROM public."{oracle_dates}"', fetch=True)[0][0] == 0
+    finally:
+        pg_sql(f'DROP TABLE IF EXISTS public."{oracle_dates}"')
 
     created_db = tmp_path / "created.sqlite"
     dest = EndpointConfig(kind="database", format="sqlite", database=str(created_db), table=oracle_dates)

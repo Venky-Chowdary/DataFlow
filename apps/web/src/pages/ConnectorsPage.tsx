@@ -337,7 +337,7 @@ export function ConnectorsPage({
                   disabled={testingAll || !connectorWrite.allowed}
                   title={connectorWrite.reason || undefined}
                   onClick={() => void handleTestAll()}
-                  leadingIcon={<DtIcon name="activity" size={14} />}
+                  leadingIcon={<DtIcon name="test-connection" size={14} />}
                 >
                   Test all
                 </Button>

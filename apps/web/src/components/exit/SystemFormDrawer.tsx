@@ -8,6 +8,7 @@ import { connectorNameWithEngine } from "../../lib/connectorTypes";
 import { useEffect, useId, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
+import { Callout } from "../ui/Callout";
 import { Drawer } from "../ui/Drawer";
 import {
   CRITICALITIES,
@@ -119,10 +120,9 @@ export function SystemFormDrawer({
         noValidate
       >
         {submitError && (
-          <p className="df2-parity-notice is-danger" role="alert">
-            <DtIcon name="alert" size={14} />
-            <span>{submitError}</span>
-          </p>
+          <Callout tone="danger" role="alert" title="Could not save the system.">
+            <p>{submitError}</p>
+          </Callout>
         )}
 
         <fieldset className="df2-exit-fieldset">

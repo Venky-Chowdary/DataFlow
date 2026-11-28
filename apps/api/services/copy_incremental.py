@@ -1429,6 +1429,11 @@ def copy_between_postgres_incremental(
     try:
         dest_conn.autocommit = False
         with dest_conn.cursor() as dst_cur:
+            from services.copy_fast_path import _pair_source_types, pg_lock_and_check_live_types
+
+            pg_lock_and_check_live_types(
+                dst_cur, dest_schema, dest_table, _pair_source_types(pairs, shape.types)
+            )
             out = _apply_staging_to_pg(
                 dst_cur,
                 dest_ref=dest_ref,

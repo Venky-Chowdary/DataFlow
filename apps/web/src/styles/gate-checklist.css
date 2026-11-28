@@ -1,0 +1,153 @@
+/*
+ * Validate checklist (components/transfer/GateChecklist.tsx). Tokens only.
+ * Failed and could-not-run differ in glyph, word and tone: failed is red,
+ * could-not-run is neutral with a dashed glyph. No side stripes.
+ */
+.df2-checklist-summary { color: var(--df-text-secondary); }
+.df2-check-group { margin-top: var(--df-space-3); }
+.df2-check-group-title {
+  margin: 0;
+  font-size: var(--df-fs-field);
+  font-weight: var(--df-fw-semibold);
+}
+.df2-check-group-title button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--df-space-2);
+  min-height: 32px;
+  padding: 0 var(--df-space-2) 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--df-text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.df2-check-group-title button:focus-visible,
+.df2-check:focus-visible {
+  outline: 2px solid var(--df-focus-ring);
+  outline-offset: 2px;
+}
+.df2-check-group-count {
+  min-width: 22px;
+  padding: 0 var(--df-space-2);
+  border-radius: var(--df-radius-pill);
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-chip);
+  font-weight: var(--df-fw-medium);
+  line-height: 20px;
+  text-align: center;
+}
+.df2-check-list {
+  display: grid;
+  gap: var(--df-space-2);
+  margin: var(--df-space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.df2-check {
+  --check-ink: var(--df-text-tertiary);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--df-space-3);
+  align-items: start;
+  padding: var(--df-space-3);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+}
+.df2-check[data-outcome="blocking"] {
+  --check-ink: var(--df-danger-text);
+  border-color: var(--df-danger-border);
+  background: color-mix(in srgb, var(--df-danger-bg) 55%, var(--df-surface));
+}
+.df2-check[data-outcome="could_not_run"] {
+  --check-ink: var(--df-text-secondary);
+  border-style: dashed;
+  border-color: var(--df-border-strong);
+}
+.df2-check[data-outcome="review"] {
+  --check-ink: var(--df-warning-text);
+  border-color: var(--df-warning-border);
+}
+.df2-check[data-outcome="passed"] { --check-ink: var(--df-success-text); }
+.df2-check[data-outcome="passed"],
+.df2-check[data-outcome="not_applicable"] {
+  padding: var(--df-space-2) var(--df-space-3);
+}
+.df2-check-icon { display: inline-flex; padding-top: 2px; color: var(--check-ink); }
+.df2-check-body { min-width: 0; }
+.df2-check-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--df-space-1) var(--df-space-2);
+  margin: 0;
+}
+.df2-check-label { font-weight: var(--df-fw-semibold); color: var(--df-text-primary); }
+.df2-check-code {
+  color: var(--df-text-secondary);
+  font-family: var(--df-font-mono, ui-monospace, monospace);
+  font-size: var(--df-fs-chip);
+}
+.df2-check-word {
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-chip);
+  font-weight: var(--df-fw-medium);
+}
+.df2-check[data-outcome="blocking"] .df2-check-word { color: var(--df-danger-text); }
+.df2-check-message,
+.df2-check-scope {
+  margin: var(--df-space-1) 0 0;
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-field);
+  overflow-wrap: anywhere;
+}
+.df2-check-scope { font-size: var(--df-fs-chip); }
+.df2-check-findings {
+  display: grid;
+  gap: 2px;
+  margin: var(--df-space-2) 0 0;
+  padding-left: var(--df-space-4);
+  color: var(--df-text-primary);
+  font-size: var(--df-fs-field);
+  overflow-wrap: anywhere;
+}
+.df2-check-more {
+  margin-top: var(--df-space-1);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--df-brand-text);
+  font: inherit;
+  font-size: var(--df-fs-chip);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.df2-check-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--df-space-1);
+}
+.df2-check-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--df-space-1);
+  min-height: 28px;
+  padding: 0 var(--df-space-2);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  font: inherit;
+  font-size: var(--df-fs-chip);
+  font-weight: var(--df-fw-medium);
+  cursor: pointer;
+}
+.df2-check-action:hover { background: var(--df-surface-muted); }
+.df2-check-action:focus-visible { outline: 2px solid var(--df-focus-ring); outline-offset: 2px; }
+@media (max-width: 639px) {
+  .df2-check { grid-template-columns: auto minmax(0, 1fr); }
+  .df2-check-actions { grid-column: 2; justify-content: flex-start; }
+}

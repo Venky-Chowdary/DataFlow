@@ -12,6 +12,22 @@ from services.safe_errors import classified_http_exception
 router = APIRouter(prefix="/ops", tags=["Ops"])
 
 
+@router.get("/risk-contract-upgrade-report")
+async def get_risk_contract_upgrade_report(request: Request) -> dict[str, Any]:
+    """Risk approvals made before this release, which no longer count (workspace admins).
+
+    Each entry names the schedule, plan or job and the route whose approval
+    must be re-approved in Validate before it runs again
+    (services.risk_contract_store); as of the last start of the API.
+    """
+    from services.risk_contract_store import upgrade_report
+    from services.workspace_access import tenant_scope
+
+    scope = tenant_scope(request).single_workspace_filter()
+    entries = [e for e in upgrade_report() if scope.matches(e.get("workspace_id"))]
+    return {"entries": entries, "count": len(entries)}
+
+
 @router.get("/freshness")
 async def get_freshness(
     request: Request,
@@ -50,6 +66,20 @@ async def get_metrics_json(request: Request):
     from services.workspace_access import tenant_scope
 
     return snapshot(workspace_filter=tenant_scope(request).single_workspace_filter())
+
+
+@router.get("/validate-execute")
+def get_validate_execute(request: Request):
+    """Validate verdict vs Execute outcome for this workspace's runs (Accuracy A7).
+
+    Counts and rates only (no job ids, table names or messages). Platform
+    admins without a workspace header see every workspace. A plain ``def``:
+    the ledger read runs on the thread pool, not the event loop.
+    """
+    from services.validate_execute_ledger import aggregate
+    from services.workspace_access import tenant_scope
+
+    return aggregate(tenant_scope(request).single_workspace_filter())
 
 
 @router.get("/dlq")

@@ -397,6 +397,71 @@ export function incompleteRehearsal(): ExitRehearsal {
   };
 }
 
+/** The API's refusal when a Cloud deployment has no export bucket (services/exit_rehearsal.extract_destination_refusal). */
+export const NO_EXPORT_BUCKET_REASON =
+  "Exit rehearsals on Datawrap Cloud write each table's extract to this deployment's private export bucket, and none is configured, so no table can be extracted. An administrator can set the export bucket (DATAWRAP_EXPORT_BUCKET and its DATAWRAP_EXPORT_S3_ settings), or run the rehearsal on Datawrap self-hosted, where DATAWRAP_LOCAL_FILE_DESTINATIONS=on keeps extracts on disk.";
+
+/**
+ * The owner's production case (QAV4-exit-pg, rehearsal 1): the only table failed before an extract job
+ * existed, so verify() ran over zero extracted tables and still reported "done" with its wall-clock time;
+ * seal stayed pending with start == end (0 s); the definition changed afterwards. Shaped exactly as
+ * services/exit_rehearsal.public() and timeline() build it.
+ */
+export function noExportBucketRehearsal(): ExitRehearsal {
+  const table = {
+    name: "qav4_seed", schema: null, job_id: null, status: "failed", reason: NO_EXPORT_BUCKET_REASON, pii_held: [],
+    rows_source: null, rows_extracted: null, key_columns: ["id"],
+    key_set: { source_sha256: null, extract_sha256: null, match: null },
+    row_set: { source_sha256: null, extract_sha256: null, match: null },
+    control_totals: [], differences: [], extract_seconds: null, part: null,
+    value_parity: { method: "none", parity_verdict: null, unexplained: null, report: null },
+  } satisfies RehearsalTable;
+  return {
+    id: "exr_qav4000001",
+    system_id: "exs_qav4exitpg1",
+    system_name: "QAV4-exit-pg",
+    workspace_id: "ws_qa",
+    n: 1,
+    version: 3,
+    trigger: "manual",
+    actor: "qa@example.com",
+    started_at: "2026-11-19T14:02:11Z",
+    finished_at: "2026-11-19T14:02:33Z",
+    verdict: "failed",
+    verdict_reason: "1 of 1 table(s) could not be extracted: qav4_seed.",
+    definition_sha256: sha(404),
+    pii_acknowledgement: null,
+    current: false,
+    stale_reason: "The system's source connection, tables, keys, window or extract format changed since this rehearsal; it no longer proves the system as it is defined now. Rehearse it again.",
+    timeline: [
+      { stage: "inventory", status: "done", started_at: "2026-11-19T14:02:11Z", finished_at: "2026-11-19T14:02:11Z", seconds: 0 },
+      { stage: "extract", status: "failed", started_at: null, finished_at: null, seconds: null },
+      { stage: "verify", status: "done", started_at: "2026-11-19T14:02:11Z", finished_at: "2026-11-19T14:02:33Z", seconds: 22 },
+      { stage: "seal", status: "pending", started_at: "2026-11-19T14:02:33Z", finished_at: "2026-11-19T14:02:33Z", seconds: 0 },
+      { stage: "sign", status: "pending", started_at: null, finished_at: null, seconds: null },
+    ],
+    completeness: {
+      tables_declared: 1, tables_extracted: 0, tables_proven: 0, tables_not_proven: 0, tables_incomplete: 0, tables_failed: 1,
+      tables_needs_pii_review: 0,
+      value_methods: { full_checksum: 0, key_diff: 0, population_digest: 0, sampled: 0, count_only: 0, none: 1 },
+      statement: "0 of 1 declared table(s) extracted. 0 proven complete (rows, key sets, every value and control totals). Value check: none on 1.",
+    },
+    tables: [table],
+    seal: { algorithm: "sha256-merkle-rfc6962", merkle_root: null, parts_count: 0, total_bytes: 0, storage: null, parts: [] },
+    duration: {
+      basis: "measured", measured_seconds: null, extract_seconds: null, verify_seconds: 22, window_seconds: 4 * H,
+      fits_window: null, margin_pct: null, statement: "The duration was not measured: an extract job carries no start or end time.",
+    },
+    trend: { points: [], growth_pct_rows: null, projection: null },
+    signoff: {
+      required_roles: ["engineering", "data_owner", "compliance"], approvals: [], invalidated_approvals: [], status: "blocked",
+      blocked_reason: "Only a proven rehearsal can be signed; this one failed: 1 of 1 table(s) could not be extracted: qav4_seed.",
+      signature: null, signed_at: null,
+    },
+    evidence: { signed: false, content_sha256: null, anchor: null, export: "/api/v1/exit/rehearsals/exr_qav4000001/evidence" },
+  };
+}
+
 /** As the API sends it while running: tables carry only the identity fields (see realRunningRaw). */
 export function runningRehearsalRaw(): ExitRehearsal {
   const base = provenRehearsal();

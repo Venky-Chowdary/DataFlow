@@ -14,6 +14,7 @@ phase 3 switches that path to the CE1 digest.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -28,6 +29,12 @@ SESSION_SETTINGS: tuple[str, ...] = (
     "SET IntervalStyle = 'postgres'",
     "SET bytea_output = 'hex'",
 )
+
+#: The snapshot a pinned side reads (every supported server, 14+, has pg_current_snapshot()).
+_SNAPSHOT_SQL = "SELECT pg_current_snapshot()::text, now()::text"
+#: The oldest server the comparison runs on: CE1 needs exact ``numeric`` from ``extract(epoch …)``.
+MIN_SERVER_VERSION_NUM = 140000
+
 
 def quote_ident(name: str) -> str:
     from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
@@ -207,8 +214,13 @@ class PostgresSide(SqlSide):
         self.conn.rollback()
         if encoding not in {"UTF8", "UNICODE"}:
             raise ValueError(f"Parity at Scale needs a UTF8 database (this one is {encoding})")
-        if version < 140000:
-            raise ValueError("Parity at Scale needs PostgreSQL 14 or later (exact extract(epoch))")
+        if version < MIN_SERVER_VERSION_NUM:
+            from services.parity_scale.plan import PairNotCertified
+
+            raise PairNotCertified(
+                f"the comparison inside the database needs PostgreSQL 14 or later; this server is "
+                f"PostgreSQL {version // 10000}")
+        self.server_version_num = version
         self.server = "postgresql"
         self.conn.autocommit = True
         with self.conn.cursor() as cur:
@@ -259,9 +271,85 @@ class PostgresSide(SqlSide):
     def held_predicate(self) -> str:
         return fit_held_predicate(self, decimal_fit_classes)
 
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+    def pin(self, max_hold_s: float | None = None) -> dict[str, Any]:
+        """One REPEATABLE READ, READ ONLY transaction for the rest of the scan (one snapshot).
+
+        Each statement then runs under a savepoint, so a statement that times
+        out is rolled back to it and the snapshot is kept.
+        """
+        refusal = self._pin_refusal(max_hold_s)
+        if refusal:
+            return {"kind": "not_established", "reason": refusal}
+        try:
+            self.conn.rollback()
+            self.conn.set_session(isolation_level="REPEATABLE READ", readonly=True)
+            with self.conn.cursor() as cur:
+                cur.execute(_SNAPSHOT_SQL)
+                snapshot, at = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001 — an engine that cannot pin is read statement by statement
+            self.unpin()
+            return {"kind": "not_established", "reason": f"the snapshot could not be taken ({type(exc).__name__})"}
+        self.pinned = True
+        return {"kind": "pinned", "method": "repeatable_read_transaction", "function": "pg_current_snapshot",
+                "snapshot": str(snapshot), "at": str(at)}
+
+    def _pin_refusal(self, max_hold_s: float | None) -> str:
+        """Why a held snapshot would be unsafe or cut short on this server, or ``""``."""
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT pg_is_in_recovery()")
+                standby = bool(cur.fetchone()[0])
+                cur.execute("SELECT name, setting FROM pg_settings WHERE name IN "
+                            "('idle_in_transaction_session_timeout', 'transaction_timeout')")
+                limits = {str(n): int(v or 0) for n, v in cur.fetchall()}
+            self.conn.rollback()
+        except Exception as exc:  # noqa: BLE001 — cannot tell: do not hold a snapshot
+            self.unpin()
+            return f"the server's settings could not be read ({type(exc).__name__})"
+        if standby:
+            return ("the server is a hot standby: a snapshot held there can be cancelled by replication "
+                    "(a recovery conflict)")
+        hold_ms = int((max_hold_s or 0) * 1000)
+        for name, limit_ms in sorted(limits.items()):
+            if limit_ms > 0 and (not hold_ms or limit_ms < hold_ms):
+                return (f"the server's {name} ({limit_ms // 1000} s) is shorter than the longest hold; "
+                        "the snapshot would be cut off")
+        return ""
+
+    def unpin(self) -> None:
+        """Back to one transaction per statement (default isolation), whatever state the connection is in."""
+        self.pinned = False
+        with contextlib.suppress(Exception):
+            self.conn.rollback()
+        with contextlib.suppress(Exception):
+            self.conn.set_session(isolation_level="DEFAULT", readonly="DEFAULT")
+
+    def _execute_pinned(self, sql: str, params: Sequence[Any]) -> list[tuple[Any, ...]]:
         import psycopg2
 
+        with self.conn.cursor() as cur:
+            cur.execute("SAVEPOINT psd1_statement")
+        try:
+            with self.conn.cursor() as cur:
+                if self.timeout_seconds:
+                    cur.execute("SET LOCAL statement_timeout = %s", (int(self.timeout_seconds * 1000),))
+                cur.execute(sql, list(params))
+                rows = cur.fetchall()
+                cur.execute("RELEASE SAVEPOINT psd1_statement")
+            return rows
+        except Exception as exc:
+            with self.conn.cursor() as cur:
+                cur.execute("ROLLBACK TO SAVEPOINT psd1_statement")
+            if isinstance(exc, psycopg2.errors.QueryCanceled):
+                raise timeout_error(exc) from exc
+            raise
+
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+        import psycopg2
+
+        self.tick()
+        if self.pinned:
+            return self._execute_pinned(sql, params)
         try:
             with self.conn.cursor() as cur:
                 cur.execute("SET TRANSACTION READ ONLY")
@@ -279,7 +367,32 @@ class PostgresSide(SqlSide):
             raise
 
     # Kept for callers (tests) of the phase-1 name.
-    _run = execute
+    def _run(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+        return self.execute(sql, params)
+
+    # the lock watch (a pinned snapshot yields to sessions waiting on its locks) ---------
+    def session_id(self) -> Any:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT pg_backend_pid()")
+            return int(cur.fetchone()[0])
+
+    def prepare_monitor(self, monitor: Any) -> None:
+        monitor.autocommit = True
+
+    def lock_waiters(self, monitor: Any, session: Any) -> list[str]:
+        """Sessions whose lock request waits on this side's session (pg_blocking_pids)."""
+        with monitor.cursor() as cur:
+            cur.execute(
+                "SELECT l.pid, l.mode, coalesce(c.relname, l.locktype) FROM pg_locks l "
+                "LEFT JOIN pg_class c ON c.oid = l.relation "
+                "WHERE NOT l.granted AND %s = ANY(pg_blocking_pids(l.pid)) ORDER BY l.pid",
+                (int(session),),
+            )
+            rows = cur.fetchall()
+        return [f"session {pid} (waiting for {mode} on {rel})" for pid, mode, rel in rows]
+
+    def cancel_running(self, monitor: Any, session: Any) -> None:
+        self.conn.cancel()
 
     def estimate_rows(self) -> int | None:
         rows = self.execute("SELECT reltuples::bigint FROM pg_class WHERE oid = %s::regclass", [self.table_ref])
@@ -296,15 +409,35 @@ class PostgresSide(SqlSide):
     def stream(self, sql: str, params: Sequence[Any], batch: int) -> Iterator[tuple[Any, ...]]:
         import uuid as _uuid
 
+        self.tick()
+        with self.conn.cursor() as plain:
+            if self.pinned:
+                # A savepoint keeps the pinned snapshot usable when the stream fails part way.
+                plain.execute("SAVEPOINT psd1_stream")
+            if self.timeout_seconds:
+                # Every FETCH is its own statement under this server-side timeout.
+                plain.execute("SET LOCAL statement_timeout = %s", (int(self.timeout_seconds * 1000),))
         cur = self.conn.cursor(name=f"psd1_stream_{_uuid.uuid4().hex[:12]}")
         cur.itersize = batch
+        failed = False
         try:
             cur.execute(sql, list(params))
             while True:
                 rows = cur.fetchmany(batch)
+                self.tick()
                 if not rows:
                     break
                 yield from rows
+        except BaseException:
+            failed = True
+            raise
         finally:
-            cur.close()
-            self.conn.rollback()
+            with contextlib.suppress(Exception):
+                cur.close()
+            if self.pinned:
+                with self.conn.cursor() as plain:
+                    plain.execute("ROLLBACK TO SAVEPOINT psd1_stream" if failed else "RELEASE SAVEPOINT psd1_stream")
+            else:
+                # Also after the lock watch let the snapshot go mid-read (the cursor is gone).
+                with contextlib.suppress(Exception):
+                    self.conn.rollback()

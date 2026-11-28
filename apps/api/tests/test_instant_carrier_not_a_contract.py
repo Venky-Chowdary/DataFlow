@@ -129,20 +129,29 @@ def test_dialect_less_timestamp_is_still_a_wall_clock() -> None:
     assert is_lossy_coercion("TIMESTAMPTZ", "TIMESTAMP(6)") is True
 
 
-def test_explicit_wall_clock_target_is_still_a_collapse() -> None:
-    # An offset-pinned source loses its label on MySQL DATETIME.
+def test_explicit_wall_clock_target_discloses_the_lost_label() -> None:
+    # An offset-pinned source loses only its label on MySQL DATETIME: the
+    # writer stores the UTC instant. Disclosed, not a Risk Contract (accuracy
+    # review finding 8, lead rule: instant kept, label lost -> disclosure).
+    from services.conversion_contract import classify_conversion
+
     assert is_lossy_coercion(
         "TIMESTAMP WITH TIME ZONE", "DATETIME(6)", dest_db="mysql"
-    ) is True
+    ) is False
+    conv = classify_conversion("TIMESTAMP WITH TIME ZONE", "DATETIME(6)", dest_db="mysql")
+    assert not conv["requires_risk_contract"] and "zone-less column" in conv["unmeasured_loss"]
     # A session-relative instant keeps its UTC clock on DATETIME(6).
     assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is False
+    # Fewer fraction digits than the source keeps is still a real loss.
+    assert is_lossy_coercion("TIMESTAMP WITH TIME ZONE", "DATETIME(0)", dest_db="mysql") is True
 
 
 def test_offset_pinned_create_new_on_mysql_keeps_the_offset() -> None:
     """DEF-B-016: MySQL has no offset type. Create-new stores RFC-3339 text.
 
-    DATETIME(6) and TIMESTAMP(6) stay a collapse. A wider name column does
-    not become a free pass. TIMESTAMPTZ still lands on DATETIME(6).
+    DATETIME(6) and TIMESTAMP(6) keep the instant and lose the label: disclosed,
+    not a collapse (finding 8). A wider name column does not become a free
+    pass. TIMESTAMPTZ still lands on DATETIME(6).
     """
     from datetime import datetime, timedelta, timezone
 
@@ -157,8 +166,8 @@ def test_offset_pinned_create_new_on_mysql_keeps_the_offset() -> None:
         stamped = create_new_mapping_target_type(source, "mysql")
         assert stamped.upper().startswith("VARCHAR(64)"), (source, stamped)
         assert is_lossy_coercion(source, stamped, dest_db="mysql") is False
-        assert is_lossy_coercion(source, "DATETIME(6)", dest_db="mysql") is True
-        assert is_lossy_coercion(source, "TIMESTAMP(6)", dest_db="mysql") is True
+        assert is_lossy_coercion(source, "DATETIME(6)", dest_db="mysql") is False
+        assert is_lossy_coercion(source, "TIMESTAMP(6)", dest_db="mysql") is False
         assert is_lossy_coercion(source, "VARCHAR(100)", dest_db="mysql") is True
     assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is False
     assert create_new_mapping_target_type("TIMESTAMPTZ", "mysql") == "DATETIME(6)"

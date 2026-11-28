@@ -9,6 +9,7 @@
  */
 import { blockerTitle, GATE_CATALOG, gateLabel, isInternalGateId, isSchemaDriftEcho } from "./preflightGates.js";
 import { isDuplicateRowsFixRule } from "./duplicatePolicy.js";
+import { plural } from "./plural.js";
 import type {
   CoercionColumn,
   CoercionSampleFailure,
@@ -403,7 +404,7 @@ export function findFidelityCollapseRoot(
   return {
     title: "Lossy / fidelity collapse across type path",
     impact:
-      "Declared types or nested shapes collapse fidelity on write — Accept risk on Map or remap carriers before Execute.",
+      "Declared types or nested shapes collapse fidelity on write — Accept risk on Map or remap carriers before Run.",
     fixHint:
       "Open Map → review Approve/Review/Accept risk tiers → remap width/scale or ack intentional loss → re-run Validate.",
     gateIds,
@@ -571,7 +572,7 @@ export function findDuplicateKeyRoot(
   const fixHint = appendLike
     ? (
       "Append sync can keep duplicate source rows only when that column is not the destination "
-      + "PRIMARY KEY. If Validate or Execute still blocks, open Destination → Advanced and clear "
+      + "PRIMARY KEY. If Validate or Run still blocks, open Advanced and clear "
       + "Primary key (or pick a unique column), or dedupe the source."
     )
     : (
@@ -868,9 +869,24 @@ export function isSampleUniquenessOnly(
   return /population uniqueness not proven/i.test(blob);
 }
 
+/**
+ * The checks sentence, counted the way the hero ring counts: passed of the
+ * applicable gates, with skipped gates named as not applicable —
+ * "16 of 17 checks passed · 5 not applicable", never "16/22".
+ */
+export function checksPassedLine(preflight: Pick<PreflightResult, "passed_count" | "total_gates" | "gates">): string {
+  const total = preflight.total_gates || (preflight.gates?.length ?? 0);
+  const skipped = (preflight.gates ?? []).filter((g) => g.status === "skip").length;
+  const applicable = Math.max(0, total - skipped);
+  const head = `${preflight.passed_count ?? 0} of ${plural(applicable, "check")} passed`;
+  return skipped > 0 ? `${head} · ${skipped} not applicable` : head;
+}
+
 export function buildExecutiveSummary(
   preflight: PreflightResult | null | undefined,
   syncMode?: string,
+  /** File exports write a new file: key uniqueness and upsert do not apply. */
+  opts: { fileExport?: boolean } = {},
 ): ExecutiveSummary | null {
   if (!preflight) return null;
   const root = findDuplicateKeyRoot(preflight, syncMode);
@@ -889,74 +905,73 @@ export function buildExecutiveSummary(
       || b.source?.details?.compliance_ack_required === true
     )
   ) && blockedEngineGateCount === 0;
-  const sampleUniqueness = isSampleUniquenessOnly(preflight);
+  const sampleUniqueness = !opts.fileExport && isSampleUniquenessOnly(preflight);
+  const checksLine = checksPassedLine(preflight);
+  const blockingLine = `${blockingGateCount} blocking ${blockingGateCount === 1 ? "gate" : "gates"}`;
 
   if (preflight.passed) {
     const decision = preflight.proof_bundle?.transfer_decision?.decision;
-    // Missing decision must never claim Execute unlocked (align with rail / isGovernedExecuteReady).
+    // Missing decision must never claim Run unlocked (align with rail / isGovernedExecuteReady).
     if (decision !== "approve") {
       return {
-        title: "Review before Execute",
-        subtitle: `${passed}/${total} checks passed · ${
-          decision === "review" ? "review-grade / local preflight" : "awaiting transfer decision"
-        } — confirm API Validate before Execute`,
-        untilLines: ["Confirm API preflight with decision approve (not browser-local only)"],
+        title: "Review before you run",
+        subtitle: `${checksLine}. ${
+          decision === "review" ? "Validate returned a review-grade decision" : "No transfer decision yet"
+        }: resolve it, then re-run Validate.`,
+        untilLines: ["Validate returns an approve decision"],
         blockingGateCount: 0,
         readinessCaption,
-        railLine: "Review-grade — Execute not fully unlocked",
+        railLine: "Needs review before Run",
         aiPromptHint: "Why is this transfer still in review after Validate?",
       };
     }
     if (sampleUniqueness) {
       return {
-        title: "Execute-ready · uniqueness sample-only",
-        subtitle:
-          `${passed}/${total} checks passed · population uniqueness not proven on Validate — `
-          + "Execute re-probes the source; append/create-new may warn, upsert/PK will block",
+        title: "Ready to run · uniqueness checked on a sample",
+        subtitle: `${checksLine}. Run checks key uniqueness on the whole source; upsert stops on duplicates.`,
         untilLines: [
-          "Prefer upsert + unique primary key when identity must be unique",
-          "Re-run Validate after source probe wiring if this route should fail closed earlier",
+          "Use upsert with a unique primary key when identity must be unique",
         ],
         blockingGateCount: 0,
         readinessCaption,
-        railLine: "Execute unlocked · uniqueness not population-proven",
-        aiPromptHint: "Why did Validate pass uniqueness on a sample but Execute fail on duplicates?",
+        railLine: "Run unlocked · uniqueness checked on a sample",
+        aiPromptHint: "What does a sample-only uniqueness check mean for this run?",
       };
     }
     return {
-      title: "Execute-ready · not migration proven",
-      subtitle: `${passed}/${total} checks passed · Execute unlocked — Gate-8 post-write proof still required`,
+      title: "Ready to run",
+      subtitle: `${checksLine}. Row-count and checksum proof are made after the write.`,
       untilLines: [],
       blockingGateCount: 0,
       readinessCaption,
-      railLine: "Execute unlocked · migration_proven pending write",
+      railLine: "Run unlocked",
       aiPromptHint: null,
     };
   }
 
   if (complianceOnly) {
     return {
-      title: "Approve PII to unlock Execute",
-      subtitle: `${blockingGateCount} blocking gate${blockingGateCount === 1 ? "" : "s"} · ${passed}/${total} engine gates passed · compliance acknowledgment required`,
+      title: "Approve PII to unlock Run",
+      subtitle: `${blockingLine} · ${checksLine} · PII approval needed`,
       untilLines: blockedGateLines.length
         ? blockedGateLines
-        : ["Confirm governance policy allows moving detected PII fields"],
+        : ["Your governance policy allows moving the detected PII fields"],
       blockingGateCount,
       readinessCaption,
-      railLine: "Awaiting PII / compliance approval",
+      railLine: "Waiting for PII approval",
       aiPromptHint: "Why is PII review required for this transfer?",
     };
   }
 
   return {
     title: "Validation blocked",
-    subtitle: `Validation blocked: ${blockingGateCount} blocking gate${blockingGateCount === 1 ? "" : "s"} · ${passed}/${total} checks passed · Execute stays locked`,
+    subtitle: `${blockingLine} · ${checksLine}. Run stays locked until they pass.`,
     untilLines: blockedGateLines,
     blockingGateCount,
     readinessCaption,
     railLine: blockingGateCount > 0
       ? `Blocked by ${blockingGateCount} gate${blockingGateCount === 1 ? "" : "s"}`
-      : "Validation blocked — fix issues before Execute",
+      : "Validation blocked: fix the issues, then re-run",
     aiPromptHint: root ? "Why are duplicate IDs blocking this transfer?" : null,
   };
 }

@@ -9,9 +9,12 @@ import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { Drawer } from "../ui/Drawer";
 import { EmptyState } from "../ui/EmptyState";
+import { Callout } from "../ui/Callout";
+import { ErrorState } from "../ui/ErrorState";
 import { LoadingBlock } from "../LoadingState";
 import { DurationTrendChart, WindowBar } from "../charts/ExitCharts";
 import { acknowledgeExitPii, fetchExitSystem, fetchSystemRehearsals, withdrawExitPii } from "../../lib/exitApi";
+import { staleProof } from "./rehearsalSummary";
 import {
   criticalityPresentation,
   dueText,
@@ -37,6 +40,7 @@ import {
   type Trend,
 } from "../../lib/exitReadiness";
 import { formatDateTime, roleLabel } from "../../lib/parity";
+import { plural } from "../../lib/plural";
 
 export interface SystemDrawerProps {
   systemId: string | null;
@@ -138,7 +142,7 @@ export function SystemDrawer({
 
   const shown = system && system.id === systemId ? system : null;
   const readiness = shown?.readiness;
-  const status = readiness ? readinessPresentation(readiness.state, readiness.overdue, readiness.stale) : null;
+  const status = readiness ? readinessPresentation(readiness.state, readiness.overdue, staleProof(readiness)) : null;
   const crit = shown ? criticalityPresentation(shown.criticality) : null;
   const runningId = runningRehearsalId(shown);
   const running = Boolean(runningId) || readiness?.state === "running";
@@ -154,8 +158,8 @@ export function SystemDrawer({
       headerExtra={
         shown && status && crit ? (
           <span className="df2-exit-drawer-pills">
-            <span className={pillClass(crit.tone)}>{crit.label}</span>
             <span className={pillClass(status.tone)}>{status.label}</span>
+            <span className={`df2-exit-crit${shown?.criticality === "critical" ? " is-critical" : ""}`}>{crit.label}</span>
           </span>
         ) : null
       }
@@ -199,33 +203,20 @@ export function SystemDrawer({
         loading || !error ? (
           <LoadingBlock size="sm" title="Loading the system" />
         ) : (
-          <EmptyState
-            compact
-            icon="alert"
-            role="alert"
-            title="Could not load this system"
-            description={error}
-            action={<Button size="sm" onClick={() => void load()}>Try again</Button>}
-          />
+          <ErrorState compact title="Could not load this system" message={error} onRetry={() => void load()} />
         )
       ) : (
         <div className="df2-exit-drawer-body">
           {shown.description && <p className="df2-parity-confidence">{shown.description}</p>}
           {stale && (
-            <p className="df2-parity-notice" role="status">
-              <DtIcon name="alert" size={14} />
-              <span>
-                <b>{stale.label}.</b>
-                {stale.detail ? ` ${stale.detail}` : ""}
-              </span>
-            </p>
+            <Callout tone="warning" role="status" title="The definition changed after the last rehearsal. Re-run to prove it." />
           )}
           {readiness && (
-            <p className={`df2-parity-notice${readiness.overdue ? "" : " is-muted"}`} role="status">
-              <DtIcon name="clock" size={14} />
+            <p className={`df2-exit-drawer-due${readiness.overdue ? " is-overdue" : ""}`} role="status">
+              <DtIcon name="clock" size={14} chrome="product" />
               <span>
                 {readiness.next_due_at ? `${dueText(readiness.next_due_at, readiness.overdue, now)} (${formatDate(readiness.next_due_at)}). ` : ""}
-                Rehearse every {shown.rehearsal_every_days} {shown.rehearsal_every_days === 1 ? "day" : "days"}
+                Rehearse every {plural(shown.rehearsal_every_days, "day")}
                 {shown.rehearsal_schedule ? `; scheduled ${shown.rehearsal_schedule.cron} (${shown.rehearsal_schedule.timezone}).` : "; no schedule, started by hand."}
               </span>
             </p>
@@ -300,7 +291,7 @@ export function SystemDrawer({
                         <span className="df2-exit-rehearsal-main">
                           <span>{formatDateTime(r.started_at)}</span>
                           <span className="df2-parity-muted">
-                            {r.tables_proven.toLocaleString("en-US")} of {r.tables_declared.toLocaleString("en-US")} tables proven
+                            {r.tables_proven.toLocaleString("en-US")} of {plural(r.tables_declared, "table")} proven
                             {r.total_bytes != null ? ` · ${formatBytes(r.total_bytes)}` : ""}
                             {r.signed ? " · signed" : ""}
                             {r.current === false ? " · earlier definition" : ""}
@@ -365,10 +356,7 @@ export function PiiReviewCard({
   return (
     <section className="df2-parity-card" aria-label="PII review">
       <h3 className="df2-parity-h3">PII review</h3>
-      <p className={`df2-parity-notice${pii.action === "acknowledge" ? "" : " is-muted"}`} role="status">
-        <DtIcon name={pii.action === "acknowledge" ? "alert" : "check"} size={14} />
-        <span>{pii.text}</span>
-      </p>
+      <Callout tone={pii.action === "acknowledge" ? "held" : "neutral"} role="status" title={pii.text} />
       {pii.acknowledgement && (
         <p className="df2-parity-muted">
           Acknowledged by <b>{pii.acknowledgement.actor}</b> on {formatDateTime(pii.acknowledgement.at)}: {pii.acknowledgement.reason}
@@ -410,7 +398,7 @@ export function PiiReviewCard({
             aria-invalid={Boolean(error) || undefined}
             aria-describedby={error ? `pii-error-${system.id}` : undefined}
           />
-          {error && <p id={`pii-error-${system.id}`} className="df2-parity-notice is-danger" role="alert">{error}</p>}
+          {error && <p id={`pii-error-${system.id}`} className="df2-exit-field-error" role="alert">{error}</p>}
           <Button
             size="sm"
             variant="primary"

@@ -196,12 +196,10 @@
 }
 
 .df2-spin {
-  animation: df2-spin 0.8s linear infinite;
+  animation: df-spin 0.8s linear infinite;
 }
 
-@keyframes df2-spin {
-  to { transform: rotate(360deg); }
-}
+
 
 .df2-page-benchmarks-cert summary {
   cursor: pointer;

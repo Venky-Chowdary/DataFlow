@@ -5,6 +5,8 @@ import { StructurePreview } from "./ui/StructurePreview";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DestColumnCombobox, DestTargetTag, destTargetTag } from "./mapping/DestColumnCombobox";
 import { TypeCompatBadge, compatSentence } from "./mapping/TypeCompatBadge";
+import { WitnessFlag } from "./mapping/WitnessFlag";
+import type { WitnessPair } from "../lib/mappingWitness";
 import type { DestColumnCatalog } from "../lib/destColumnCatalog";
 import type { TypeGrade } from "../lib/mappingStudioApi";
 import {
@@ -123,6 +125,19 @@ interface ColumnReviewPanelProps {
    * drag handles. Absent, the row keeps its plain destination-name field.
    */
   remap?: ColumnRemapControls;
+  /** Mapping Witness flags by lower-cased source column (evidence only; never edits a row). */
+  witnessFlags?: Map<string, WitnessPair>;
+  /** The flag's Review action: take the operator to this row's destination picker. */
+  onWitnessReview?: (source: string) => void;
+  /** The flag's Keep this mapping action, and the flag ids already kept. */
+  onWitnessKeep?: (pair: WitnessPair) => Promise<void> | void;
+  witnessKept?: Set<string>;
+  /**
+   * Destination columns that block Validate (required, unmapped). They are not
+   * source rows, but they need attention: the Needs attention tab counts them
+   * and lists them above the rows, so the tab never reads 0 while Continue is blocked.
+   */
+  destinationAttention?: { columns: string[]; title: string; onShow?: () => void };
 }
 
 export interface ColumnRemapControls {
@@ -205,6 +220,11 @@ export function ColumnReviewPanel({
   migrationId = "",
   tableName = "",
   remap,
+  witnessFlags,
+  onWitnessReview,
+  onWitnessKeep,
+  witnessKept,
+  destinationAttention,
 }: ColumnReviewPanelProps) {
   const [internalSearch, setInternalSearch] = useState("");
   const [internalFilter, setInternalFilter] = useState<ColumnFilter>("attention");
@@ -332,6 +352,19 @@ export function ColumnReviewPanel({
     onFocusHandled?.();
     return undefined;
   }, [focusSource, pageItems, filtered, onFocusHandled]);
+
+  /** The witness flag's one action: bring the row into view and put focus on its destination picker. */
+  const reviewWitness = (source: string) => {
+    onWitnessReview?.(source);
+    window.requestAnimationFrame(() => {
+      const row = rowRefs.current.get(source);
+      const wanted = `Destination column for ${source}`;
+      const picker = Array.from(row?.querySelectorAll<HTMLElement>("input, select") ?? []).find(
+        (el) => el.getAttribute("aria-label") === wanted,
+      );
+      picker?.focus();
+    });
+  };
 
   /** Per-row execution policy choice — no hidden CAST_AND_CONTINUE default. */
   const [policyBySource, setPolicyBySource] = useState<Record<string, ExecutionPolicy | "">>({});
@@ -518,8 +551,11 @@ export function ColumnReviewPanel({
     .filter((tab) => tab.id !== "rules" || filterCounts.rules > 0 || filter === "rules")
     .map((tab) => ({
       ...tab,
-      // All = Needs attention + Ready: every tab shows its count so they reconcile.
-      count: filterCounts[tab.id],
+      // All = Needs attention + Ready for rows; Needs attention also counts
+      // the destination columns that block Validate (listed above the rows).
+      count: tab.id === "attention"
+        ? filterCounts.attention + (destinationAttention?.columns.length ?? 0)
+        : filterCounts[tab.id],
     }));
   const columnCount = triage ? (showTransforms ? 6 : 5) : (showTransforms ? 9 : 8);
 
@@ -868,6 +904,22 @@ export function ColumnReviewPanel({
             )}
           </thead>
           <tbody>
+            {filter === "attention" && destinationAttention && destinationAttention.columns.length > 0 && (
+              <tr className="df2-column-review-dest-attention">
+                <td colSpan={columnCount}>
+                  <span className="df2-column-review-dest-attention-copy">
+                    <strong>{destinationAttention.title}</strong>{" "}
+                    <code>{destinationAttention.columns.slice(0, 4).join(", ")}</code>
+                    {destinationAttention.columns.length > 4 ? ` and ${destinationAttention.columns.length - 4} more` : ""}
+                  </span>
+                  {destinationAttention.onShow && (
+                    <button type="button" className="df2-btn df2-btn-sm" onClick={destinationAttention.onShow}>
+                      Show in destination columns
+                    </button>
+                  )}
+                </td>
+              </tr>
+            )}
             {pageItems.map(({ mapping: m, index }) => {
               const omitted = isIntentionalOmit(m);
               const heldBusinessRule = Boolean(
@@ -998,10 +1050,19 @@ export function ColumnReviewPanel({
                       </select>
                 </>
               );
+              const witnessPair = witnessFlags?.get(m.source.toLowerCase());
               const compatBadge = (
                 <>
                       {remap ? (
                         <TypeCompatBadge grade={remap.gradeFor(m)} pending={remap.gradesPending && Boolean(m.destType)} />
+                      ) : null}
+                      {witnessPair && !omitted ? (
+                        <WitnessFlag
+                          pair={witnessPair}
+                          onReview={onWitnessReview ? reviewWitness : undefined}
+                          onKeep={onWitnessKeep}
+                          kept={Boolean(witnessPair.flag?.id && witnessKept?.has(witnessPair.flag.id))}
+                        />
                       ) : null}
                 </>
               );
@@ -1509,7 +1570,7 @@ export function ColumnReviewPanel({
                         {pipelineTransformChip(m.engineTransform) && !omitted && (
                           <span
                             className="df2-col-badge-pipeline"
-                            title={`Pipeline semantic transform '${pipelineTransformChip(m.engineTransform)}' — preserved on Validate/Execute unless you change the transform select`}
+                            title={`Pipeline semantic transform '${pipelineTransformChip(m.engineTransform)}' — preserved on Validate and Run unless you change the transform select`}
                           >
                             pipeline: {pipelineTransformChip(m.engineTransform)}
                           </span>
@@ -1613,7 +1674,7 @@ export function ColumnReviewPanel({
                                 + (createNewRiskDetail(m)
                                   || m.fidelityReason
                                   || (mappingAckTier(m) === "review"
-                                    ? "Review this conversion before Execute"
+                                    ? "Review this conversion before Run"
                                     : "Sign Migration Risk Contract for this column")))
                               : undefined
                           }
@@ -1696,7 +1757,7 @@ export function ColumnReviewPanel({
                 </Fragment>
               );
             })}
-            {pageItems.length === 0 && (
+            {pageItems.length === 0 && !(filter === "attention" && (destinationAttention?.columns.length ?? 0) > 0) && (
               <tr>
                 <td colSpan={columnCount} className="df2-column-review-empty-row">
                   {foldedCount > 0 ? (

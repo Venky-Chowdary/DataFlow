@@ -1,3 +1,4 @@
+import { publishReportVerdict } from "./reportVerdicts";
 import type { ProgressAbsence, ProgressDelivery } from "./jobProgressGate";
 import { ApiUnreachableError, noteApiReachable, noteApiUnreachable } from "./connectivity";
 import type { RouteCertification, RouteCertificationStatus } from "./routeCertification";
@@ -220,7 +221,7 @@ export function gatewayTimeoutCopy(status: number, operation: string): string {
   if (/^(validate|preflight)/i.test(op)) {
     return (
       `Control plane timed out (HTTP ${status}) while Validate was running. `
-      + `Re-run Validate. Execute stays locked.`
+      + `Re-run Validate. Run stays locked.`
     );
   }
   return (
@@ -519,6 +520,9 @@ export async function runPreflight(payload: {
     code_crosswalk?: Record<string, string>;
     code_crosswalk_system?: string;
     risk_contract?: Record<string, unknown>;
+    /** Oracle '' gate: server-signed contract / server-issued Check now (verified by the API). */
+    empty_as_null_contract?: Record<string, unknown>;
+    empty_check_now?: Record<string, unknown>;
     /** G21 — independent SUM of this monetary column after write. */
     control_total?: boolean;
     struct_policy?: string;
@@ -606,6 +610,24 @@ export async function runPreflight(payload: {
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Preflight failed", "Validate"));
+  return res.json();
+}
+
+/**
+ * Take an Oracle '' gate action the server must sign: "Create NULL-able"
+ * (oracle_empty_as_null) or "Check now" (oracle_empty_check_now). Returns the
+ * signed contract / issued request per mapping pair; Studio keeps it on the
+ * mapping and sends it with the next /preflight/run (lib/oracleEmptyActions).
+ */
+export async function signOracleEmptyAction(
+  body: import("./oracleEmptyActions").OracleEmptySignBody,
+): Promise<import("./oracleEmptyActions").OracleEmptySignResponse> {
+  const res = await apiFetch(`${API_BASE}/preflight/oracle-empty/sign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not record the action", "Validate"));
   return res.json();
 }
 
@@ -1477,6 +1499,9 @@ export interface CatalogConnector {
   capability_label?: string;
   /** Honest tier: certified | source_only | connect_only | planned */
   certification_tier?: string;
+  /** "emulator" when the tier's CI proof ran against an emulator only
+   * (Snowflake, BigQuery): never shown as Certified. "live" for a real engine. */
+  proof_scope?: "emulator" | "live" | "";
   /** False when the Certified driver package is not loadable on this host. */
   driver_available?: boolean;
   /** Certified product, missing package here — not Planned. */
@@ -1896,6 +1921,18 @@ export async function cancelJob(jobId: string): Promise<{ success: boolean; job_
 }
 
 /** Subscribe to live job progress via SSE with polling fallback. Returns cleanup function. */
+/** The selected table names of a job's request, in order (never its endpoints or secrets). */
+function selectedStreamNames(request: unknown): string[] | undefined {
+  if (!request || typeof request !== "object") return undefined;
+  const contracts = (request as { stream_contracts?: unknown }).stream_contracts;
+  if (!Array.isArray(contracts)) return undefined;
+  const names = contracts
+    .filter((c): c is Record<string, unknown> => Boolean(c) && typeof c === "object" && (c as Record<string, unknown>).selected !== false)
+    .map((c) => String(c.name ?? c.stream ?? "").trim())
+    .filter(Boolean);
+  return names.length ? [...new Set(names)] : undefined;
+}
+
 export function streamJobProgress(
   jobId: string,
   onUpdate: (delivery: ProgressDelivery) => void,
@@ -2085,6 +2122,12 @@ export function streamJobProgress(
         ? raw.row_accounting as JobProgress["row_accounting"]
         : undefined,
       streams: streamHealth.length ? streamHealth : undefined,
+      // Per-table progress on the Run screen (UI pass 2): the table loading
+      // now, the finished ones, and the run's table names in engine order.
+      stream_progress: raw.stream_progress && typeof raw.stream_progress === "object"
+        ? raw.stream_progress as JobProgress["stream_progress"]
+        : undefined,
+      stream_names: Array.isArray(raw.stream_names) ? raw.stream_names.map(String) : selectedStreamNames(raw.transfer_request),
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
         : undefined,
@@ -3241,7 +3284,7 @@ export function validateTransportMessage(
   if (!isTransportFailure(message)) return message;
   return (
     `Validate did not finish${rows}. The control plane timed out or hung — `
-    + `Re-run Validate. Execute stays locked until the API returns a verdict.`
+    + `Re-run Validate. Run stays locked until the API returns a verdict.`
   );
 }
 
@@ -3300,7 +3343,7 @@ async function pollPlanPreflight(
     return data;
   }
   throw new Error(
-    `${lastError} Re-run Validate — Execute stays locked until a verdict lands.`,
+    `${lastError} Re-run Validate. Run stays locked until a verdict lands.`,
   );
 }
 
@@ -3475,6 +3518,8 @@ export async function runUniversalTransfer(options: {
   sourceExtra?: Record<string, unknown>;
   streamContracts?: Record<string, unknown>[];
   planId?: string;
+  /** The Map session the mapping was checked in (the plan id, or the id Map minted). */
+  witnessSessionId?: string;
   priorityColumn?: string;
   priorityDirection?: "asc" | "desc";
   limit?: number;
@@ -3597,6 +3642,7 @@ export async function runUniversalTransfer(options: {
     formData.append("stream_contracts_json", JSON.stringify(options.streamContracts));
   }
   if (options.planId) formData.append("plan_id", options.planId);
+  if (options.witnessSessionId) formData.append("witness_session_id", options.witnessSessionId);
   if (options.contractId) formData.append("contract_id", options.contractId);
   if (options.requireReversibility) formData.append("require_reversibility", "true");
   formData.append(
@@ -3732,6 +3778,8 @@ export async function executeTransferJson(payload: {
   skipPreflight?: boolean;
   asyncMode?: boolean;
   planId?: string;
+  /** The Map session the mapping was checked in (the plan id, or the id Map minted). */
+  witnessSessionId?: string;
   idempotencyKey?: string;
   complianceAcknowledged?: boolean;
   schemaDriftAcknowledged?: boolean;
@@ -3766,6 +3814,7 @@ export async function executeTransferJson(payload: {
       skip_preflight: payload.skipPreflight === true,
       async_mode: payload.asyncMode !== false,
       plan_id: payload.planId || undefined,
+      witness_session_id: payload.witnessSessionId || undefined,
       compliance_acknowledged: payload.complianceAcknowledged === true,
       schema_drift_acknowledged: payload.schemaDriftAcknowledged === true,
       fk_risk_acknowledged: payload.fkRiskAcknowledged === true,
@@ -3901,6 +3950,8 @@ export async function fetchWorkspaceSettings(): Promise<PlatformEditability & {
   retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
+  verification_snapshot?: boolean;
+  verification_snapshot_max_minutes?: number;
   updated_at?: string | null;
   updated_by?: string | null;
 }> {
@@ -3921,6 +3972,8 @@ export async function updateWorkspaceSettings(body: {
   retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
+  verification_snapshot?: boolean;
+  verification_snapshot_max_minutes?: number;
 }): Promise<{
   org_name: string;
   timezone: string;
@@ -3928,6 +3981,8 @@ export async function updateWorkspaceSettings(body: {
   retention_auto_purge?: boolean;
   studio_schema_browser?: boolean;
   studio_canvas?: boolean;
+  verification_snapshot?: boolean;
+  verification_snapshot_max_minutes?: number;
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/settings`, {
     method: "PATCH",
@@ -5210,6 +5265,10 @@ export type Tenant = {
   enforce_session_timeout?: boolean;
   ip_allowlist: string[];
   egress_allowlist: string[];
+  /** Parity at Scale for this workspace: null = the deployment's setting. */
+  verification_snapshot?: boolean | null;
+  /** Longest snapshot hold in minutes (never above the deployment's cap); null = the deployment's. */
+  verification_snapshot_max_minutes?: number | null;
   created_at: string;
   updated_at: string;
   /** What is enforced now (read and save responses; same source as the posture). */
@@ -6270,7 +6329,10 @@ function parityReportUrl(jobId: string, suffix = ""): string {
 
 async function parityReportFrom(res: Response, fallback: string): Promise<ParityReport> {
   if (!res.ok) throw await apiErrorFrom(res, fallback);
-  return (await res.json()) as ParityReport;
+  const report = (await res.json()) as ParityReport;
+  // One verdict per job everywhere: the Jobs grid and drawer follow this report.
+  publishReportVerdict(report);
+  return report;
 }
 
 /** GET the trust report for one job. */
@@ -6347,6 +6409,40 @@ export async function downloadParitySignedPack(jobId: string): Promise<Blob> {
   const res = await apiFetch(parityReportUrl(jobId, "/export?format=json"));
   if (!res.ok) throw await apiErrorFrom(res, "Could not download the signed pack.");
   return res.blob();
+}
+
+/**
+ * The Trust Report verdict of each listed finished job (Jobs grid rows).
+ * The API leaves out a job it cannot show or that has not finished.
+ */
+export async function fetchJobVerdicts(
+  ids: string[],
+  init: { signal?: AbortSignal } = {},
+): Promise<Record<string, import("./verdict").ListVerdict>> {
+  const wanted = [...new Set(ids.filter(Boolean))].slice(0, 100);
+  if (!wanted.length) return {};
+  const res = await apiFetch(`${API_BASE}/parity/verdicts?ids=${encodeURIComponent(wanted.join(","))}`, { signal: init.signal });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not load verdicts.");
+  const body = (await res.json()) as { verdicts?: Record<string, import("./verdict").ListVerdict> };
+  return body.verdicts && typeof body.verdicts === "object" ? body.verdicts : {};
+}
+
+/** The next runs the scheduler will use for a cadence (schedule form preview; computation only). */
+export async function previewScheduleNextRuns(
+  body: {
+    interval: string; cron: string; timezone: string; stored_next_run_at?: string | null;
+    cadence_changed?: boolean; enabled?: boolean; count?: number;
+  },
+  init: { signal?: AbortSignal } = {},
+): Promise<import("./scheduleNextRuns").ServerPreview> {
+  const res = await apiFetch(`${API_BASE}/schedules/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: init.signal,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not preview the next runs.");
+  return (await res.json()) as import("./scheduleNextRuns").ServerPreview;
 }
 
 /** Workspace-wide parity over the most recent runs (Dashboard, Migration health). */

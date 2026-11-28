@@ -41,6 +41,7 @@ HARD_GATE_IDS = {
     "g19_dest_schema_replacement",
     "g20_code_crosswalk",
     "g3f_population_fit",
+    "g3o_oracle_empty_not_null",
     "g21_control_totals",
     "g22_dest_referential_integrity",
     "g23_destination_name",
@@ -116,6 +117,25 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ),
         "examples": [
             "flights-1m.csv DEP_TIME 0.23333333 at row 293 does not fit peeked NUMBER(9,6).",
+        ],
+        "suggested_actions": [],
+    },
+    "g3o_oracle_empty_not_null": {
+        "title": "Oracle empty string into NOT NULL",
+        "category": "hard",
+        "why": (
+            "Oracle stores an empty string as NULL, so a NOT NULL column refuses it "
+            "(ORA-01400). The source holds empty strings in a column that will be NOT "
+            "NULL in Oracle; no value is changed without your approval."
+        ),
+        "fix": (
+            "On a new table: approve creating the column NULL-able so empty strings land "
+            "as NULL (risk_acceptance option oracle_empty_as_null, signed as a Migration "
+            "Risk Contract). On an existing NOT NULL column: give it a DEFAULT, or map a "
+            "transform that writes a non-empty value; Datawrap never alters it."
+        ),
+        "examples": [
+            "PostgreSQL note TEXT NOT NULL holding '' into a new Oracle table.",
         ],
         "suggested_actions": [],
     },

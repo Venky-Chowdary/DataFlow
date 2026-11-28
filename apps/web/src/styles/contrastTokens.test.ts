@@ -144,20 +144,23 @@ describe("text-bearing controls route through --df-action-bg", () => {
     assert.match(enterprise, /\.df2-source-aside-steps li\.active \.df2-source-aside-step-marker\s*\{[^}]*var\(--df-action-bg/);
   });
 
-  it("every .df2-nav-item.active ink rule uses the action token", () => {
+  // The active nav item is ink on a tint (--df-brand-muted), not text on a
+  // fill: --df-brand-text is the action teal in light and a light teal in dark,
+  // so the name clears AA in both themes (--df-action-bg was 2.5:1 in dark).
+  it("every .df2-nav-item.active ink rule uses the brand text token", () => {
     for (const f of ["dataflow-ui.css", "shell-polish.css", "enterprise-platform.css"]) {
       const css = sheet(f);
       const rules = css.match(/\.df2-nav-item\.active\s*\{[^}]*\}/g) ?? [];
       assert.ok(rules.length >= 1, `${f}: expected a .df2-nav-item.active rule`);
       for (const rule of rules) {
         if (/color:/.test(rule)) {
-          assert.match(rule, /color:\s*var\(--df-action-bg/, `${f}: ${rule}`);
+          assert.match(rule, /color:\s*var\(--df-brand-text/, `${f}: ${rule}`);
         }
       }
       const icons = css.match(/\.df2-nav-item\.active[^{]*\.dt-nav-icon[^{]*\{[^}]*\}/g) ?? [];
       for (const rule of icons) {
         if (/color:/.test(rule)) {
-          assert.match(rule, /color:\s*var\(--df-action-bg/, `${f}: ${rule}`);
+          assert.match(rule, /color:\s*var\(--df-brand-text/, `${f}: ${rule}`);
         }
       }
     }
@@ -246,6 +249,15 @@ const TINTED: Array<[string, string]> = [
   ["--df-success-text", "--df-success-bg"],
   ["--df-warning-text", "--df-warning-bg"],
   ["--df-info-text", "--df-info-bg"],
+  // P1-8: every status ink on its tint and on the plain surfaces.
+  ["--df-danger-text", "--df-danger-bg"],
+  ["--df-success-text", "--df-surface"],
+  ["--df-warning-text", "--df-surface"],
+  ["--df-danger-text", "--df-surface"],
+  ["--df-info-text", "--df-surface"],
+  ["--df-success-text", "--df-surface-muted"],
+  ["--df-warning-text", "--df-surface-muted"],
+  ["--df-danger-text", "--df-surface-muted"],
   ["--df-brand-text", "--df-brand-muted"],
   ["--df-brand-text", "--df-brand-soft"],
   ["--df-brand-text", "--df-surface"],
@@ -295,6 +307,13 @@ for (const [themeName, map] of [["light", lightTheme], ["dark", darkTheme]] as c
       for (const surface of SURFACES) {
         const ratio = pairRatio("--df-focus-ring", surface, map);
         assert.ok(ratio >= 3, `focus ring on ${surface} is ${ratio.toFixed(2)}:1`);
+      }
+    });
+    it("a filled button's ring clears 3:1 against the fill and every surface (P1-24)", () => {
+      // Keyboard focus (not hover) is the state this ring marks: the resting fill.
+      for (const bg of [...SURFACES, "--df-action-bg"]) {
+        const ratio = pairRatio("--df-focus-ring-on-fill", bg, map);
+        assert.ok(ratio >= 3, `on-fill focus ring on ${bg} is ${ratio.toFixed(2)}:1`);
       }
     });
   });

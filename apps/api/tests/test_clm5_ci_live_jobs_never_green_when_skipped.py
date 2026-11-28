@@ -17,6 +17,7 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[3]
@@ -77,3 +78,55 @@ def test_every_sqlserver_junit_reaches_the_strict_checker() -> None:
     assert str(checker.get("if")).replace(" ", "") == "${{!cancelled()}}"
     spec = json.loads(MANIFEST.read_text(encoding="utf-8"))["jobs"]["cdc-sqlserver"]
     assert spec["mode"] == "strict" and spec["expected_skips"] == []
+
+
+#: In the Required PR gate (three green legs in a row). kafka-live joins after
+#: two consecutive green runs with its Redis peer (see ci.yml).
+_REQUIRED_LIVE_JOBS = {"oracle-live"}
+
+
+@pytest.mark.parametrize(("job_name", "engine", "starts"), [
+    ("oracle-live", "oracle", "start_ci_databases.sh oracle"),
+    ("kafka-live", "kafka", "start_ci_databases.sh kafka"),
+])
+def test_the_container_live_jobs_run_on_every_backend_change_and_feed_every_junit(
+    job_name: str, engine: str, starts: str
+) -> None:
+    """oracle-live / kafka-live need no secret: they start the engine and run.
+
+    They follow the changes filter (skipped only when the backend checks are
+    reused), start their engine, write junit only where the checker reads
+    it, run the checker after a failed step, and the evidence job waits for
+    them. Their manifest entry proves exactly their engine.
+    """
+    jobs = _jobs()
+    job = jobs[job_name]
+    assert str(job.get("if")).strip() == "${{ needs.changes.outputs.reuse != 'true' }}"
+    assert "secrets." not in json.dumps(job), "the container job must not need a secret"
+    assert not job.get("continue-on-error")
+    runs = "\n".join(str(s.get("run") or "") for s in job["steps"])
+    assert starts in runs
+    written: set[str] = set()
+    checker = None
+    for step in job["steps"]:
+        run = str(step.get("run") or "")
+        assert not step.get("continue-on-error"), step.get("name")
+        written |= set(re.findall(r'--junitxml="\$RUNNER_TEMP/live-junit/([\w.-]+)"', run))
+        if f"check_live_skips.py --job {job_name}" in run:
+            checker = step
+    assert written and checker is not None
+    fed = set(re.findall(r'--junit "\$RUNNER_TEMP/live-junit/([\w.-]+)"', str(checker["run"])))
+    assert written == fed, (sorted(written), sorted(fed))
+    assert str(checker.get("if")).replace(" ", "") == "${{!cancelled()}}"
+    assert job_name in jobs["live-engine-evidence"]["needs"]
+    # Never an opt-in exception in the gate: either required (fails on
+    # anything but success, a web-only reuse skip aside) or not in it at all.
+    gate = jobs["required-checks"]
+    gate_run = "\n".join(str(st.get("run") or "") for st in gate["steps"])
+    assert f'[ "$name" = "{job_name}" ]' not in gate_run
+    if job_name in _REQUIRED_LIVE_JOBS:
+        assert job_name in gate["needs"]
+        assert f'"{job_name}:$' in gate_run
+    spec = json.loads(MANIFEST.read_text(encoding="utf-8"))["jobs"][job_name]
+    assert spec["proves"] == [engine] and spec["mode"] in {"strict", "engine_scoped"}
+    assert not spec.get("emulated"), "a container of the real engine is not an emulator"

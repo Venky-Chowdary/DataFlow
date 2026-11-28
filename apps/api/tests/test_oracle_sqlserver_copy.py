@@ -17,6 +17,7 @@ if str(_API_ROOT) not in sys.path:
 from services.copy_fast_path import FastPathUnavailable  # noqa: E402
 from services.copy_oracle_pg import oracle_type_is_copy_safe  # noqa: E402
 from services.copy_oracle_sqlserver import copy_oracle_to_sqlserver  # noqa: E402
+from tests.helpers.live_env import oracle_creds, oracle_dsn  # noqa: E402
 
 
 def test_oracle_copy_safe_types_for_sqlserver():
@@ -39,6 +40,12 @@ def _oracle_password() -> str:
     if path.is_file():
         return path.read_text().strip()
     return "dataflow"
+
+
+def _ora_live() -> dict:
+    """Oracle from the environment (the oracle-live CI job exports DATAFLOW_ORACLE_*),
+    else the compose desktop lab's XE (XEPDB1)."""
+    return {**oracle_creds(default_service="XEPDB1"), "password": _oracle_password()}
 
 
 def _ora_ss_or_skip():
@@ -66,13 +73,13 @@ def _ss_cfg() -> dict:
 
 def _ora_cfg() -> dict:
     return {
-        "host": "127.0.0.1",
-        "port": 1521,
-        "database": "XEPDB1",
-        "service_name": "XEPDB1",
-        "username": "dataflow",
-        "password": _oracle_password(),
-        "schema": "DATAFLOW",
+        "host": _ora_live()["host"],
+        "port": _ora_live()["port"],
+        "database": _ora_live()["database"],
+        "service_name": _ora_live()["database"],
+        "username": _ora_live()["username"],
+        "password": _ora_live()["password"],
+        "schema": _ora_live()["schema"],
     }
 
 
@@ -98,9 +105,9 @@ def _ora_connect():
     oracledb = pytest.importorskip("oracledb")
     try:
         conn = oracledb.connect(
-            user="dataflow",
-            password=_oracle_password(),
-            dsn="127.0.0.1:1521/XEPDB1",
+            user=_ora_live()["username"],
+            password=_ora_live()["password"],
+            dsn=oracle_dsn(_ora_live()),
         )
     except Exception as exc:
         pytest.skip(f"Oracle auth failed: {exc}")

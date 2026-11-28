@@ -60,7 +60,9 @@ def test_offset_pinned_source_never_invents_session_relative(
     carrier = ddl_carrier_type("DATETIMEOFFSET(6)")
     target = create_new_mapping_target_type(carrier, dest)
     assert target == physical
-    assert is_lossy_coercion("DATETIMEOFFSET(6)", target, dest_db=dest) is False
+    # Oracle: python-oracledb binds the clock digits without the offset, so the
+    # instant moves and a Risk Contract is required (accuracy review finding 8).
+    assert is_lossy_coercion("DATETIMEOFFSET(6)", target, dest_db=dest) is (dest == "oracle")
 
 
 @pytest.mark.parametrize(

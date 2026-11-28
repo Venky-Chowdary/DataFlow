@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { classifyJobLogLine } from "../../lib/transferFailure";
+import { DtIcon } from "../DtIcon";
 
 export type LiveLogEntry = { id: number; text: string };
 
@@ -133,7 +134,7 @@ export function LiveEventLog({
             >
               {open ? "Collapse" : "Expand"}
               <span className="df2-live-log-chevron" aria-hidden>
-                {open ? "▾" : "▴"}
+                <DtIcon name={open ? "chevron-down" : "chevron-up"} size={14} />
               </span>
             </button>
           )}
@@ -145,7 +146,11 @@ export function LiveEventLog({
           className="df2-live-log-scroll"
           ref={scrollRef}
           onScroll={onScroll}
+          // A scrolling region must be reachable by keyboard (axe
+          // scrollable-region-focusable); `log` already makes it a named region.
           role="log"
+          tabIndex={0}
+          aria-label={title}
           aria-live="off"
           aria-relevant="additions"
         >

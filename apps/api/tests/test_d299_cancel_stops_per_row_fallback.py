@@ -170,11 +170,16 @@ def test_mysql_per_row_fallback_stops_after_cancel(monkeypatch):
     )
     landed: list[int] = [0]
     probe = _cancelling_probe(3, landed)
+    at_cancel: list[int] = []
 
     def counting_probe(rows_written=None):
         if rows_written is not None:
             landed[0] = rows_written
-        probe(rows_written)
+        try:
+            probe(rows_written)
+        except TransferCancelled:
+            at_cancel.append(landed[0])
+            raise
 
     set_cancel_probe(counting_probe)
     try:
@@ -188,7 +193,12 @@ def test_mysql_per_row_fallback_stops_after_cancel(monkeypatch):
                 create_table=False, write_mode="insert", error_policy="quarantine",
             )
         count = run_sql("mysql", f"SELECT COUNT(*) FROM `{table}`")[0][0]  # nosec B608
-        assert count <= 3, count
+        # The salvage splits the failed chunk (connectors.batch_salvage) and
+        # polls before every attempt, so nothing lands after the poll that saw
+        # the cancel: the table holds exactly what had landed then, the cancel
+        # reports it, and the chunk's other rows never land.
+        assert at_cancel and count == at_cancel[0], (count, at_cancel)
+        assert 3 <= count < 29, count
         assert ei.value.rows_written == count
     finally:
         set_cancel_probe(None)
@@ -293,9 +303,10 @@ def _pg_salvage_cancel_after(monkeypatch, salvaged_before_cancel: int, seen: dic
 
 def test_postgresql_salvage_rolls_back_rows_it_already_salvaged_on_cancel(monkeypatch):
     """D299: chunk 1 (ids 1-10) commits; chunk 2 fails on id 15 and is salvaged
-    row by row. A cancel after ids 11-13 were released under their savepoints
-    must roll those back too: the table keeps exactly chunk 1, and the cancel
-    reports the 10 committed rows, not 13."""
+    (split into savepointed batches, then single rows). A cancel after some of
+    ids 11-14 were released under their savepoints must roll those back too:
+    the table keeps exactly chunk 1, and the cancel reports the 10 committed
+    rows."""
     import psycopg2
 
     from tests.r13_mapping_harness import pg_cfg
@@ -332,8 +343,10 @@ def test_postgresql_salvage_rolls_back_rows_it_already_salvaged_on_cancel(monkey
                 create_table=False, write_mode="insert", error_policy="quarantine",
                 connection=conn, close_connection=False,
             )
-        # Ids 11-13 really were salvaged into the open chunk when cancel came...
-        assert seen["salvaged_uncommitted"] == 3, seen
+        # Rows of chunk 2 really were salvaged into the open chunk when cancel
+        # came (the split lands ids 11-12 as one batch before the poll that
+        # cancels)...
+        assert seen["salvaged_uncommitted"] >= 1, seen
         # ...and none of them committed afterwards.
         ids = [r[0] for r in run_sql("postgresql", f'SELECT id FROM "{table}" ORDER BY id')]  # nosec B608
         assert ids == list(range(1, 11)), ids
@@ -393,7 +406,7 @@ def test_postgresql_salvage_cancel_in_a_held_overwrite_discards_only_its_chunk(m
                 create_table=False, write_mode="insert", error_policy="quarantine",
                 connection=conn, close_connection=False, pg_overwrite_in_transaction=True,
             )
-        assert seen["salvaged_uncommitted"] == 3, seen
+        assert seen["salvaged_uncommitted"] >= 1, seen
         # Still inside the held overwrite: chunk 1 is there, the salvaged
         # chunk-2 rows are gone, the old rows were truncated, and the
         # transaction is not aborted (a full rollback would have dropped

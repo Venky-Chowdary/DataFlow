@@ -113,6 +113,18 @@ def _plan_in_file_dedupe(*configs: Mapping[str, Any] | None) -> str:
             return token
     return ""
 
+def _plan_dedupe_equality(*configs: Mapping[str, Any] | None) -> str:
+    """``exact`` / ``destination`` from the route configs (or their extras), else ""."""
+    for cfg in configs:
+        if not isinstance(cfg, Mapping):
+            continue
+        extra = cfg.get("extra") if isinstance(cfg.get("extra"), Mapping) else {}
+        raw = str(cfg.get("dedupe_key_equality") or extra.get("dedupe_key_equality") or "")
+        if raw.strip().lower() in {"exact", "destination"}:
+            return raw.strip().lower()
+    return ""
+
+
 def _plan_duplicate_policy(*configs: Mapping[str, Any] | None) -> str:
     """upsert / dedupe_skip / append from the source or destination the schedule stamped."""
     from services.duplicate_policy import normalize_duplicate_policy

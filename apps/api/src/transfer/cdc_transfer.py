@@ -2296,6 +2296,38 @@ def run_cdc_database_transfer(
     )
 
 
+def _judge_cdc_tables(
+    source: Any, destination: Any, mappings: list[dict], stream_contracts: list[dict], selected: list[Any]
+) -> dict[str, dict[str, Any]]:
+    """Each table's coverage verdict, with the map it applies (its own, else its columns)."""
+    from .source_column_coverage import judge_tables_before_any_write
+
+    def _own(name: str) -> list[dict] | None:
+        for c in stream_contracts or []:
+            maps = c.get("mappings") if isinstance(c, dict) and c.get("name") == name else None
+            if isinstance(maps, list) and maps:
+                return maps
+        return None
+
+    names = [(c.name or "").strip() or "stream" for c in selected]
+    return judge_tables_before_any_write(
+        source=source, destination=destination, streams=[(n, _own(n)) for n in names],
+        request_mappings=mappings,
+        original=(
+            getattr(source, "table", None), getattr(source, "collection", None),
+            getattr(destination, "table", None), getattr(destination, "collection", None),
+        ),
+    )
+
+
+def _with_table_records(judged: dict[str, dict[str, Any]], result: tuple) -> tuple:
+    """Each table's health entry carries its coverage record (Trust Report / job_trust)."""
+    for entry in (result[2] or {}).get("streams") or []:
+        if isinstance(entry, dict) and str(entry.get("name") or "") in judged:
+            entry.setdefault("schema_propagation", judged[str(entry["name"])]["record"])
+    return result
+
+
 def _run_cdc_multi_stream(
     source: Any,
     destination: Any,
@@ -2334,6 +2366,8 @@ def _run_cdc_multi_stream(
 
     # Before either reader. A CALL must not fall through to sequential upsert.
     refuse_cdc_destination_row_apply(destination, sync_mode, stream_contracts)
+    # Each table is judged with the map it applies before the first reader opens.
+    judged = _judge_cdc_tables(source, destination, mappings, stream_contracts, selected)
     from services.cdc_exactly_once import EOS_TXN_WIRED_DESTS, normalize_delivery_guarantee
     from services.cdc_multi_table import can_share_log_reader
 
@@ -2344,7 +2378,7 @@ def _run_cdc_multi_stream(
     if (not eos or dest_wired) and can_share_log_reader(src_fmt, len(selected)):
         shared_progress: dict[str, Any] = {}
         try:
-            return _run_cdc_shared_multi_table(
+            return _with_table_records(judged, _run_cdc_shared_multi_table(
                 source,
                 destination,
                 mappings,
@@ -2363,7 +2397,7 @@ def _run_cdc_multi_stream(
                 delivery_pinned=delivery_pinned,
                 workspace_id=workspace_id,
                 progress=shared_progress,
-            )
+            ))
         except Exception as exc:
             from services.cdc_lease import CdcLeaseConflict
             from services.error_handling import TransferCancelled
@@ -2387,7 +2421,7 @@ def _run_cdc_multi_stream(
                 reason_code="shared_reader_failed_before_write",
             )
 
-    return _run_cdc_multi_stream_sequential(
+    return _with_table_records(judged, _run_cdc_multi_stream_sequential(
         source,
         destination,
         mappings,
@@ -2406,7 +2440,7 @@ def _run_cdc_multi_stream(
         delivery_pinned=delivery_pinned,
         workspace_id=workspace_id,
         schedule_id=schedule_id,
-    )
+    ))
 
 
 def _shared_reader_left_no_trace(progress: dict[str, Any]) -> bool:

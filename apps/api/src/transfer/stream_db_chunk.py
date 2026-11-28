@@ -44,9 +44,36 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
 
     with cfg._schema_absorb_lock:
         known = set(cfg.columns)
-        new_headers = [h for h in batch.headers if h and h not in known]
+        # A field the operator declared omitted stays off the write, however
+        # late it appears: it is never adopted as a new column.
+        omitted = getattr(cfg, "omitted_sources", None) or frozenset()
+        new_headers = [
+            h for h in batch.headers if h and h not in known and str(h).lower() not in omitted
+        ]
         if not new_headers and set(batch.headers).issubset(known):
             return
+        if new_headers:
+            from .source_column_coverage import refuse_mid_run_column
+
+            from services.flatten_protection import coverage_lineage
+
+            already = {str(m.get("source") or "") for m in cfg.mappings}
+            held = refuse_mid_run_column(
+                cfg.destination, cfg.dest_type,
+                [h for h in new_headers if h not in already], cfg.mappings,
+                coverage_lineage(
+                    str(cfg.src_type or ""), getattr(cfg.source, "extra", None),
+                    [
+                        row if isinstance(row, dict) else dict(zip(batch.headers, row))
+                        for row in batch.rows[:100]
+                    ],
+                    cfg.mappings,
+                ),
+                dest_columns=cfg.dest_live_columns,
+                dest_existed=cfg.dest_existed,
+            )
+            # Carried inside a parent written whole: not a column of its own here.
+            new_headers = [h for h in new_headers if h not in held]
         cfg.columns = union_attribute_keys(cfg.columns, batch.headers)
         mapped_sources = {str(m.get("source") or "") for m in cfg.mappings}
         meta = getattr(batch, "meta", None) or {}
@@ -67,6 +94,10 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
                     "assignment_strategy": "create_compatible_new",
                 })
                 mapped_sources.add(h)
+                # Disclosed on the job and the Trust Report as added during the run.
+                if not isinstance(run.tally.dest_summary, dict):
+                    run.tally.dest_summary = {}
+                run.tally.dest_summary.setdefault("columns_added_during_run", []).append(h)
                 cfg.ddl_log.append(
                     f"{cfg.dest_type.upper()} COLUMN {h} {_stream.ddl_type(cfg.dest_type, cfg.schema.get(h, 'string'))} "
                     f"(discovered mid-transfer from {cfg.src_type} — no silent drop)"
@@ -571,6 +602,8 @@ def _process_db_chunk_inner(run, idx: int, batch: Any) -> dict[str, Any]:
                         "table": _rtbl,
                         "backup": _rbak,
                         "schema": _rschema,
+                        # D134 / D302: a cancel restores only an overwrite's.
+                        "sync_mode": str(cfg.effective_sync or ""),
                     }
                 except Exception as _rbak_exc:
                     _stream.logger.warning(

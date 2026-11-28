@@ -3,7 +3,7 @@ import {
   type ReactNode,
   forwardRef,
 } from "react";
-import { ButtonLoader } from "../LoadingState";
+import { Spinner } from "../LoadingState";
 
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "default";
 export type ButtonSize = "sm" | "md" | "lg";
@@ -77,7 +77,12 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       {...rest}
     >
       {loading ? (
-        <ButtonLoader label={loadingLabel} />
+        // Busy keeps the label: the spinner replaces only the leading icon.
+        <>
+          <Spinner size="sm" label="" />
+          {loadingLabel ?? children}
+          {trailingIcon}
+        </>
       ) : (
         <>
           {leadingIcon}

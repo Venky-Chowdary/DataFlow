@@ -96,7 +96,183 @@ def create_new_source_type(source_type: str, dest_db: str, source_db: str = "") 
     if engine in _MYSQL and base == "TIMESTAMP" and dest in _PG_FAMILY_DESTS - {"redshift"}:
         fsp = _fsp(source_type)
         return f"TIMESTAMP({fsp}) WITH TIME ZONE" if fsp else "TIMESTAMP WITH TIME ZONE"
+    if engine in _ORACLE and _oracle_decimal_float(source_type) and dest and dest not in _ORACLE:
+        # Oracle FLOAT is a decimal NUMBER of up to 38 digits (accuracy review
+        # finding 8): carry it as NUMBER, never as a binary64 double.
+        return "NUMBER"
+    if engine in _POSTGRES and base == "MONEY" and dest and dest not in _PG_ONLY_MONEY:
+        # money is an int64 count of the smallest unit: up to 19 digits, with
+        # lc_monetary's fraction digits (2 usually, up to 4 here).
+        return "NUMERIC(23,4)"
     return source_type
+
+
+_PG_ONLY_MONEY = frozenset({"postgresql", "postgres"})
+_BINARY64 = frozenset({"DOUBLE", "DOUBLE PRECISION", "FLOAT", "FLOAT8", "FLOAT64", "BINARY_DOUBLE", "REAL",
+                       "FLOAT4", "BINARY_FLOAT"})
+
+
+def _bare(type_text: str) -> str:
+    """The type name without its ``(n)`` arguments: ``TIMESTAMP WITH TIME ZONE``."""
+    from services.type_system import strip_identity_qualifier
+
+    text = re.sub(r"\(\s*[\d,\s]*\)", "", strip_identity_qualifier(type_text or "").upper())
+    return " ".join(text.split())
+
+
+def _oracle_decimal_float(source_type: str) -> bool:
+    """Oracle FLOAT / FLOAT(p) with more binary digits than a double's 53."""
+    base = _base(source_type)
+    if base not in {"FLOAT", "DOUBLE PRECISION"}:
+        return False
+    p = _fsp(source_type)
+    return not p or int(p) > 53
+
+
+def offset_dropped(source_type: str, target_type: str, *, dest_db: str = "", source_db: str = "") -> str:
+    """Why an offset-bearing source loses its UTC offset on this target, or ``""``.
+
+    SQL Server ``datetimeoffset`` and Oracle ``TIMESTAMP WITH TIME ZONE`` store
+    each value's own offset (or zone region); PostgreSQL ``timestamptz``, a
+    BSON date and most instants keep the instant only. The product loads the
+    instant (D136); the classifier discloses the dropped offset instead of
+    grading the pair a round trip (accuracy review finding 8).
+    """
+    from services.decision_kernel.types import normalize_logical_type
+
+    engine = _engine(source_db)
+    dest = _dest(dest_db)
+    if not (
+        (engine in _SQLSERVER and _base(source_type) == "DATETIMEOFFSET")
+        or (engine in _ORACLE and _bare(source_type) == "TIMESTAMP WITH TIME ZONE")
+    ):
+        return ""
+    if normalize_logical_type(target_type) not in {"datetime", "date"} or _keeps_offset(target_type, dest):
+        return ""
+    return (
+        f"{source_type} stores each value's own UTC offset (or zone region); "
+        f"{target_type} keeps the instant but not the offset"
+    )
+
+
+def oracle_zone_bind_shifts_instant(
+    source_type: str, target_type: str, *, dest_db: str = "", source_db: str = ""
+) -> str:
+    """Why an instant written into an Oracle zone-bearing column may move, or ``""``.
+
+    python-oracledb encodes only a ``datetime``'s clock digits
+    (``impl/base/encoders.pyx`` never reads ``tzinfo``; ``encode_timestamp_tz``
+    writes a fixed ``+00:00``) and Oracle reads them in the session time zone.
+    The writer binds UTC digits on a session pinned to ``+00:00``
+    (:mod:`connectors.oracle_session`), so the instant is kept only when this
+    run's destination session read back UTC (:mod:`services.oracle_session_scope`).
+    Otherwise the wall clock lands in whatever zone the session has and the
+    pair needs a Risk Contract (accuracy review finding 8). A same-instance
+    Oracle to Oracle copy runs server side and is not judged here.
+    """
+    from connectors.oracle_tstz import oracle_tz_kind
+    from services.oracle_session_scope import oracle_same_instance, oracle_utc_pin
+    from services.type_system import datetime_timezone_polarity
+
+    if _dest(dest_db) not in _ORACLE or oracle_tz_kind(target_type) is None:
+        return ""
+    if datetime_timezone_polarity(source_type) not in {"tz", "ltz"}:
+        return ""
+    if (source_db or "") in _ORACLE and oracle_same_instance():
+        return ""
+    confirmed, reason = oracle_utc_pin()
+    if confirmed:
+        return ""
+    return (
+        f"{target_type} is written through python-oracledb, which sends a value's "
+        "clock digits without its offset, and Oracle reads them in the session time "
+        f"zone; the session is not confirmed UTC ({reason}), so a {source_type} "
+        "instant may move"
+    )
+
+
+_MYSQL_INSTANT_CARRIERS = frozenset({"DATETIME", "TIMESTAMP"})
+
+
+def _fraction_digits(type_text: str, default: int) -> int:
+    digits = _fsp(type_text)
+    return int(digits) if digits else default
+
+
+def instant_kept_label_lost(source_type: str, target_type: str, *, dest_db: str = "") -> str:
+    """The disclosure for an instant the writer keeps while dropping its offset, or ``""``.
+
+    Accuracy review finding 8 (lead rule): an offset or instant source whose
+    writer binds the UTC instant, where only the offset label (or, for MySQL
+    ``DATETIME``, the zone marker) is lost, is disclosed, not a Risk Contract.
+    Writers pinned by the type-fidelity truth table: MySQL/MariaDB
+    ``DATETIME``/``TIMESTAMP`` (UTC digits, session pinned to UTC), Snowflake
+    ``TIMESTAMP_LTZ``, BigQuery ``TIMESTAMP``, and Oracle ``WITH LOCAL TIME
+    ZONE`` on a session that read back UTC. A narrower fraction than the
+    source keeps (below six digits) is a different loss and is not covered.
+    """
+    from services.decision_kernel.types import normalize_logical_type
+    from services.type_system import datetime_timezone_polarity
+
+    # Only a date+time instant: a time of day has no date to keep (the writer
+    # would invent one), so it is never this rule's.
+    if normalize_logical_type(source_type) != "datetime":
+        return ""
+    if datetime_timezone_polarity(source_type) not in {"tz", "ltz"}:
+        return ""
+    dest = _dest(dest_db)
+    bare = _bare(target_type)
+    if dest in _MYSQL and bare in _MYSQL_INSTANT_CARRIERS:
+        tgt_digits = _fraction_digits(target_type, 0)
+        zone_less = bare == "DATETIME"
+    elif dest == "snowflake" and bare == "TIMESTAMP_LTZ":
+        tgt_digits, zone_less = _fraction_digits(target_type, 9), False
+    elif dest == "bigquery" and bare == "TIMESTAMP":
+        tgt_digits, zone_less = 6, False
+    elif dest in _ORACLE and bare == "TIMESTAMP WITH LOCAL TIME ZONE":
+        from services.oracle_session_scope import oracle_utc_pin
+
+        if not oracle_utc_pin()[0]:
+            return ""
+        tgt_digits, zone_less = _fraction_digits(target_type, 6), False
+    else:
+        return ""
+    if tgt_digits < min(_fraction_digits(source_type, 6), 6):
+        return ""
+    if zone_less:
+        return (f"{target_type}: the instant is stored as UTC digits in a zone-less column; "
+                "the offset is not kept")
+    return f"{target_type} keeps the instant but not the offset"
+
+
+def _offsets_all_utc(population: Any) -> bool:
+    if population is None:
+        return False
+    measured = False
+    for value in population:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        measured = True
+        if not text.endswith(("+00:00", "+0000", "Z", "+00", "-00:00")):
+            return False
+    return measured
+
+
+def _keeps_offset(target_type: str, dest: str) -> bool:
+    text = " ".join((target_type or "").upper().split())
+    if "DATETIMEOFFSET" in text or "TIMESTAMP_TZ" in text:
+        return True
+    # Oracle's column stores an offset, but the row writer binds UTC digits
+    # (python-oracledb cannot carry one): only a server-side copy keeps it.
+    from services.oracle_session_scope import oracle_same_instance
+
+    return (
+        dest in _ORACLE and "WITH TIME ZONE" in text and "LOCAL" not in text
+        and oracle_same_instance()
+    )
 
 
 def _zone_aware(target_type: str) -> bool:
@@ -116,6 +292,9 @@ def engine_semantic_loss(
     from services.decision_kernel.types import normalize_logical_type
 
     engine = _engine(source_db)
+    shifted = oracle_zone_bind_shifts_instant(source_type, target_type, dest_db=dest_db, source_db=engine)
+    if shifted:
+        return shifted
     if not engine:
         return ""
     base = _base(source_type)
@@ -152,6 +331,38 @@ def engine_semantic_loss(
             f"MySQL TIMESTAMP is an instant (stored in UTC); {target_type} is a wall "
             "clock with no zone, so the instant's zone is dropped"
         )
+    if engine in _ORACLE and _oracle_decimal_float(source_type) and dest not in _ORACLE:
+        if _base(target_type) in _BINARY64 or tgt_l == "float":
+            return (
+                f"Oracle {source_type} keeps up to 38 significant decimal digits (binary "
+                f"precision 126); {target_type} is a binary double of 15 to 17 digits"
+            )
+        if tgt_l == "decimal":
+            from services.type_system import parse_numeric_precision_scale
+
+            precision, scale = parse_numeric_precision_scale(target_type)
+            if precision is not None and not _decimals_fit(population, precision, scale or 0):
+                return (
+                    f"Oracle {source_type} ranges to 1E+125 with 38 significant digits; "
+                    f"{target_type} keeps {precision - (scale or 0)} integer and {scale or 0} "
+                    "fraction digits"
+                )
+    if engine in _POSTGRES and base == "MONEY" and dest not in _PG_ONLY_MONEY:
+        from services.type_system import parse_numeric_precision_scale
+
+        tgt_base = _base(target_type)
+        if tgt_base in {"MONEY", "SMALLMONEY"}:
+            return (
+                f"PostgreSQL money reaches 92233720368547758.07; {target_type} stops at "
+                f"{'922337203685477.5807' if tgt_base == 'MONEY' else '214748.3647'}"
+            )
+        if tgt_l == "decimal":
+            precision, scale = parse_numeric_precision_scale(target_type)
+            if precision is not None and precision - (scale or 0) < 17:
+                return (
+                    "PostgreSQL money reaches 92233720368547758.07 (17 integer digits); "
+                    f"{target_type} keeps {precision - (scale or 0)}"
+                )
     if engine in _POSTGRES and base in {"NUMERIC", "DECIMAL"} and "(" not in (source_type or ""):
         from services.type_system import parse_numeric_precision_scale
 

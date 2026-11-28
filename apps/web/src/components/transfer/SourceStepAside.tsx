@@ -1,4 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
+import { SkeletonTable } from "../LoadingState";
 import { connectorDisplayName } from "../../lib/connectorTypes";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
@@ -81,73 +82,25 @@ function ProfilingSteps({ active }: { active: boolean }) {
   );
 }
 
+/** The shape of the preview that is about to land: no layout jump when it does. */
 function SchemaSkeleton() {
-  return (
-    <div className="df2-source-aside-skeleton" aria-hidden>
-      <div className="df2-source-aside-skeleton-row" />
-      <div className="df2-source-aside-skeleton-row short" />
-      <div className="df2-source-aside-skeleton-chips">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <span key={i} className="df2-source-aside-skeleton-chip" />
-        ))}
-      </div>
-      <div className="df2-source-aside-skeleton-table">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="df2-source-aside-skeleton-line" />
-        ))}
-      </div>
-    </div>
-  );
+  return <SkeletonTable rows={5} columns={4} label="Reading columns and sample rows" />;
 }
 
-const ANALYZE_PHASES = [
-  "Connecting to source…",
-  "Reading table & column metadata…",
-  "Sampling representative rows…",
-  "Inferring types & building preview…",
-];
-
 /**
- * Polished, honest loader shown while live schema introspection runs. The bar
- * is intentionally indeterminate (the backend returns one result, not a stream
- * of progress) but the cycling caption reflects the real phases of the analysis.
+ * Shown while live schema introspection runs. The API returns one result, not
+ * a stream of phases, so the panel says what is happening once and shows the
+ * shape of the table that is about to land.
  */
 function SchemaAnalyzingPanel({ target }: { target?: string }) {
-  const [phaseIdx, setPhaseIdx] = useState(0);
-  useEffect(() => {
-    const t = window.setInterval(
-      () => setPhaseIdx((i) => (i + 1) % ANALYZE_PHASES.length),
-      1100,
-    );
-    return () => window.clearInterval(t);
-  }, []);
-
   return (
     <div className="df2-source-aside df2-source-analyze">
       <div className="df2-source-aside-head">
         <div>
-          <h4>Analyzing source{target ? ` · ${target}` : ""}</h4>
-          <p>Introspecting schema and sampling live rows from the connector…</p>
+          <h4>Reading source{target ? ` · ${target}` : ""}</h4>
+          <p>Reading columns, types and sample rows from the connection.</p>
         </div>
-        <span className="df2-badge df2-badge-xs df2-badge-live">Analyzing</span>
       </div>
-
-      <div
-        className="df2-source-analyze-progress"
-        role="progressbar"
-        aria-label="Schema analysis in progress"
-        aria-busy="true"
-      >
-        <div className="df2-source-analyze-track">
-          <span className="df2-source-analyze-indeterminate" />
-        </div>
-        <p className="df2-source-analyze-phase" aria-live="polite">
-          <DtIcon name="sparkle" size={13} />
-          {ANALYZE_PHASES[phaseIdx]}
-        </p>
-      </div>
-
-      <ProfilingSteps active />
       <SchemaSkeleton />
     </div>
   );
@@ -186,7 +139,7 @@ function SchemaErrorPanel({
           <p>{text}</p>
           {reference && <ErrorReferenceChip reference={reference} />}
         </div>
-        <span className="df2-badge df2-badge-xs df2-badge-run">Error</span>
+        <span className="df2-badge df2-badge-xs df2-badge-error">Error</span>
       </div>
       <div className="df2-source-aside-empty">
         <DtIcon name="alert" size={22} />
@@ -228,16 +181,13 @@ function FileAwaitingPanel({ uploading }: { uploading?: boolean }) {
           <h4>Structure preview</h4>
           <p>
             {uploading
-              ? "Profiling your file — real columns and sample values load here."
-              : "Upload or load a sample above. Detected schema and sample rows show here automatically."}
+              ? "Reading your file: columns and sample rows appear here."
+              : "Upload a file or load the sample. Columns and sample rows appear here."}
           </p>
         </div>
-        <span className={`df2-badge df2-badge-xs ${uploading ? "df2-badge-live" : ""}`}>
-          {uploading ? "Profiling…" : "Waiting"}
-        </span>
       </div>
 
-      <ProfilingSteps active={Boolean(uploading)} />
+      {uploading ? null : <ProfilingSteps active={false} />}
 
       {uploading ? (
         <SchemaSkeleton />
@@ -255,11 +205,6 @@ function FileAwaitingPanel({ uploading }: { uploading?: boolean }) {
           </div>
         </div>
       )}
-
-      <div className="df2-source-aside-hint">
-        <DtIcon name="sparkle" size={14} />
-        No sample data shown until your file is profiled — avoids confusion with real results.
-      </div>
     </div>
   );
 }
@@ -449,7 +394,7 @@ export function SourceStepAside({
         )}
 
         <div className="df2-source-aside-hint">
-          <DtIcon name="sparkle" size={14} />
+          <DtIcon name="info" size={14} />
           {multiStream
             ? "Multi-stream preview opens one tab per name once schemas are read."
             : "Schema appears here as soon as the table or collection is readable."}

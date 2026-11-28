@@ -130,12 +130,27 @@ def _canonical_payload(payload: dict[str, Any]) -> str:
     return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _server_contract_api() -> Any:
+    """The API's keyed contract signer/verifier, when this package runs inside it."""
+    try:
+        from services import migration_risk_contract as api
+    except ImportError:
+        return None
+    return api
+
+
 def verify_risk_contract_signature(contract: dict[str, Any] | None) -> bool:
+    """Inside the API: the keyed verification (an unkeyed digest anyone can compute
+    clears nothing unless the server recorded that exact contract). Standalone,
+    the package checks the digest only."""
     if not isinstance(contract, dict):
         return False
     sig = str(contract.get("signature") or "")
     if not sig:
         return False
+    api = _server_contract_api()
+    if api is not None:
+        return bool(api.verify_risk_contract(contract))
     digest = hashlib.sha256(_canonical_payload(contract).encode("utf-8")).hexdigest()
     expected = f"mrc-sha256:{digest}"
     return sig == expected
@@ -238,6 +253,9 @@ def partition_transform_dry_run_errors(
 
 
 def sign_risk_contract_payload(payload: dict[str, Any]) -> str:
+    api = _server_contract_api()
+    if api is not None:
+        return str(api.sign_risk_contract(payload))
     digest = hashlib.sha256(_canonical_payload(payload).encode("utf-8")).hexdigest()
     return f"mrc-sha256:{digest}"
 

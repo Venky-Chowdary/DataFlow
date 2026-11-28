@@ -20,11 +20,13 @@ exactly :func:`services.parity_scale.ce1.key_bucket` / ``row_bucket``.
 
 from __future__ import annotations
 
+import contextlib
+import threading
 from abc import abstractmethod
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
-from services.parity_scale.dialects.base import Digest, KeyBound, LeafRow, Side, UnitTimeout
+from services.parity_scale.dialects.base import Digest, KeyBound, LeafRow, Side, SnapshotYielded, UnitTimeout
 from services.parity_scale.plan import ColumnPlan, TablePlan
 
 #: Engines whose timestamp storage is PostgreSQL's (microseconds since 2000-01-01).
@@ -57,6 +59,15 @@ class SqlSide(Side):
                 raise ValueError(f"{type(self).__name__} needs a connection or a connect() factory")
             connection = connect()
         self.conn = connection
+        #: Opens a second connection (the lock watch of a pinned side uses it).
+        self._monitor_connect = connect
+        #: Held while this side's connection is in use (a statement, a streamed fetch):
+        #: the lock watch releases an idle pinned side itself, and cancels a busy one.
+        self._use = threading.RLock()
+        self._watch: tuple[threading.Thread, threading.Event] | None = None
+        self._cancel_sent = False
+        self._streaming = False
+        self.yield_reason = ""
         self.engine_cols = list(plan.engine_columns)
         self.compared_cols = list(plan.compared_columns)
         self.key_cols = list(plan.key_plans()) if plan.key else []
@@ -115,11 +126,156 @@ class SqlSide(Side):
     def held_predicate(self) -> str: ...
 
     @abstractmethod
-    def execute(self, sql: str, params: Sequence[Any]) -> list[tuple[Any, ...]]:
+    def _execute(self, sql: str, params: Sequence[Any]) -> list[tuple[Any, ...]]:
         """Run one read-only statement under the side's timeout; raise UnitTimeout."""
 
     @abstractmethod
     def stream(self, sql: str, params: Sequence[Any], batch: int) -> Iterator[tuple[Any, ...]]: ...
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+        """One statement; if the lock watch cancelled it to let the snapshot go, it runs
+        again statement by statement (never a timeout, never a lost unit)."""
+        with self._use:
+            self._yield_if_asked()
+            try:
+                rows = self._execute(sql, params)
+            except UnitTimeout:
+                if not self._cancel_sent:
+                    raise
+                self._cancel_sent = False
+                self._yield_if_asked()
+                rows = self._execute(sql, params)
+            # A cancel that arrived after its statement finished is spent: a later genuine
+            # timeout is never taken for it (and never silently retried).
+            self._cancel_sent = False
+            return rows
+
+    # ── a pinned snapshot yields to sessions waiting on its locks ─────────────
+    #: Whether an idle streamed read can be let go by a rollback on its own connection
+    #: (PostgreSQL's cursor can; MySQL's unbuffered result must be cancelled first).
+    release_idle_stream = True
+
+    def session_id(self) -> Any:
+        """This side's session on the server (its process or connection id)."""
+        return None
+
+    def prepare_monitor(self, monitor: Any) -> None:
+        """Set up the lock watch's own connection."""
+        return None
+
+    def lock_waiters(self, monitor: Any, session: Any) -> list[str]:
+        """Sessions waiting on a lock ``session`` holds, in words (never a query's text)."""
+        return []
+
+    def watch_refusal(self, monitor: Any, session: Any = None) -> str:
+        """``""`` when the watch can see other sessions' lock waits, else why not (then no pin)."""
+        return ""
+
+    def cancel_running(self, monitor: Any, session: Any) -> None:
+        """Cancel this side's running statement (from the lock watch's thread)."""
+        return None
+
+    def _yield_if_asked(self) -> None:
+        if self.yield_reason and self.pinned:
+            self.unpin()
+
+    def release_pin(self) -> None:
+        with self._use:
+            self.unpin()
+        self._stop_watch()
+
+    def _stop_watch(self) -> None:
+        if self._watch is not None:
+            self._watch[1].set()
+            self._watch = None
+
+    def watch_locks(self, interval_s: float) -> str:
+        """Watch, on a second connection, for sessions waiting on a lock the pinned snapshot
+        holds (a TRUNCATE, a table swap, DDL): the snapshot is let go as soon as one waits."""
+        if not self.pinned:
+            return ""
+        if self._monitor_connect is None:
+            return "no second connection to watch for sessions waiting on the snapshot's locks"
+        monitor = None
+        try:
+            with self._use:
+                session = self.session_id()
+            monitor = self._monitor_connect()
+            self.prepare_monitor(monitor)
+            blind = self.watch_refusal(monitor, session)
+            if not blind:
+                self.lock_waiters(monitor, session)  # the watch works on this server
+        except Exception as exc:  # noqa: BLE001 — cannot watch: the caller does not hold the snapshot
+            blind = f"sessions waiting on the snapshot's locks cannot be watched here ({type(exc).__name__})"
+        if blind:
+            if monitor is not None:
+                with contextlib.suppress(Exception):
+                    monitor.close()
+            return blind
+        stop = threading.Event()
+        thread = threading.Thread(target=self._watch_loop, args=(monitor, session, float(interval_s), stop),
+                                  name="psd1-lockwatch", daemon=True)
+        self._watch = (thread, stop)
+        thread.start()
+        return ""
+
+    def _watch_loop(self, monitor: Any, session: Any, interval_s: float, stop: threading.Event) -> None:
+        try:
+            while not stop.wait(interval_s):
+                if not self.pinned:
+                    return
+                try:
+                    waiters = self.lock_waiters(monitor, session)
+                except Exception as exc:  # noqa: BLE001 — cannot tell any more: let go to be safe
+                    waiters = [f"any waiting session (the lock watch stopped: {type(exc).__name__})"]
+                if not waiters:
+                    continue
+                self.yield_reason = f"released the snapshot so {waiters[0]} could proceed"
+                if self._use.acquire(blocking=False):
+                    try:
+                        if self.release_idle_stream or not self._streaming:
+                            self.unpin()  # idle: let go now
+                            return
+                    finally:
+                        self._use.release()
+                self._cancel_sent = True
+                with contextlib.suppress(Exception):
+                    self.cancel_running(monitor, session)
+                return
+        finally:
+            with contextlib.suppress(Exception):
+                monitor.close()
+
+    def _guarded_stream(self, rows: Callable[[], Iterator[tuple[Any, ...]]]) -> Iterator[tuple[Any, ...]]:
+        """A streamed read whose fetches hold the connection; a pinned read the lock watch let
+        go raises :class:`SnapshotYielded` (the driver reads that part again)."""
+        was_pinned = self.pinned
+        with self._use:
+            self._yield_if_asked()
+            was_pinned = self.pinned
+            self._streaming = True
+            it = rows()
+        try:
+            while True:
+                with self._use:
+                    if was_pinned and (not self.pinned or self.yield_reason):
+                        raise SnapshotYielded(self.yield_reason)
+                    try:
+                        row = next(it)
+                    except StopIteration:
+                        return
+                    except Exception as exc:
+                        if was_pinned and (self._cancel_sent or self.yield_reason):
+                            self._cancel_sent = False
+                            raise SnapshotYielded(self.yield_reason) from exc
+                        raise
+                yield row
+        finally:
+            with self._use:
+                with contextlib.suppress(Exception):
+                    it.close()
+                self._streaming = False
+                self._yield_if_asked()
 
     def limit(self, sql_without_limit: str, n: int) -> tuple[str, list[Any]]:
         return f"{sql_without_limit} LIMIT %s", [int(n)]
@@ -159,8 +315,23 @@ class SqlSide(Side):
             clauses.append("(" + " OR ".join(ors) + ")")
         return (" AND ".join(clauses) or "1 = 1"), params
 
-    def where(self, lo: KeyBound, hi: KeyBound) -> tuple[str, list[Any]]:
-        sql, params = self.range_predicate(lo, hi) if self.key_cols else ("1 = 1", [])
+    def null_key(self) -> str:
+        """Rows with no key value (any key column NULL): no key range holds them."""
+        return " OR ".join(f"{k} IS NULL" for k in self.quoted_keys())
+
+    def where(self, lo: KeyBound, hi: KeyBound, *, nulls: bool = False) -> tuple[str, list[Any]]:
+        """``lo <= key < hi`` over rows with a key value, or (``nulls``) the rows without one.
+
+        A NULL key compares as unknown, so it is in no range: key ranges hold only
+        non-NULL keys, and the NULL-key rows are their own unit (compared by row).
+        """
+        if not self.key_cols:
+            sql, params = "1 = 1", []
+        elif nulls:
+            sql, params = f"({self.null_key()})", []
+        else:
+            sql, params = self.range_predicate(lo, hi)
+            sql = f"{sql} AND NOT ({self.null_key()})"
         if self._held:
             sql = f"{sql} AND NOT ({self._held})"
         return sql, params
@@ -239,7 +410,7 @@ class SqlSide(Side):
         if strategy in {"auto", "sample"}:
             per_unit = 50
             fraction = min(1.0, units * per_unit / estimate)
-            keys = self.sample_keys(fraction, units * per_unit * 4)
+            keys = [k for k in (self.sample_keys(fraction, units * per_unit * 4) or []) if None not in tuple(k)]
             if keys:
                 pick = max(1, len(keys) // units)
                 points = []
@@ -362,15 +533,30 @@ class SqlSide(Side):
         rows = self.execute(sql, [*params, *[h.lower() for h in row_hashes], *lim])
         return [(str(r[0]).lower(), tuple(r[1:])) for r in rows]
 
+    range_stream = True
+
     def iter_stream(
-        self, columns: Sequence[ColumnPlan], batch: int = 5000
+        self, columns: Sequence[ColumnPlan], batch: int = 5000, lo: KeyBound = None, hi: KeyBound = None,
+        *, nulls: bool = False,
     ) -> Iterator[tuple[tuple[Any, ...] | None, tuple[Any, ...]]]:
         width = len(self.key_cols)
         names = [*self.quoted_keys(), *(self.quote(self.column_name(c)) for c in columns)]
-        where, params = self.where(None, None)
+        where, params = self.where(lo, hi, nulls=nulls)
         sql = f"SELECT {', '.join(names)} FROM {self.table_ref} WHERE {where}"
-        for row in self.stream(sql, params, batch):
+        for row in self._guarded_stream(lambda: self.stream(sql, params, batch)):
             yield (tuple(row[:width]) if width else None), tuple(row[width:])
+
+    def null_key_count(self) -> int:
+        if not self.key_cols:
+            return 0
+        where, params = self.where(None, None, nulls=True)
+        sql = f"SELECT COUNT(*) FROM {self.table_ref} WHERE {where}"
+        return int(self.execute(sql, params)[0][0])
+
+    def total_count(self) -> int:
+        where = f"NOT ({self._held})" if self._held else "1 = 1"
+        sql = f"SELECT COUNT(*) FROM {self.table_ref} WHERE {where}"
+        return int(self.execute(sql, [])[0][0])
 
     def held_count(self) -> int:
         if not self._held:
@@ -379,6 +565,7 @@ class SqlSide(Side):
         return int(self.execute(sql, [])[0][0])
 
     def close(self) -> None:
+        self._stop_watch()
         try:
             self.conn.close()
         except Exception:  # noqa: BLE001 — closing a broken connection

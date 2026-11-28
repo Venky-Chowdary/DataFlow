@@ -91,6 +91,75 @@
       "min_executed": 8,
       "expected_skips": []
     },
+    "oracle-live": {
+      "proves": ["oracle"],
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "strict",
+      "engines": ["oracle", "postgresql", "mysql", "mongodb", "redis", "sqlserver", "sqlite", "files"],
+      "container": "Oracle Database 23ai Free (gvenzl/oracle-free faststart, with RMAN) in ARCHIVELOG with supplemental logging: the real engine, not an emulator. Peers: PostgreSQL, MySQL, MongoDB, Redis, SQL Server.",
+      "min_executed": 100,
+      "expected_skips": [
+        {
+          "test": "tests/test_d356_oracle_proof_stored_column_spelling.py::*mariadb*",
+          "reason": "MariaDB not reachable",
+          "why": "The MariaDB leg needs a second MySQL-family server on :3307; this job starts MySQL 8 only, and the MySQL leg of the same test runs."
+        },
+        {
+          "test": "tests/test_d357_oracle_plan_type_matches_created_column.py::*mariadb*",
+          "reason": "MariaDB not reachable",
+          "why": "The MariaDB leg needs a second MySQL-family server on :3307; this job starts MySQL 8 only, and the MySQL leg of the same test runs."
+        },
+        {
+          "test": "tests/test_d226_case_oracle_follows_source_case_mapping.py::*",
+          "reason": "TimescaleDB not configured",
+          "why": "The TimescaleDB source leg needs a Timescale server; this job does not start one. The PostgreSQL source legs of the same test run."
+        },
+        {
+          "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[[]*oracle*]",
+          "reason": "^No endpoint template for driver '(?!oracle')",
+          "why": "SaaS/API, graph and time-series drivers have no live endpoint in CI (each needs a vendor account or server). These Oracle routes are not proven by this job; the Oracle writer and reader are proven by the database routes that run."
+        },
+        {
+          "test": "tests/test_execute_tracked_universal_matrix.py::test_live_transfer_route[[]*oracle*]",
+          "reason": "^(source|destination) database/(adls|bigquery|elasticsearch|gcs|kafka|milvus|pinecone|qdrant|weaviate) not reachable$",
+          "why": "This job starts Oracle with PostgreSQL, MySQL, MongoDB, Redis and SQL Server peers only. Oracle routes to these engines are not proven by this job."
+        },
+        {
+          "test": "tests/test_oracle_s3_copy.py::*",
+          "reason": "MinIO 9000 not reachable",
+          "why": "No MinIO in this job: the Oracle -> S3 copy fast path is NOT proven by oracle-live (unit tests only)."
+        },
+        {
+          "test": "tests/test_s3_oracle_copy.py::*",
+          "reason": "MinIO 9000 not reachable",
+          "why": "No MinIO in this job: the S3 -> Oracle copy fast path is NOT proven by oracle-live (unit tests only)."
+        },
+        {
+          "test": "tests/test_oracle_iceberg_copy.py::*",
+          "reason": "Iceberg REST catalog not reachable",
+          "why": "No Iceberg REST catalog in this job: the Oracle -> Iceberg copy fast path is NOT proven by oracle-live (unit tests only)."
+        },
+        {
+          "test": "tests/test_iceberg_oracle_copy.py::*",
+          "reason": "Iceberg REST catalog not reachable",
+          "why": "No Iceberg REST catalog in this job: the Iceberg -> Oracle copy fast path is NOT proven by oracle-live (unit tests only)."
+        },
+        {
+          "test": "tests/test_cdc_poll_reconnects_live.py::*",
+          "reason": "DATAFLOW_CDC_LIVE_RESTART_TESTS",
+          "why": "These tests restart the named source containers df-oracle / df-mssql mid-stream; this job's containers are named differently and an Oracle Free restart costs minutes. CDC reconnect after a source restart is NOT proven by oracle-live."
+        }
+      ]
+    },
+    "kafka-live": {
+      "proves": ["kafka"],
+      "workflow": ".github/workflows/ci.yml",
+      "mode": "engine_scoped",
+      "engines": ["kafka", "postgresql", "mysql", "mongodb", "redis", "sqlite", "files"],
+      "container": "apache/kafka 3.9 single-node KRaft broker, PLAINTEXT and SASL_PLAINTEXT/PLAIN: the real broker, not a fake. Peers: PostgreSQL, MySQL, MongoDB, Redis.",
+      "min_executed": 100,
+      "expected_skips": []
+    },
     "cdc-matrix": {
       "proves": ["postgresql", "mysql", "mongodb", "redis"],
       "workflow": ".github/workflows/ci.yml",

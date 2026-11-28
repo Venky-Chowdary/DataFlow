@@ -1,0 +1,76 @@
+{
+  "cases": {
+    "grounded": {
+      "prompt_sha256": [
+        "fe3e8c20cdbf933510eb2664d577d7537a7a4839642660288513c598bc67245b"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "{\"text\": \"3 rows in customers.email differ because the destination column is VARCHAR(40) and those values are longer. Widening the column to VARCHAR(255) fixes it.\", \"fix_order\": [\"fx_widen\", \"fx_accept\"]}",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "invented_number": {
+      "prompt_sha256": [
+        "fe3e8c20cdbf933510eb2664d577d7537a7a4839642660288513c598bc67245b"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "{\"text\": \"12,345 rows in customers.email were truncated; widen the column.\", \"fix_order\": [\"fx_widen\"]}",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "malformed": {
+      "prompt_sha256": [
+        "fe3e8c20cdbf933510eb2664d577d7537a7a4839642660288513c598bc67245b"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "The email column is too short, you should widen it.",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "unknown_fix": {
+      "prompt_sha256": [
+        "fe3e8c20cdbf933510eb2664d577d7537a7a4839642660288513c598bc67245b"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "{\"text\": \"3 values in customers.email are longer than VARCHAR(40).\", \"fix_order\": [\"fx_drop_table\", \"fx_widen\"]}",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    }
+  },
+  "provenance": {
+    "at": "2026-11-21",
+    "how": "seeded",
+    "model": "hand-written reference and adversarial answers",
+    "note": "Replace with a live recording: run_ai_benchmarks.py --mode live --record DIR",
+    "provider": "anthropic"
+  },
+  "suite": "parity_explanation"
+}

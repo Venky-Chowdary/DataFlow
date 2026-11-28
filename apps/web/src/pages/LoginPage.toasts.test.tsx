@@ -19,6 +19,9 @@ Object.assign(globalThis, {
   Node: dom.window.Node,
   MutationObserver: dom.window.MutationObserver,
   IS_REACT_ACT_ENVIRONMENT: true,
+  // The notification region (sonner) schedules dismissals on animation frames.
+  requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0),
+  cancelAnimationFrame: (handle: ReturnType<typeof setTimeout>) => clearTimeout(handle),
 });
 Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
 
@@ -32,7 +35,10 @@ const read = (rel: string) => readFileSync(join(src, rel), "utf8");
 
 after(() => dom.window.close());
 
-const shown = () => [...document.querySelectorAll(".dt-toast")].map((el) => el.textContent ?? "");
+// On-screen toasts: a dismissed one animates out with data-removed="true".
+const shown = () => [...document.querySelectorAll('[data-sonner-toast]:not([data-removed="true"]) .dt-toast')].map((el) => el.textContent ?? "");
+// The notification region renders on its next tick and removes after its exit animation.
+const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
 
 describe("toasts around sign-in", () => {
   it("a sign-in after failed attempts leaves exactly one toast", async () => {
@@ -51,11 +57,13 @@ describe("toasts around sign-in", () => {
       api!.toast({ title: "Sign-in failed", message: "Invalid email or password.", tone: "error" });
       api!.toast({ title: "Sign-in failed", message: "Check your credentials and try again.", tone: "error" });
     });
+    await settle();
     assert.ok(shown().length >= 2);
     await act(async () => {
       clearAuthAttemptToasts(api!.dismissMatching);
       api!.toast({ title: "Signed in", message: "Opening Transfer Studio.", tone: "success" });
     });
+    await settle();
     const after = shown();
     assert.equal(after.length, 1, JSON.stringify(after));
     assert.match(after[0], /Signed in/);

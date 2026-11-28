@@ -184,6 +184,8 @@ export function DestinationColumnsPanel({
         id={`${id}-list`}
         className={`df2-ms-panel-list${dragging ? " is-drop-armed" : ""}`}
         aria-label="Destination columns"
+        // Scrolls on its own: focusable so keyboard users can scroll it (P1-25).
+        tabIndex={0}
         onDragLeave={(e) => {
           if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onPointerOver(null);
         }}

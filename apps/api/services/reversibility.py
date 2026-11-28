@@ -797,7 +797,8 @@ def gate_for(report: Mapping[str, Any]) -> dict[str, Any]:
     """``g24_reversibility``: skip unless required; block until every table is reversible."""
     if not report.get("require_reversibility"):
         return {"id": GATE_ID, "status": "skip",
-                "message": "Reversibility is not required for this transfer; the analysis is shown for review."}
+                "message": "Reversibility is not required for this transfer; the analysis is shown for review.",
+                "details": {"applicable": False}}
     if report.get("verdict") == REVERSIBLE:
         held_to = [c for t in report.get("tables") or [] for c in t["columns"] if enforced(c)]
         if not held_to:

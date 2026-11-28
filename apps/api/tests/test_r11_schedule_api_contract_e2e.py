@@ -293,7 +293,7 @@ def _on_cron_slot(iso: str, tz: str, step: int) -> bool:
     return local.second == 0 and local.microsecond == 0 and local.minute % step == 0
 
 
-def test_sc8_cron_schedule_reports_cron_preset_and_aligned_next_run(live):
+def test_sc8_cron_schedule_reports_cron_preset_and_aligned_next_run(live, frozen_schedule_clock):
     table = pg_table()
     try:
         src = live.pg_connector()
@@ -326,7 +326,7 @@ def test_sc8_cron_schedule_reports_cron_preset_and_aligned_next_run(live):
         assert enabled.status_code == 200, enabled.text
         nxt = enabled.json()["next_run_at"]
         assert _on_cron_slot(nxt, tz, 2), nxt
-        assert datetime.fromisoformat(nxt) > datetime.now(timezone.utc)
+        assert datetime.fromisoformat(nxt) > frozen_schedule_clock
     finally:
         drop_pg(table)
 

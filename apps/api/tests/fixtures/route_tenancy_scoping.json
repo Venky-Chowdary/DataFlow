@@ -95,6 +95,10 @@
       "scope": "workspace",
       "resource": "saved_connector"
     },
+    "DELETE /api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement": {
+      "scope": "workspace",
+      "resource": "saved_connector"
+    },
     "GET /api/v1/connectors/saved/{connector_id}": {
       "scope": "workspace",
       "resource": "saved_connector"
@@ -104,6 +108,10 @@
       "resource": "saved_connector"
     },
     "PUT /api/v1/connectors/saved/{connector_id}": {
+      "scope": "workspace",
+      "resource": "saved_connector"
+    },
+    "POST /api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement": {
       "scope": "workspace",
       "resource": "saved_connector"
     },
@@ -216,6 +224,14 @@
       "scope": "workspace",
       "resource": "job"
     },
+    "GET /api/v1/jobs/{job_id}/ai-decisions": {
+      "scope": "workspace",
+      "resource": "job"
+    },
+    "GET /api/v1/jobs/{job_id}/mapping-witness": {
+      "scope": "workspace",
+      "resource": "job"
+    },
     "GET /api/v1/jobs/{job_id}/parity-report": {
       "scope": "workspace",
       "resource": "job"
@@ -239,6 +255,36 @@
     "POST /api/v1/jobs/{job_id}/parity-report/signoff": {
       "scope": "workspace",
       "resource": "job"
+    },
+    "GET /api/v1/jobs/{job_id}/verification": {
+      "scope": "workspace",
+      "resource": "job",
+      "owner_control_reason": "Parity at Scale routes answer 404 to every caller while DATAWRAP_PARITY_SCALE is off (as in this suite), so the owner cannot be shown a different answer here; tests/test_parity_scale_api.py proves owner versus other workspace with the flag on."
+    },
+    "GET /api/v1/jobs/{job_id}/verification/tables/{table}/columns": {
+      "scope": "workspace",
+      "resource": "job",
+      "owner_control_reason": "Parity at Scale routes answer 404 to every caller while DATAWRAP_PARITY_SCALE is off (as in this suite), so the owner cannot be shown a different answer here; tests/test_parity_scale_api.py proves owner versus other workspace with the flag on."
+    },
+    "GET /api/v1/jobs/{job_id}/verification/tables/{table}/keys": {
+      "scope": "workspace",
+      "resource": "job",
+      "owner_control_reason": "Parity at Scale routes answer 404 to every caller while DATAWRAP_PARITY_SCALE is off (as in this suite), so the owner cannot be shown a different answer here; tests/test_parity_scale_api.py proves owner versus other workspace with the flag on."
+    },
+    "GET /api/v1/jobs/{job_id}/verification/tables/{table}/repair-sql": {
+      "scope": "workspace",
+      "resource": "job",
+      "owner_control_reason": "Parity at Scale routes answer 404 to every caller while DATAWRAP_PARITY_SCALE is off (as in this suite), so the owner cannot be shown a different answer here; tests/test_parity_scale_api.py proves owner versus other workspace with the flag on."
+    },
+    "GET /api/v1/jobs/{job_id}/verification/tables/{table}/values": {
+      "scope": "workspace",
+      "resource": "job",
+      "owner_control_reason": "Parity at Scale routes answer 404 to every caller while DATAWRAP_PARITY_SCALE is off (as in this suite), so the owner cannot be shown a different answer here; tests/test_parity_scale_api.py proves owner versus other workspace with the flag on."
+    },
+    "POST /api/v1/jobs/{job_id}/verification/tables/{table}": {
+      "scope": "workspace",
+      "resource": "job",
+      "owner_control_reason": "Parity at Scale routes answer 404 to every caller while DATAWRAP_PARITY_SCALE is off (as in this suite), so the owner cannot be shown a different answer here; tests/test_parity_scale_api.py proves owner versus other workspace with the flag on."
     },
     "GET /api/v1/jobs/{job_id}/reversibility": {
       "scope": "workspace",

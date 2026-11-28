@@ -43,6 +43,7 @@ import {
   shouldPollApplying,
   PARITY_APPLYING_POLL_LIMIT,
   approvalAuthority,
+  INVALIDATED_APPROVAL_REASON,
   invalidatedApprovalsNote,
   fixStatusPresentation,
   approveOutcome,
@@ -90,7 +91,10 @@ describe("verdicts, statuses and causes", () => {
     assert.equal(tableStatusPresentation({ status: "match", unexplained: 0 }).label, "Match");
     // A clean sample is not a match of every row (review finding 9).
     assert.equal(tableStatusPresentation({ status: "match", unexplained: 0, check: "sampled" }).label, "No difference in sample");
-    assert.equal(verdictPresentation(provenReport({ verdict: "no_difference_found" })).label, "No difference in sample");
+    // A sample bounds the rate ("in sample"); a full compare that is not proven is "No difference found".
+    const sampled = provenReport({ verdict: "no_difference_found", confidence: { ...provenReport().confidence, method: "sampled" } });
+    assert.equal(verdictPresentation(sampled).label, "No difference in sample");
+    assert.equal(verdictPresentation(provenReport({ verdict: "no_difference_found" })).label, "No difference found");
     assert.equal(heatCellLabel("sampled"), "No difference found, not proven (sample or read-back)");
     // A re-sync runs as its own job (review finding 10): re-read while it applies, never forever.
     const applyingReport = { fixes: [{ ...unexplainedReport().fixes[0], status: "applying" as const }] };
@@ -215,6 +219,15 @@ describe("sign-off", () => {
       invalidatedApprovalsNote({ invalidated_approvals: [stale] }),
       /^1 approval \(Engineering\) attested an earlier version of this report and no longer counts; that role signs again\.$/,
     );
+  });
+
+  it("a role whose approval was invalidated says why and asks to sign again, never just 'unsigned'", () => {
+    const base = unexplainedReport().signoff;
+    const stale = { role: "engineering", user: "e@x.io", at: "2026-11-11T10:00:00Z", note: "", signer_role: "editor" };
+    const rows = signoffRows({ ...base, approvals: [], invalidated_approvals: [stale] });
+    assert.equal(rows[0].invalidated?.user, "e@x.io");
+    assert.equal(rows[1].invalidated, null);
+    assert.equal(INVALIDATED_APPROVAL_REASON, "approval was given on an earlier version of this report — sign again");
   });
 
   it("shortens a signature for display and keeps its scheme", () => {

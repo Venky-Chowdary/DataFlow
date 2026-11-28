@@ -49,6 +49,8 @@ export function Dialog({
       // The most recently opened overlay owns Escape and Tab (open order, not
       // DOM order: a drawer in the app shell precedes <body> portals).
       if (!panel || !isTopOverlay(panel)) return;
+      // An overlay above this one (a menu, a popover) already handled the key.
+      if (e.defaultPrevented) return;
       if (e.key === "Escape") {
         e.preventDefault();
         closeRef.current();

@@ -444,6 +444,9 @@ _PATH_RULES: list[tuple[str, str, str]] = [
 # Exact method/path entries preserve fallback behavior on root and special
 # paths that cannot be represented safely by a prefix.
 _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
+    ("GET", "/api/v1/ops/risk-contract-upgrade-report", Permission.WORKSPACE_MANAGE),
+    # The schedule form's next-runs preview: computation only, no schedule read or write.
+    ("POST", "/api/v1/schedules/preview", Permission.SCHEDULE_READ),
     ("GET", "/api/v1/ops/cdc-cursors", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/ops/cdc-cursors/keys", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/ops/cdc-cursors/clear", Permission.WORKSPACE_MANAGE),
@@ -480,6 +483,18 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ),
     ("POST", "/api/v1/transfer/{job_id}/rollback/execute", Permission.JOB_MANAGE),
     ("POST", "/api/v1/repair/proposals/{proposal_id}/decide", Permission.JOB_MANAGE),
+    # Accepting possible boundary duplicates on an append route is a decision
+    # with consequences, approved like DDL (D335).
+    (
+        "POST",
+        "/api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement",
+        Permission.JOB_MANAGE,
+    ),
+    (
+        "DELETE",
+        "/api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement",
+        Permission.JOB_MANAGE,
+    ),
     # Parity Studio. Explaining stores the explanation and the fix order on the
     # job (audited), so it is job.run; signing attests the report, so it needs
     # job.manage (and services.parity_authority binds each sign-off role to the
@@ -490,6 +505,8 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("POST", "/api/v1/jobs/{job_id}/parity-report/signoff", Permission.JOB_MANAGE),
     ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/approve", Permission.JOB_MANAGE),
     ("POST", "/api/v1/jobs/{job_id}/parity-report/fixes/{fix_id}/dismiss", Permission.JOB_MANAGE),
+    # Parity at Scale: re-verifying a table reads both databases again (job.run).
+    ("POST", "/api/v1/jobs/{job_id}/verification/tables/{table}", Permission.JOB_RUN),
     # Reversibility Proof. Declaring a system configures recurring extracts of a
     # saved connection (job.manage); a rehearsal runs those extracts (job.run);
     # signing attests the Exit Evidence Pack (job.manage, plus the authority
@@ -514,9 +531,15 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("POST", "/api/v1/transfer/analyze-file", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/introspect", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/map", Permission.JOB_PLAN),
+    # Mapping Witness: reads a bounded sample like Map and stores evidence; never changes a mapping.
+    ("POST", "/api/v1/transfer/mapping-witness", Permission.JOB_PLAN),
+    ("POST", "/api/v1/transfer/mapping-witness/review", Permission.JOB_PLAN),
+    ("POST", "/api/v1/transfer/mapping-witness/decisions", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/plans", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/route", Permission.JOB_PLAN),
     ("POST", "/api/v1/preflight/run", Permission.JOB_PLAN),
+    # Oracle '' gate actions from Studio: the same bar as plan_transfer's risk_acceptance.
+    ("POST", "/api/v1/preflight/oracle-empty/sign", Permission.JOB_PLAN),
     ("POST", "/api/v1/repair/propose/preflight", Permission.JOB_PLAN),
     ("POST", "/api/v1/repair/propose/quarantine", Permission.JOB_PLAN),
     ("GET", "/", Permission.JOB_READ),

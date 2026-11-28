@@ -12,14 +12,27 @@
  * proven: every table compared in full and nothing differs; no_difference_found: a
  * sample found nothing, which bounds the difference rate but proves nothing.
  */
-export type ParityVerdict = "proven" | "no_difference_found" | "explained" | "unexplained" | "unverifiable";
+export type ParityVerdict = "proven" | "no_difference_found" | "explained" | "unexplained" | "unverifiable" | "verifying";
 /**
+ * segment_diff: every row compared inside both databases by key (Parity at
+ * Scale); multiset_digest: the same for a table with no key ("Content match
+ * (no key)"), so a difference cannot be attributed to a key.
  * readback: a mirror / SCD2 run whose Gate-8 digest of every live destination row, re-read after
  * the write, matched the digest of the rows the run read from the source. Values were compared,
  * but the source side is the run's own read and a digest names no row: never proof.
  */
-export type ParityCheck = "full_checksum" | "key_diff" | "sampled" | "readback" | "count_only" | "none";
-export type ParityTableStatus = "match" | "explained" | "unexplained" | "unverifiable";
+export type ParityCheck =
+  | "full_checksum"
+  | "key_diff"
+  | "segment_diff"
+  | "multiset_digest"
+  | "sampled"
+  | "readback"
+  | "count_only"
+  | "none"
+  | "verifying";
+/** verifying: the write finished and every row is still being compared (not a verdict). */
+export type ParityTableStatus = "match" | "explained" | "unexplained" | "unverifiable" | "verifying";
 export type ParityDifferenceKind = "missing_in_destination" | "extra_in_destination" | "value" | "duplicate_key";
 export type ParityFixAction = "widen_column" | "resync_keys" | "accept" | "rerun";
 /** applying: a person approved a write fix and it is being applied now. */
@@ -79,6 +92,53 @@ export interface ParityTable {
   upper_bound_rate: number | null;
   /** Rows whose values were compared: every row for a full check, the sample's rows otherwise. */
   rows_checked?: number;
+  /** Parity at Scale only: how the table was compared, in words ("Content match (no key)"). */
+  check_label?: string | null;
+  /** "cannot_attribute_to_key" for a keyless table. */
+  key_attribution?: string | null;
+  /** False when the engine pair is not certified for every column type: the table cannot read proven. */
+  certified?: boolean | null;
+  certification_pair?: string | null;
+}
+
+/** One table of the verification that runs after the write (Parity at Scale). */
+export interface ParityVerificationTable {
+  name: string;
+  /** running, passed, failed, incomplete or error. */
+  status: string;
+  progress: { items_done?: number; items_queued?: number; items_total?: number; rows_compared?: number };
+  /** Place in the capacity queue while the table is "queued". */
+  queue_position?: number | null;
+  error?: string | null;
+  outcome?: string | null;
+  mode?: string | null;
+  check_kind?: string | null;
+  /** Whether each side was read from one snapshot, and how long it was held. */
+  consistency?: ParityConsistency | null;
+}
+
+export interface ParitySnapshotSide {
+  pinned: boolean;
+  held_s?: number | null;
+  reason?: string;
+}
+
+export interface ParityConsistency {
+  kind: "pinned" | "not_established" | string;
+  snapshots_ms_apart?: number | null;
+  reasons: string[];
+  source: ParitySnapshotSide;
+  destination: ParitySnapshotSide;
+}
+
+/** The verification phase: its own state after the write, never the write's status. */
+export interface ParityVerification {
+  /** running, passed, failed, incomplete, not_eligible or error. */
+  state: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  reason?: string;
+  tables: ParityVerificationTable[];
 }
 
 export interface ParityCause {
@@ -159,6 +219,8 @@ export interface ParityApproval {
   /** The report version and content digest this approval attests. */
   version?: number;
   content_sha256?: string;
+  /** Which attested content the digest covers (2 adds the AI decisions ledger; absent = 1). */
+  content_version?: number;
 }
 
 export interface ParitySignoff {
@@ -205,9 +267,30 @@ export interface ParityEvidence {
   reread: Record<string, ParityReread>;
 }
 
+/** Why a source column is not on the destination after a successful run. */
+export type ParityNotMigratedReason = "declared_omitted" | "schema_drift_acknowledged" | "no_decision";
+
+/**
+ * Source columns the run did not migrate. Gate-8 compared only the columns the
+ * run wrote; `statement` is also appended to `confidence.statement`, so the
+ * report says it without reading this block.
+ */
+export interface ParityColumnCoverage {
+  source_columns: number | null;
+  columns_written: number | null;
+  not_migrated: { column: string; reason: ParityNotMigratedReason }[];
+  /** Flattened children written inside their parent object ("carried inside <parent>"). */
+  carried_inside: { column: string; parent: string }[];
+  /** Columns first seen in a later batch and added during the run. */
+  added_during_run: string[];
+  statement: string;
+}
+
 export interface ParityReport {
   job_id: string;
   generated_at: string;
+  /** Digest of the AI decisions ledger's decision rows; sign-off content v2 attests it. */
+  ai_decisions_attested_sha256?: string | null;
   /** Bumps on every state change; a lower version is older news. */
   version: number;
   verdict: ParityVerdict;
@@ -221,6 +304,10 @@ export interface ParityReport {
   rounds: ParityRound[];
   signoff: ParitySignoff;
   evidence: ParityEvidence;
+  /** Present when every row is verified after the write (Parity at Scale); absent otherwise. */
+  verification?: ParityVerification | null;
+  /** Null when every source column was migrated. */
+  column_coverage: ParityColumnCoverage | null;
 }
 
 export interface ParitySummaryRun {
@@ -286,7 +373,10 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 /** Verdict pill: what the report concluded, in one short phrase. */
 export function verdictPresentation(
-  report: Pick<ParityReport, "verdict" | "parity"> & { confidence?: Pick<ParityReport["confidence"], "bound_valid"> & Partial<Pick<ParityReport["confidence"], "method">> },
+  report: Pick<ParityReport, "verdict" | "parity"> & {
+    confidence?: Pick<ParityReport["confidence"], "bound_valid"> & Partial<Pick<ParityReport["confidence"], "method">>;
+    verification?: Pick<ParityVerification, "state"> | null;
+  },
 ): { label: string; tone: ParityTone } {
   switch (report.verdict) {
     case "proven":
@@ -295,6 +385,11 @@ export function verdictPresentation(
       if (report.confidence?.method === "readback") {
         // A read-back digest of every live row matched the run's own source read: not proof.
         return { label: "No difference in read-back (not proven)", tone: "muted" };
+      }
+      if (report.confidence?.method === "full") {
+        // Every row was compared (verification after the write) but proof was not established
+        // (writes during the scan not ruled out, or an uncertified engine pair): not a sample.
+        return { label: "No difference found", tone: "ok" };
       }
       if (report.confidence?.bound_valid === false) {
         // Not a random sample: it says nothing about the rows it did not check, and sign-off waits.
@@ -314,6 +409,9 @@ export function verdictPresentation(
       const n = Math.max(0, report.parity.unexplained);
       return { label: `${plural(n, "difference")} unexplained`, tone: "warn" };
     }
+    case "verifying":
+      // Not a verdict: the write finished and the comparison of every row is still running (or queued).
+      return { label: report.verification?.state === "queued" ? "Verification queued" : "Verification running", tone: "muted" };
     default:
       return { label: "Can't be verified", tone: "muted" };
   }
@@ -326,6 +424,9 @@ export function noDifferencesText(
     evidence: Pick<ParityReport["evidence"], "reconciliation_passed">;
   },
 ): string {
+  if (report.verdict === "verifying") {
+    return "Verification is still comparing every row. Differences appear here when it finishes.";
+  }
   if (report.verdict === "unverifiable" && report.confidence.method === "none" && report.evidence.reconciliation_passed == null) {
     // Nothing looked for differences, so "none found" would be a claim the data does not make.
     return "Nothing was compared, so this report cannot say whether any row differs.";
@@ -337,6 +438,9 @@ export function noDifferencesText(
   }
   if (report.verdict === "no_difference_found" && report.confidence.method === "readback") {
     return "No difference: the digest of every live destination row, re-read after the write, matches the rows this run read. A digest names no row and the source was not re-read independently, so this is not proof.";
+  }
+  if (report.verdict === "no_difference_found" && report.confidence.method === "full") {
+    return "Every row was compared and none differs. The report says why that is not proven yet.";
   }
   if (report.verdict === "no_difference_found") {
     return report.confidence.bound_valid === false
@@ -392,6 +496,7 @@ export function parityUnknownCaption(report: Pick<ParityReport, "confidence">): 
  */
 export function rowsDifferLabel(report: Pick<ParityReport, "verdict" | "parity" | "confidence">): string {
   if (report.parity.rows_differ > 0) return formatCount(report.parity.rows_differ);
+  if (report.verdict === "verifying") return "Checking";
   if (nothingCompared(report)) return "Not compared";
   if (report.verdict === "unverifiable") return "Unknown";
   return formatCount(report.parity.rows_differ);
@@ -432,7 +537,8 @@ export function unverifiableNotice(
  */
 export function verdictReasonDetail(report: Pick<ParityReport, "verdict" | "verdict_reason" | "confidence">): string {
   const reason = (report.verdict_reason || "").trim();
-  if (!reason || report.verdict === "unverifiable" || report.verdict === "proven") return "";
+  // A running verification says so in its own card above.
+  if (!reason || report.verdict === "unverifiable" || report.verdict === "proven" || report.verdict === "verifying") return "";
   const fold = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   return fold(reason) === fold(report.confidence.statement || "") ? "" : reason;
 }
@@ -452,6 +558,7 @@ export function parityRowsChecked(
 
 /** Sampled checks state a lower bound, so the figure reads "at least". */
 export function tableParityLabel(table: Pick<ParityTable, "check" | "proven_equal_pct"> & Partial<Pick<ParityTable, "rows_checked">>): string {
+  if (table.check === "verifying") return "Checking";
   const value = formatParityPct(table.proven_equal_pct);
   if (table.proven_equal_pct == null && table.check === "sampled" && table.rows_checked != null) {
     return `${table.rows_checked.toLocaleString("en-US")} rows checked`;
@@ -463,14 +570,17 @@ export function tableParityLabel(table: Pick<ParityTable, "check" | "proven_equa
 const CHECK_LABELS: Record<ParityCheck, string> = {
   full_checksum: "Full checksum",
   key_diff: "Key diff + values",
+  segment_diff: "Every row, compared in both databases",
+  multiset_digest: "Content match (no key)",
+  verifying: "Verification running",
   sampled: "Count + sampled values",
   readback: "Read-back digest (not proof)",
   count_only: "Count only",
   none: "Not checked",
 };
 
-export function checkLabel(check: string): string {
-  return CHECK_LABELS[check as ParityCheck] ?? humanize(check);
+export function checkLabel(check: string, apiLabel?: string | null): string {
+  return CHECK_LABELS[check as ParityCheck] ?? ((apiLabel || "").trim() || humanize(check));
 }
 
 export function tableStatusPresentation(
@@ -482,6 +592,8 @@ export function tableStatusPresentation(
       return table.check === "sampled" ? { label: "No difference in sample", tone: "ok" } : { label: "Match", tone: "ok" };
     case "explained":
       return { label: "Explained", tone: "ok" };
+    case "verifying":
+      return { label: "Verifying", tone: "muted" };
     case "unexplained":
       return { label: `${Math.max(1, table.unexplained).toLocaleString("en-US")} to resolve`, tone: "warn" };
     default:
@@ -491,7 +603,7 @@ export function tableStatusPresentation(
 
 /** Bar tone for a table row: amber while anything is unresolved, grey when unknown. */
 export function tableBarTone(table: Pick<ParityTable, "status" | "proven_equal_pct">): "brand" | "warn" | "muted" {
-  if (table.status === "unverifiable" || table.proven_equal_pct == null) return "muted";
+  if (table.status === "unverifiable" || table.status === "verifying" || table.proven_equal_pct == null) return "muted";
   if (table.status === "unexplained") return "warn";
   return "brand";
 }
@@ -638,7 +750,12 @@ export interface SignoffRow {
   role: string;
   label: string;
   approval: ParityApproval | null;
+  /** The role's approval that no longer counts (given on an earlier version), when it has no current one. */
+  invalidated: ParityApproval | null;
 }
+
+/** What a role whose approval stopped counting reads, instead of plain "unsigned". */
+export const INVALIDATED_APPROVAL_REASON = "approval was given on an earlier version of this report — sign again";
 
 /** One row per required role, with its approval when one is recorded. */
 export function signoffRows(signoff: ParitySignoff): SignoffRow[] {
@@ -647,10 +764,18 @@ export function signoffRows(signoff: ParitySignoff): SignoffRow[] {
   for (const approval of signoff.approvals) {
     if (!byRole.has(approval.role)) byRole.set(approval.role, approval);
   }
-  const rows: SignoffRow[] = roles.map((role) => ({ role, label: roleLabel(role), approval: byRole.get(role) ?? null }));
+  const stale = new Map<string, ParityApproval>();
+  for (const approval of signoff.invalidated_approvals ?? []) {
+    if (!byRole.has(approval.role)) stale.set(approval.role, approval);
+  }
+  const rows: SignoffRow[] = roles.map((role) => ({
+    role, label: roleLabel(role), approval: byRole.get(role) ?? null, invalidated: stale.get(role) ?? null,
+  }));
   // An approval for a role that is not required still belongs on the record.
   for (const approval of signoff.approvals) {
-    if (!roles.includes(approval.role)) rows.push({ role: approval.role, label: roleLabel(approval.role), approval });
+    if (!roles.includes(approval.role)) {
+      rows.push({ role: approval.role, label: roleLabel(approval.role), approval, invalidated: null });
+    }
   }
   return rows;
 }
@@ -677,6 +802,9 @@ export function unsignedRoles(signoff: ParitySignoff): string[] {
 /** Why sign-off is not possible right now, or "" when it is. */
 export function signoffBlockedReason(report: Pick<ParityReport, "signoff" | "parity" | "verdict">): string {
   if (report.signoff.status === "signed") return "";
+  if (report.verdict === "verifying") {
+    return (report.signoff.blocked_reason || "").trim() || "Verification is still running; sign once every row has been compared.";
+  }
   if (report.signoff.status === "blocked" || report.parity.unexplained > 0 || report.verdict === "unverifiable") {
     const reason = (report.signoff.blocked_reason || "").trim();
     if (reason) return reason;
@@ -790,7 +918,7 @@ export function parityErrorMessage(err: unknown, fallback: string): string {
       : reason;
   }
   if (status === 409) return `${reason} The report has been refreshed so you can see its current state.`;
-  if (status === 422) return `The request was refused: ${reason}`;
+  // 422: the API's own sentence says what to change; no framing around it.
   if (status >= 500) return `${fallback} The server reported an error (HTTP ${status}). Try again in a moment.`;
   if (/timed out|failed to fetch|network/i.test(reason)) {
     return `${fallback} The request did not reach the server. Check your connection and try again.`;

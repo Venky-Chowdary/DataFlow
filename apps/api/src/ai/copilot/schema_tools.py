@@ -1077,14 +1077,17 @@ def map_connector_schemas(
             error=f"Source `{src_table}` has no columns to map.",
         )
 
-    from services.semantic_mapper import map_columns
+    # Map's own pipeline, not the bare scorer: the scorer can rate a pair 0.99
+    # that Map demotes to review (accuracy review finding 2).
+    from services.mapping_assignment_policy import presented_mappings
 
-    mappings = map_columns(
+    mappings = presented_mappings(
         src_cols,
         dst_cols,
         source_schemas=src_schemas,
         target_schemas=dst_schemas or None,
-        threshold=float(threshold or 0.85),
+        confidence_threshold=float(threshold or 0.85),
+        destination_table_exists=True if dst_cols else None,
         # Both engines decide the type pair: PostgreSQL VARCHAR onto SQL Server
         # NVARCHAR is a preserve only once the mapper knows the two sides (D158).
         destination_db_type=dst_db,
@@ -1102,7 +1105,7 @@ def map_connector_schemas(
             "reasoning": m.get("reasoning"),
         }
         for m in mappings
-        if float(m.get("confidence") or 0) < 0.85
+        if float(m.get("confidence") or 0) < 0.85 or m.get("requires_review")
     ]
     type_risks = [
         {

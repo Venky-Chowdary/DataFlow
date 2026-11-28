@@ -19,6 +19,8 @@ import { FilterTabs } from "../ui/FilterTabs";
 import { PageMetricsRow, type MetricItem } from "../ui/PageMetricsRow";
 import { PageToolbar } from "../ui/PageToolbar";
 import { WindowBar } from "../charts/ExitCharts";
+import { plural } from "../../lib/plural";
+import { staleProof } from "./rehearsalSummary";
 import {
   boardFilterCounts,
   boardFilterMatches,
@@ -49,7 +51,8 @@ export function boardMetrics(readiness: ExitReadiness): MetricItem[] {
       label: "Systems with a proven exit",
       value: `${kpis.systems_proven.toLocaleString("en-US")} / ${kpis.systems.toLocaleString("en-US")}`,
       sub: kpis.systems === 0 ? "No systems declared" : "Latest rehearsal proven complete",
-      tone: "green",
+      // A count, not a status: default ink (the green value fails AA at the narrow layout's 18px).
+      tone: "default",
     },
     {
       label: "Rehearsals overdue",
@@ -101,7 +104,7 @@ function SystemCell({ row }: { row: ExitBoardRow }) {
     <div className="df2-exit-grid-system">
       <span className="df2-cell-title df2-exit-grid-name" title={row.name}>{row.name}</span>
       <span className="df2-exit-grid-meta">
-        {engineLabel(row.engine)} · {row.tables.toLocaleString("en-US")} {row.tables === 1 ? "table" : "tables"}
+        {engineLabel(row.engine)} · {plural(row.tables, "table")}
       </span>
     </div>
   );
@@ -234,7 +237,7 @@ export function ExitBoardView({
               <tbody>
                 {rows.map((row, index) => {
                   const crit = criticalityPresentation(row.criticality);
-                  const status = readinessPresentation(row.state, row.overdue, row.stale);
+                  const status = readinessPresentation(row.state, row.overdue, staleProof(row));
                   const due = dueText(row.next_due_at, row.overdue, now);
                   const selected = row.id === selectedId;
                   const running = row.state === "running";
@@ -255,7 +258,7 @@ export function ExitBoardView({
                         <SystemCell row={row} />
                       </td>
                       <td data-label="Criticality">
-                        <span className={pillClass(crit.tone)}>{crit.label}</span>
+                        <span className={`df2-exit-crit${row.criticality === "critical" ? " is-critical" : ""}`}>{crit.label}</span>
                       </td>
                       <td data-label="Last rehearsal">
                         <div className="df2-exit-grid-stack">
@@ -348,9 +351,8 @@ export function ExitBoardView({
           </div>
         )}
         <p className="df2-exit-grid-note">
-          Statuses come from each system's latest finished rehearsal, while the system still has the definition it
-          rehearsed. Durations are measured from job clocks, never estimated; only a proven run is compared with its
-          window. Datawrap produces the evidence; your auditors decide what it satisfies.
+          Status is the latest rehearsal of the current definition. Durations come from job clocks; only proven runs
+          are compared with the window.
         </p>
       </section>
     </>

@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -18,9 +19,11 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Callable, Mapping, Sequence
 
+from services import schedule_clock
 from services.atomic_file import write_json_atomic
 from services.brand_env import getenv_brand
-from services.cron_schedule import CronError, validate_cron
+from services.cron_schedule import CronError, resolve_timezone, validate_cron
+from services.cron_schedule import count_matches as _cron_count_matches
 from services.cron_schedule import next_run as _cron_next_run
 from services.ops_events import emit_event
 from services.platform_config import data_dir
@@ -245,6 +248,14 @@ class PipelineSchedule:
     source_query: str = ""
     procedure_params: dict[str, Any] = field(default_factory=dict)
     cursor_value: str = ""  # last observed watermark (advances each run)
+    #: Parity at Scale (owner decision 2): the next tick waits while the previous
+    #: tick's verification is still running. Set False to let ticks overlap it.
+    wait_for_verification: bool = True
+    #: Parity at Scale: hold one snapshot per side while verifying (None = the workspace setting).
+    verification_snapshot: bool | None = None
+    verification_snapshot_max_minutes: int | None = None
+    #: How long the next run waits for a verification that is only queued (minutes).
+    verification_queue_wait_minutes: int = 30
     workspace_id: str = ""
     # Data contract — when set, scheduled runs enforce the signed contract.
     contract_id: str = ""
@@ -338,6 +349,12 @@ class PipelineSchedule:
     #: In-file duplicate keys: ``block`` refuses the load, ``keep_last``
     #: writes the last row for each key.
     in_file_dedupe: str = "block"
+    #: The key keep_last keeps the last row of (comma-separated), as the
+    #: one-off plan's ``dedupe_key``. Not an upsert identity (D402).
+    dedupe_key: str = ""
+    #: ``exact`` | ``destination`` | "" — the key equality the dedupe collapses
+    #: under when spellings differ only to the destination (services.dedupe_equality).
+    dedupe_key_equality: str = ""
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     #: When the stored acknowledgement was given (ISO-8601 UTC); empty when
@@ -440,6 +457,12 @@ class PipelineSchedule:
             if isinstance(data.get("procedure_params"), dict)
             else {},
             cursor_value=str(data.get("cursor_value") or ""),
+            wait_for_verification=data.get("wait_for_verification") is not False,
+            verification_snapshot=(None if data.get("verification_snapshot") is None
+                                   else bool(data.get("verification_snapshot"))),
+            verification_snapshot_max_minutes=(int(data["verification_snapshot_max_minutes"])
+                                               if data.get("verification_snapshot_max_minutes") else None),
+            verification_queue_wait_minutes=int(data.get("verification_queue_wait_minutes") or 30),
             workspace_id=(data.get("workspace_id") or "").strip(),
             contract_id=(data.get("contract_id") or "").strip(),
             require_signed_contract=bool(
@@ -514,6 +537,15 @@ class PipelineSchedule:
                 in {"keep_last", "last", "last_wins"}
                 else "block"
             ),
+            dedupe_key=",".join(
+                p.strip() for p in str(data.get("dedupe_key") or "").replace(";", ",").split(",")
+                if p.strip()
+            ),
+            dedupe_key_equality=(
+                str(data.get("dedupe_key_equality") or "").strip().lower()
+                if str(data.get("dedupe_key_equality") or "").strip().lower() in {"exact", "destination"}
+                else ""
+            ),
             acknowledgment_actor=str(data.get("acknowledgment_actor") or ""),
             acknowledgment_reason=str(data.get("acknowledgment_reason") or ""),
             acknowledgment_at=str(data.get("acknowledgment_at") or ""),
@@ -537,7 +569,7 @@ def _as_version(raw: Any) -> int:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return schedule_clock.utc_now().isoformat()
 
 
 def _parse_ts(value: str | datetime | None) -> datetime | None:
@@ -545,7 +577,7 @@ def _parse_ts(value: str | datetime | None) -> datetime | None:
 
     Mongo returns ``datetime``; the file store returns ISO text. A naive value
     is UTC, the same clock ``_now`` writes. Mixing that naive value with
-    ``datetime.now(timezone.utc)`` raised ``TypeError`` inside ``due_schedules``
+    ``schedule_clock.utc_now()`` raised ``TypeError`` inside ``due_schedules``
     and aborted every schedule on the beat.
     """
     if value is None or value == "":
@@ -615,10 +647,15 @@ def uneven_minute_step(cron: str) -> int | None:
 
 
 def _refuse_keep_last_that_cannot_run(payload: dict[str, Any]) -> None:
-    """Save-time twin of Validate's keep_last rule for a table (QA C2 review 3)."""
-    from services.duplicate_policy import DuplicatePolicyError, schedule_keep_last_refusal
+    """Save-time twin of Validate's keep_last rule for a table (QA C2 review 3),
+    and of the plan's dedupe_key answer (D402)."""
+    from services.duplicate_policy import (
+        DuplicatePolicyError,
+        schedule_dedupe_key_refusal,
+        schedule_keep_last_refusal,
+    )
 
-    refusal = schedule_keep_last_refusal(payload)
+    refusal = schedule_keep_last_refusal(payload) or schedule_dedupe_key_refusal(payload)
     if refusal:
         raise DuplicatePolicyError(refusal)
 
@@ -685,7 +722,7 @@ def compute_next_run(
     wall-clock times — use cron for “every day at 10:10”. A minute step that
     does not divide 60 is anchored to the previous run instead of ``*/N``.
     """
-    base = from_time or datetime.now(timezone.utc)
+    base = from_time or schedule_clock.utc_now()
     if base.tzinfo is None:
         base = base.replace(tzinfo=timezone.utc)
     interval, cron = canonicalize_cadence(interval, cron)
@@ -720,26 +757,119 @@ def count_missed_windows(
     due = _parse_ts(next_run_at)
     if due is None:
         return 0
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     if due.tzinfo is None:
         due = due.replace(tzinfo=timezone.utc)
     if due > current:
         return 0
     cron = (cron or "").strip()
+    if cron:
+        # Counted a local day at a time: this runs inside the claim lock, and
+        # one next_run per missed instant took 28 s for "* * * * *" overdue
+        # three days (review round 4).
+        try:
+            return _cron_count_matches(cron, due, current, tz or "UTC", limit=MISSED_WINDOW_SCAN_LIMIT)
+        except CronError:
+            return 0
     missed = 0
     cursor = due
     for _ in range(MISSED_WINDOW_SCAN_LIMIT):
-        if cron:
-            try:
-                cursor = _cron_next_run(cron, cursor, tz or "UTC")
-            except CronError:
-                return missed
-        else:
-            cursor = cursor + interval_delta(interval)
+        cursor = cursor + interval_delta(interval)
         if cursor > current:
             return missed
         missed += 1
     return missed
+
+
+#: Most runs one preview lists.
+PREVIEW_MAX_RUNS = 10
+#: Wall-clock budget for one preview (next_run itself is milliseconds).
+PREVIEW_TIME_BUDGET_SECONDS = 1.0
+
+
+def preview_next_runs(
+    interval: str,
+    cron: str = "",
+    tz: str = "UTC",
+    *,
+    stored_next_run_at: str | None = None,
+    cadence_changed: bool = True,
+    enabled: bool = True,
+    count: int = 5,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """The next runs the scheduler will use, for the schedule form (re-review F).
+
+    The same functions save and the beat use, so the form can never disagree
+    with the scheduler (a browser's own time-zone data can: Africa/Casablanca).
+    ``kind`` is ``clock`` (a cron), ``rolling`` (a preset or an uneven
+    ``*/N``, measured from the previous run), ``paused`` or ``invalid``.
+    An unchanged rolling cadence keeps its stored next run; a new or changed
+    one is anchored when it is saved (now), as update_schedule does.
+    """
+    count = max(1, min(PREVIEW_MAX_RUNS, int(count or 5)))
+    current = now or schedule_clock.utc_now()
+    if not enabled:
+        return {"kind": "paused", "runs": []}
+    interval, cron = canonicalize_cadence(interval, cron)
+    cron = (cron or "").strip()
+    stored = _parse_ts(stored_next_run_at) if stored_next_run_at and not cadence_changed else None
+    if stored is not None and stored.tzinfo is None:
+        stored = stored.replace(tzinfo=timezone.utc)
+    if stored is not None and stored <= current:
+        # Overdue: the beat runs it on its next check and then computes the
+        # following slot from that moment (claim_due_schedules), not from the
+        # stored slot. The preview says the same.
+        try:
+            resolve_timezone(tz or "UTC")
+            if cron:
+                validate_cron(cron)
+            elif rolling_minutes(interval) is None and interval not in INTERVALS:
+                return {"kind": "invalid", "message": f"Unknown cadence: {interval}", "runs": []}
+            runs = [current]
+            deadline = time.monotonic() + PREVIEW_TIME_BUDGET_SECONDS
+            while len(runs) < count and time.monotonic() <= deadline:
+                runs.append(_parse_ts(compute_next_run(interval, runs[-1], cron=cron, tz=tz or "UTC")))
+        except CronError as exc:
+            return {"kind": "invalid", "message": str(exc), "runs": []}
+        out: dict[str, Any] = {"kind": "clock" if cron else "rolling", "due_now": True,
+                               "runs": [r.isoformat() for r in runs]}
+        if len(runs) < count:
+            out["truncated"] = True  # the budget ran out: fewer runs than asked, said so
+        if cron:
+            out["timezone"] = tz or "UTC"
+        else:
+            out["every_minutes"] = int(interval_delta(interval).total_seconds() // 60)
+            out["from_stored"] = True
+        return out
+    try:
+        resolve_timezone(tz or "UTC")
+        if cron:
+            validate_cron(cron)
+            runs: list[datetime] = []
+            cursor = current
+            deadline = time.monotonic() + PREVIEW_TIME_BUDGET_SECONDS
+            for _ in range(count):
+                cursor = _cron_next_run(cron, cursor, tz or "UTC")
+                runs.append(cursor)
+                if time.monotonic() > deadline:
+                    break  # a hard budget: list what was found in time
+            clock: dict[str, Any] = {"kind": "clock", "timezone": tz or "UTC", "runs": [r.isoformat() for r in runs]}
+            if len(runs) < count:
+                clock["truncated"] = True  # the budget ran out: fewer runs than asked, said so
+            return clock
+    except CronError as exc:
+        return {"kind": "invalid", "message": str(exc), "runs": []}
+    if rolling_minutes(interval) is None and interval not in INTERVALS:
+        return {"kind": "invalid", "message": f"Unknown cadence: {interval}", "runs": []}
+    delta = interval_delta(interval)
+    first = stored if stored is not None else current + delta
+    return {
+        "kind": "rolling",
+        "every_minutes": int(delta.total_seconds() // 60),
+        "from_stored": stored is not None,
+        "runs": [(first + i * delta).isoformat() for i in range(count)],
+    }
 
 
 def next_run_for(sched: PipelineSchedule, from_time: datetime | None = None) -> str:
@@ -1112,7 +1242,7 @@ def schedule_overdue_seconds(
         return 0
     if due.tzinfo is None:
         due = due.replace(tzinfo=timezone.utc)
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     return max(0, int((current - due).total_seconds()))
 
 
@@ -1220,7 +1350,7 @@ def _validate_cadence(
         try:
             validate_cron(cron)
             # Also validates the timezone against the cron horizon computation.
-            _cron_next_run(cron, datetime.now(timezone.utc), tz or "UTC")
+            _cron_next_run(cron, schedule_clock.utc_now(), tz or "UTC")
         except CronError as exc:
             raise ValueError(str(exc)) from exc
     return sync_mode
@@ -2167,6 +2297,19 @@ def _update_schedule_locked(
         # No edit goes on without that record.
         record_schedule(s, trusted_rows=True, strict=True)
         merged = {**s.to_dict(), **data, "id": schedule_id}
+        if "dedupe_key" in data:
+            from services.dedupe_equality import refuse_dedupe_key_edit
+
+            # The next beat must be able to write what the edit asks for (D402),
+            # whether or not the same PATCH also replaces the stream contracts.
+            refuse_dedupe_key_edit(s, data.get("dedupe_key"))
+        if "dedupe_key" in data and "stream_contracts" not in data:
+            from services.duplicate_policy import follow_dedupe_key_edit
+
+            merged["stream_contracts"], merged["primary_key"] = follow_dedupe_key_edit(
+                s.stream_contracts, s.dedupe_key, data.get("dedupe_key"),
+                primary_key=merged.get("primary_key"),
+            )
         # Pausing or renaming a schedule must work while taps are disabled; only
         # enabling it, or pointing it at other connectors, needs a usable tap.
         _assert_schedule_connectors_allowed(
@@ -2269,7 +2412,7 @@ def _update_schedule_locked(
         if persisted_mapping_rows(merged.get("mappings")):
             # "Created disabled: no mappings" is history once mappings exist.
             merged["enabled_note"] = ""
-        if any(key in data for key in ("duplicate_policy", "in_file_dedupe", "primary_key")):
+        if any(key in data for key in ("duplicate_policy", "in_file_dedupe", "primary_key", "dedupe_key")):
             from services.duplicate_policy import validate_schedule_file_policy
 
             policy, dedupe = validate_schedule_file_policy(
@@ -2283,7 +2426,10 @@ def _update_schedule_locked(
             _refuse_dedupe_skip_that_cannot_run(merged)
         if any(
             key in data
-            for key in ("in_file_dedupe", "sync_mode", "cursor_column", "stream_contracts", "source_connector_id")
+            for key in (
+                "in_file_dedupe", "sync_mode", "cursor_column", "stream_contracts",
+                "source_connector_id", "dedupe_key", "primary_key",
+            )
         ):
             _refuse_keep_last_that_cannot_run(merged)
         # Resume is the re-arm for a finding no signature can clear
@@ -2347,7 +2493,7 @@ def _update_schedule_locked(
         # next_run_at used to be left in place, so the beat fired immediately.
         if enabling:
             due = _parse_ts(updated.next_run_at)
-            now = datetime.now(timezone.utc)
+            now = schedule_clock.utc_now()
             if due is None or due <= now:
                 updated.next_run_at = next_run_for(updated, now)
         schedules[i] = updated
@@ -2495,12 +2641,12 @@ def _job_is_live(job_id: str) -> bool | None:
         heartbeat = job.get("heartbeat_at") or job.get("last_progress_at")
         if heartbeat:
             seen = _parse_ts(heartbeat)
-            if seen is None or datetime.now(timezone.utc) - seen > _HEARTBEAT_STALE:
+            if seen is None or schedule_clock.utc_now() - seen > _HEARTBEAT_STALE:
                 return _job_lease_held(job_id)
             return True
         updated = job.get("updated_at")
         seen = _parse_ts(updated) if updated else None
-        if seen is not None and datetime.now(timezone.utc) - seen > _RUNNING_SILENCE:
+        if seen is not None and schedule_clock.utc_now() - seen > _RUNNING_SILENCE:
             # A silent document is not proof of a dead worker: one long batch
             # writes no checkpoint. The worker lease is the owner signal the
             # orphan sweeper uses — one authority for "is anybody running it".
@@ -2578,7 +2724,7 @@ def _is_running_stale(sched: PipelineSchedule) -> bool:
     started = _parse_ts(sched.running_started_at)
     if started is None:
         return True
-    age = datetime.now(timezone.utc) - started
+    age = schedule_clock.utc_now() - started
     job_id = str(sched.running_job_id or "").strip()
     if not job_id:
         if _dispatching_here(sched.id):
@@ -2827,7 +2973,7 @@ def mark_schedule_running(
             # fire again (a resumed schedule ran three times in one window)
             # and a crashed finalize left the schedule due forever.
             nxt = _parse_ts(s.next_run_at)
-            current = _parse_ts(now) or datetime.now(timezone.utc)
+            current = _parse_ts(now) or schedule_clock.utc_now()
             advanced = s.next_run_at
             missed = 0
             catching_up = False
@@ -3289,7 +3435,7 @@ def _pinned_to_completion(sched: PipelineSchedule, *, now: datetime | None = Non
         last = last.replace(tzinfo=timezone.utc)
     if abs((nxt - last).total_seconds()) > 2:
         return False
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     return nxt <= current
@@ -3318,7 +3464,7 @@ def request_schedule_catch_up(
     sched = get_schedule(schedule_id)
     if sched is None:
         return None, 0
-    current = datetime.now(timezone.utc)
+    current = schedule_clock.utc_now()
     nxt = _parse_ts(sched.next_run_at)
     outstanding = 0
     if nxt is not None and nxt <= current:
@@ -3352,7 +3498,7 @@ def unstick_completion_pinned_schedules(now: datetime | None = None) -> int:
     time becomes the next real cadence boundary from now, and the skipped
     windows are added to the existing miss count.
     """
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     with _CLAIM_LOCK:
         changed, missed_schedules = _unstick_pinned_locked(current)
     for schedule_id, missed in missed_schedules:
@@ -3654,7 +3800,7 @@ def _record_approval_skip(sched: PipelineSchedule) -> None:
 def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
     from services.schedule_mapping_contract import persisted_mapping_rows
 
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     due: list[PipelineSchedule] = []
@@ -3720,7 +3866,7 @@ def seconds_until_next_schedule(
     ``cap``. An already-due schedule waits 1s so a document that fails to
     advance ``next_run_at`` cannot busy-loop the process.
     """
-    current = now or datetime.now(timezone.utc)
+    current = now or schedule_clock.utc_now()
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     soonest: datetime | None = None

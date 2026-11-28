@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { JobsMenu, OverflowIcon } from "../jobs/JobsMenu";
 import { DtIcon } from "../DtIcon";
 import { ButtonGroup } from "../ui/ButtonGroup";
 import { Dialog } from "../ui/Dialog";
@@ -6,6 +7,7 @@ import { Drawer } from "../ui/Drawer";
 import { StudioPicker } from "../ui/StudioPicker";
 import { ShapeStepFields } from "./ShapeStepFields";
 import { StudioCommandPalette } from "./StudioCommandPalette";
+import { isVisibleOwner } from "../../lib/commandRegistry";
 import { checkShapeExpression, previewShapeRecipe } from "../../lib/api";
 import { usePointerDrag } from "../../lib/pointerDrag";
 import { previewCellText, stepPreviewCsv } from "../../lib/stepPreviewCsv";
@@ -165,6 +167,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   } = props;
   const stackRef = useRef(createUndoStack(steps));
   const filterRef = useRef<HTMLInputElement>(null);
+  const canvasRootRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<number | null>(null);
   const [draftOp, setDraftOp] = useState("");
@@ -192,7 +195,6 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const resizeProperties = usePointerDrag();
   const [validationOpen, setValidationOpen] = useState(false);
   const [overview, setOverview] = useState(true);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [viewMode, setViewMode] = useState<CanvasView>(() => readSplit().mode);
   const [propertiesHeight, setPropertiesHeight] = useState(() => readSplit().height);
   const [propertyTab, setPropertyTab] = useState<PropertyTab>("op");
@@ -695,6 +697,8 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   }, [propertiesHeight, viewMode]);
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => {
+      // Only while this canvas is on screen: kept mounted behind another screen it owns no key.
+      if (!isVisibleOwner(canvasRootRef.current)) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setPaletteOpen(true);
@@ -728,7 +732,10 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
 
   return (
     <div
+      ref={canvasRootRef}
       className="df2-studio-next df2-canvas"
+      data-owns-command-key=""
+      data-owns-help-key=""
       data-view={viewMode}
       data-testid="transform-canvas"
       data-document={documentKind(graph)}
@@ -757,21 +764,25 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
             <button type="button" className="df2-btn df2-btn-sm" onClick={() => { setViewMode((mode) => (mode === "canvas" ? "split" : mode)); setPropertyTab("preview"); setPreviewOpen(true); onRunPreview(); if (selected != null) void previewNode(selected); }}>
               Run preview
             </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" aria-label="More actions" aria-expanded={menuOpen} title="More actions" onClick={() => setMenuOpen((open) => !open)}>
-              <DtIcon name="menu" size={16} chrome="product" />
-            </button>
+            {/* The app's one menu (Radix): focus, Escape, arrow keys and typeahead. */}
+            <JobsMenu
+              label="More actions"
+              title="More actions"
+              iconOnly
+              icon={<OverflowIcon />}
+              triggerClassName="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn"
+              items={[
+                { id: "rules", label: "Rules and suggestions", onSelect: () => setRulesOpen(true), section: "Build" },
+                { id: "templates", label: "Templates", onSelect: () => setTemplatesOpen(true), section: "Build" },
+                { id: "palette", label: "Palette", onSelect: () => setPaletteDock((open) => !open), section: "View" },
+                { id: "properties", label: "Properties", onSelect: () => setViewMode((mode) => (mode === "split" ? "canvas" : "split")), section: "View" },
+                // A toggle: announced as a checkbox item with its state (it was aria-pressed).
+                { id: "overview", label: "Overview", kind: "checkbox", checked: overview, onSelect: () => setOverview((on) => !on), section: "View" },
+                { id: "focus", label: focusMode ? "Exit focus" : "Focus canvas", onSelect: () => setFocusMode((on) => !on), section: "View" },
+                { id: "shortcuts", label: "Keyboard shortcuts", onSelect: () => setHelpOpen(true), section: "Help" },
+              ]}
+            />
           </ButtonGroup>
-          {menuOpen && (
-            <div className="df2-canvas-menu" role="menu">
-              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setRulesOpen(true); }}>Rules and suggestions</button>
-              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setTemplatesOpen(true); }}>Templates</button>
-              <button type="button" role="menuitem" aria-expanded={paletteDock} onClick={() => { setMenuOpen(false); setPaletteDock((open) => !open); }}>Palette</button>
-              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setViewMode((mode) => (mode === "split" ? "canvas" : "split")); }}>Properties</button>
-              <button type="button" role="menuitem" aria-pressed={overview} onClick={() => { setMenuOpen(false); setOverview((on) => !on); }}>Overview</button>
-              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setFocusMode((on) => !on); }}>{focusMode ? "Exit focus" : "Focus canvas"}</button>
-              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setHelpOpen(true); }}>Keyboard shortcuts</button>
-            </div>
-          )}
         </div>
       </header>
       {syncRefused && (

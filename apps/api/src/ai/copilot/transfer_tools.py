@@ -579,8 +579,12 @@ def _sign_required_risk_contracts(
     *,
     table: str,
     force_columns: set[str] | None = None,
+    destination: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Sign a continue-policy contract only on mappings a gate already requires.
+
+    ``destination`` (connector, schema, table) binds the Oracle '' approvals and
+    Check-now requests when the acceptance does not carry the gate's own.
 
     Omitted acceptance signs nothing. A partial acceptance is refused: the
     operator named the action and left out who approved it or why. Safe
@@ -588,6 +592,14 @@ def _sign_required_risk_contracts(
     """
     if not isinstance(acceptance, dict) or not acceptance:
         return list(mappings or [])
+    from services import oracle_empty_not_null as _oe
+
+    if str(acceptance.get("option") or "").strip() == _oe.OPTION:
+        # "Create <col> as NULL-able; empty strings land as NULL" (Oracle).
+        return _oe.sign_empty_as_null(list(mappings or []), acceptance, table=table, destination=destination)
+    if str(acceptance.get("option") or "").strip() == _oe.CHECK_OPTION:
+        # "Check this column now": a longer, asked-for scan (not a risk).
+        return _oe.stamp_check_now(list(mappings or []), acceptance, table=table, destination=destination)
     from preflight.risk_contract import (
         mapping_is_structural_review,
         mapping_requires_risk_contract,
@@ -966,6 +978,7 @@ def plan_transfer(
     upsert_key: str = "",
     primary_key: str = "",
     dedupe_key: str = "",
+    dedupe_key_equality: str = "",
     transform_recipe_id: str = "",
     transform_recipe_version: int = 0,
     transform_recipe_version_mode: str = "pin",
@@ -1447,30 +1460,40 @@ def plan_transfer(
         map_src_rows = [{**r, "inferred_type": declared[r["name"]]} for r in src_rows]
 
     note_step(f"mapping the source columns onto {dst_table}")
-    mapping = run_mapping_pipeline(
-        [r["name"] for r in src_rows],
-        [r["name"] for r in map_dst_rows],
-        source_schemas=map_src_rows,
-        target_schemas=map_dst_rows,
-        source_samples=samples,
-        validation_mode=validation_mode,
-        destination_db_type=_engine_format(dst_info),
-        # The engine route maps under the source engine's identity
-        # (``_auto_map``). Without it a BSON date read as a zoneless TIMESTAMP
-        # and a PostgreSQL / Mongo VARCHAR as a code-page one, so the plan
-        # demanded a risk contract for columns Execute stamps preserve (D147).
-        source_db_type=_engine_format(src_info),
-        schema_policy=schema_policy,
-        sync_mode=mode,
-        destination_table_exists=map_dest_exists,
-        # Warehouse DDL is fact. Object stores, files, and procedure extracts
-        # are a sample: marking them authoritative made the plan say TEXT
-        # while the integrity check bound the profiled DECIMAL.
-        source_types_authoritative=_plan_source_types_authoritative(
-            src_conn, src_info, callable_plan
-        ),
-        use_llm=False,
-    )
+    from services.oracle_session_scope import oracle_destination_scope
+
+    # Map grades an Oracle zone pair on the destination session, as Validate
+    # and Execute do: unbound, TIMESTAMPTZ into a new Oracle table read as
+    # lossy at 0.70, under the Map floor Validate then enforced.
+    with oracle_destination_scope(
+        # A table this run creates reads back not-found; its connection is
+        # still the session the run writes on. An unopened one stays unconfirmed.
+        _engine_format(dst_info), dst_info.get("config") or None
+    ):
+        mapping = run_mapping_pipeline(
+            [r["name"] for r in src_rows],
+            [r["name"] for r in map_dst_rows],
+            source_schemas=map_src_rows,
+            target_schemas=map_dst_rows,
+            source_samples=samples,
+            validation_mode=validation_mode,
+            destination_db_type=_engine_format(dst_info),
+            # The engine route maps under the source engine's identity
+            # (``_auto_map``). Without it a BSON date read as a zoneless TIMESTAMP
+            # and a PostgreSQL / Mongo VARCHAR as a code-page one, so the plan
+            # demanded a risk contract for columns Execute stamps preserve (D147).
+            source_db_type=_engine_format(src_info),
+            schema_policy=schema_policy,
+            sync_mode=mode,
+            destination_table_exists=map_dest_exists,
+            # Warehouse DDL is fact. Object stores, files, and procedure extracts
+            # are a sample: marking them authoritative made the plan say TEXT
+            # while the integrity check bound the profiled DECIMAL.
+            source_types_authoritative=_plan_source_types_authoritative(
+                src_conn, src_info, callable_plan
+            ),
+            use_llm=False,
+        )
     mappings = list(mapping.get("mappings") or [])
     mappings, transform_refusal = _apply_column_transforms(mappings, column_transforms)
     if transform_refusal:
@@ -1536,11 +1559,14 @@ def plan_transfer(
     for _contract_pass in (1, 2):
         if risk_acceptance:
             try:
+                from services.oracle_empty_not_null import destination_binding
+
                 mappings = _sign_required_risk_contracts(
                     mappings,
                     risk_acceptance,
                     table=dst_table,
                     force_columns=blocked_for_contract or None,
+                    destination=destination_binding(connector_id=dst_conn.get("id"), table=dst_table),
                 )
             except ValueError as exc:
                 return _tool_result(tool, success=False, error=str(exc))
@@ -1577,10 +1603,17 @@ def plan_transfer(
             multi = multi_stream_keep_last_refusal(_engine_format(src_info), contracts)
             if multi:
                 return _tool_result(tool, success=False, error=multi)
+            from services.dedupe_equality import CHOICE_KEY, DESTINATION, EXACT
+
+            equality = str(dedupe_key_equality or "").strip().lower()
+            if equality not in {"", EXACT, DESTINATION}:
+                return _tool_result(tool, success=False, error=(
+                    f"Unknown dedupe_key_equality {dedupe_key_equality!r}. Use exact or destination."))
             source_config = {
                 **source_config,
                 "in_file_dedupe": "keep_last",
                 "dedupe_key": dedupe_named,
+                **({CHOICE_KEY: equality} if equality else {}),
             }
         elif str(dedupe_key or "").strip():
             from services.preflight_source_kind import dedupe_key_unhonoured_reason
@@ -1769,6 +1802,11 @@ def plan_transfer(
                 {
                     "in_file_dedupe": "keep_last",
                     "dedupe_key": str(dedupe_key or "").strip(),
+                    **(
+                        {"dedupe_key_equality": str(dedupe_key_equality).strip().lower()}
+                        if str(dedupe_key_equality or "").strip()
+                        else {}
+                    ),
                     "in_file_dedupe_note": (
                         "Overwrite keeps the last row of each "
                         f"{str(dedupe_key or '').strip()}. "
@@ -2709,6 +2747,13 @@ def _run_preflight(
                     # sentence names the column; the sample reason names the value.
                     "issues": _preflight_issue_lines(b.get("details") or {}),
                 },
+                # The options the gate offers (e.g. g3o's signed "Create note as
+                # NULL-able"), so the operator can name one in risk_acceptance.
+                "suggested_actions": list(
+                    b.get("suggested_actions")
+                    or (b.get("details") or {}).get("suggested_actions")
+                    or []
+                ),
             }
             for b in (result.get("blockers") or [])
         ][:10],
@@ -3067,6 +3112,7 @@ def start_transfer(
     upsert_key: str = "",
     primary_key: str = "",
     dedupe_key: str = "",
+    dedupe_key_equality: str = "",
     transform_recipe_id: str = "",
     transform_recipe_version: int = 0,
     transform_recipe_version_mode: str = "pin",
@@ -3110,6 +3156,7 @@ def start_transfer(
         upsert_key=upsert_key or primary_key,
         primary_key=primary_key,
         dedupe_key=dedupe_key,
+        dedupe_key_equality=dedupe_key_equality,
         transform_recipe_id=transform_recipe_id,
         transform_recipe_version=transform_recipe_version,
         transform_recipe_version_mode=transform_recipe_version_mode,
@@ -3280,6 +3327,8 @@ def start_transfer(
             extra["in_file_dedupe"] = "keep_last"
             if str(plan.get("dedupe_key") or "").strip():
                 extra["dedupe_key"] = str(plan.get("dedupe_key") or "").strip()
+            if plan.get("dedupe_key_equality"):
+                extra["dedupe_key_equality"] = str(plan["dedupe_key_equality"])
             payload[side]["extra"] = extra
     pii_ack = _pii_acknowledgement(pii_acknowledgement)
     if pii_ack:

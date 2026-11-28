@@ -50,9 +50,9 @@ def _parked(*, approvable: bool) -> store.PipelineSchedule:
     return updated
 
 
-def test_resume_rearms_a_non_approvable_finding_and_waits_for_the_next_slot(temp_store):
+def test_resume_rearms_a_non_approvable_finding_and_waits_for_the_next_slot(temp_store, frozen_schedule_clock):
     """Resume closes a non-approvable finding and waits for the next cron slot."""
-    from datetime import datetime, timezone
+    from services.cron_schedule import next_run
 
     parked = _parked(approvable=False)
     resumed = store.update_schedule(parked.id, {"enabled": True})
@@ -62,7 +62,8 @@ def test_resume_rearms_a_non_approvable_finding_and_waits_for_the_next_slot(temp
     assert resumed.approval_request["resolved_by"] == "operator:resume"
     due = store._parse_ts(resumed.next_run_at)
     assert due is not None
-    assert due > datetime.now(timezone.utc)
+    assert due > frozen_schedule_clock
+    assert due == next_run("*/15 * * * *", frozen_schedule_clock, "America/New_York")
     assert resumed.next_run_at != parked.next_run_at
     assert not store.has_open_approval(resumed)
     assert resumed.id not in {item.id for item in store.due_schedules()}

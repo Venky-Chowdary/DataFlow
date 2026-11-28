@@ -106,6 +106,15 @@ def _wire_mappings(report, *, include_review: bool):
                 "requires_review": True,
             }
         )
+    # A rule still awaiting confirmation keeps its column out of the run. That
+    # is a declared omission: G13 refuses an undecided source column at
+    # Validate and, for a run without Validate, at Execute.
+    mapped = {m["source"] for m in mappings}
+    mappings += [
+        {"source": col, "target": "", "intentional_omit": True}
+        for col in ("mystery", "notes")
+        if col not in mapped
+    ]
     return mappings
 
 

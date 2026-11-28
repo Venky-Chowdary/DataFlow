@@ -35,6 +35,7 @@ from services.connector_capability_registry import (
     recommended_batch_size,
 )
 from services.data_profiler import source_types_are_authoritative
+from services.oracle_session_scope import with_oracle_session_pin
 from services.db_type_utils import (
     DESTS_WITHOUT_SCHEMA_RECREATE,
     NO_RELATIONAL_DDL_DESTS,
@@ -49,7 +50,7 @@ from services.preflight_file_plan import (
     _fit_scan_deadline,
     _lift_in_file_collapse_advisories,
     _plan_duplicate_policy,
-    _plan_in_file_dedupe,
+    _plan_dedupe_equality, _plan_in_file_dedupe,
 )
 from services.coercion_gate_reconcile import reconcile_coercion_report
 from services.create_ddl_gate import create_ddl_gate as build_create_ddl_gate
@@ -164,85 +165,11 @@ VALIDATION_CONFIDENCE_THRESHOLDS = {
 }
 
 
-def apply_readiness_honesty_caps(out: dict[str, Any]) -> dict[str, Any]:
-    """Cap Validate readiness when G9 uniqueness is sample-only.
-
-    Gate pass-ratio can be 100% while population uniqueness is unproven.
-    Fivetran/Airbyte do not call that certified-ready. Execute may still
-    proceed; the score must not look like a migration certificate.
-    """
-    payload = out if isinstance(out, dict) else {}
-    reasons: list[str] = []
-    for gate in payload.get("gates") or []:
-        if not isinstance(gate, dict):
-            continue
-        gid = str(gate.get("id") or "").lower()
-        details = gate.get("details") if isinstance(gate.get("details"), dict) else {}
-        coverage = str(details.get("coverage") or "").lower()
-        msg = str(gate.get("message") or "").lower()
-        if "g9" in gid or "data_integrity" in gid:
-            if (
-                coverage == "sample"
-                or "population uniqueness not proven" in msg
-                or "validate sample only" in msg
-            ):
-                reasons.append("g9_sample_uniqueness")
-        if "g5" in gid or "dry_run" in gid:
-            if (
-                coverage == "sample"
-                or details.get("sample_cap") is not None
-                or "sample" in msg
-                or gid == "g5_dry_run"
-            ):
-                reasons.append("g5_sample_dry_run")
-    if reasons:
-        try:
-            score = float(payload.get("readiness_score") or 0)
-        except (TypeError, ValueError):
-            score = 0.0
-        payload["readiness_score"] = min(score, 92.0)
-        if "g9_sample_uniqueness" in reasons:
-            payload["population_uniqueness_proven"] = False
-        payload["readiness_cap_reason"] = "+".join(dict.fromkeys(reasons))
-    return payload
-
-
-def _block_decision_on_hard_gate(out: dict[str, Any]) -> dict[str, Any]:
-    """A block-status gate can never sit beside ``decision=approve``.
-
-    The proof bundle is stamped before the hosted gates (g3f population fit,
-    additive stamp) run; without this a g3f block left "No blocking issues
-    detected" on the verdict that Execute and Pilot read (QA MX3-22).
-    """
-    pb = out.get("proof_bundle")
-    td = (pb or {}).get("transfer_decision") if isinstance(pb, dict) else None
-    if out.get("passed") is not False or not isinstance(td, dict):
-        return out
-    if str(td.get("decision") or "").lower() != "approve":
-        return out
-    blocking = [
-        g for g in out.get("gates") or []
-        if isinstance(g, dict) and g.get("status") == "block"
-    ]
-    if not blocking:
-        return out
-    messages = [str(g.get("message") or g.get("id") or "") for g in blocking]
-    logger.warning(
-        "preflight verdict demoted approve->block: gate(s) %s blocked after the "
-        "proof bundle was stamped",
-        [g.get("id") for g in blocking],
-    )
-    out["proof_bundle"] = {
-        **pb,
-        "passed": False,
-        "transfer_decision": {
-            **td,
-            "decision": "block",
-            "blockers": list(dict.fromkeys([*(td.get("blockers") or []), *messages])),
-            "reason": "Blocking issues detected: " + "; ".join(messages[:3]),
-        },
-    }
-    return out
+# The post-gate verdict caps live in their own module (size budget); re-exported.
+from services.preflight_verdict_caps import (  # noqa: E402,F401 — re-export
+    _block_decision_on_hard_gate,
+    apply_readiness_honesty_caps,
+)
 
 
 def confidence_threshold_for_mode(validation_mode: str | None) -> float:
@@ -298,6 +225,7 @@ def _policy_source_config(
 @_with_date_locale
 @_with_source_engine
 @with_preflight_destination_ownership
+@with_oracle_session_pin
 def run_file_preflight(
     *,
     columns: list[str],
@@ -1366,6 +1294,7 @@ def run_file_preflight(
         stream_contracts=list(stream_contracts or []),
         in_file_dedupe=_plan_in_file_dedupe(source_config, destination_config),
         duplicate_policy=_plan_duplicate_policy(source_config, destination_config),
+        dedupe_key_equality=_plan_dedupe_equality(source_config, destination_config),
     )
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
@@ -2208,6 +2137,10 @@ def run_file_preflight(
         source_table=source_table,
     )
     enriched_blockers.extend(_cursor_blockers)
+    from services.oracle_empty_not_null import preflight_hook as _oracle_empty_hook
+
+    oracle_empty_gate, _oe_blockers = _oracle_empty_hook(dict(locals()))  # Oracle '' into NOT NULL text
+    enriched_blockers.extend(_oe_blockers)
 
     # Only an operator-declared manual_review gates create-new (the default is the golden path).
     create_ddl_gate = build_create_ddl_gate(
@@ -2250,7 +2183,7 @@ def run_file_preflight(
         + ([require_pk_gate] if require_pk_gate else [])
         + ([overwrite_governance_gate] if overwrite_governance_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
-        + ([shape_route_gate] if shape_route_gate else [])
+        + ([shape_route_gate] if shape_route_gate else []) + ([oracle_empty_gate] if oracle_empty_gate else [])
     )
     extra_passed = sum(1 for g in extra_gates if g.get("status") != "block")
     total_gates = result.total_gates + len(extra_gates)
@@ -2263,7 +2196,7 @@ def run_file_preflight(
         "destination_db_type": destination_db_type or "",
         "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked
         and not null_cursor_blocked and not upsert_ddl_blocked and not pii_hash_blocked
-        and not shape_route_blocked and not overwrite_governance_blocked,
+        and not shape_route_blocked and not overwrite_governance_blocked and not _oe_blockers,
         "passed_count": passed_count,
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),
@@ -2399,7 +2332,11 @@ def run_file_preflight(
 
     # Mapping contract — every source column accounted for (G13) and every
     # required destination column filled (G14).
+    from services.flatten_protection import coverage_lineage
+
+    lineage = coverage_lineage(source_format, source_config, sample_rows, mappings)
     src_coverage, contract_gates, contract_blockers = build_mapping_contract_gates(
+        lineage=lineage,
         source_columns=list(columns or []),
         mappings=list(mappings or []),
         destination_table_exists=destination_table_exists,
@@ -2426,6 +2363,7 @@ def run_file_preflight(
         source_column_types=dict(column_types or {}),
         target_column_types=dict(destination_column_types or {}),
         sample_rows=list(sample_rows or []),
+        lineage=lineage,
     )
     out["field_reduction_ledger"] = field_reduction
     contract_gates = [*contract_gates, reduction_gate]
@@ -2847,6 +2785,9 @@ def run_file_preflight(
     from services.mixed_type_disclosure import mixed_type_text_warnings  # D319
 
     out.setdefault("warnings", []).extend(mixed_type_text_warnings(list(mappings or []), sample_rows))
+    from services.risk_contract_store import reapproval_warnings  # pre-upgrade approvals to re-approve
+
+    out["warnings"].extend(reapproval_warnings(mappings))
     from services.temporal_tick_disclosure import temporal_tick_warnings  # D372/R3
 
     out.setdefault("warnings", []).extend(temporal_tick_warnings(

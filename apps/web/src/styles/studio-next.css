@@ -1527,6 +1527,43 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   box-sizing: border-box;
 }
 
+/* The canvas action bar behaves like the shared step footer: Back and the
+   primary keep their size and whole label; the row between them gives way
+   (a disabled reason ellipsizes), so the primary is never pushed off a phone. */
+.df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions > .df2-step-back,
+.df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions > .df2-btn-row > .df2-step-primary {
+  flex: 0 0 auto;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions > .df2-btn-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions .df2-step-footer-reason {
+  flex: 0 1 auto;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.df2-step-back-label-narrow {
+  display: none;
+}
+
+/* Phone: "Back to Destination" and "Continue with this transform" do not fit one row. */
+@media (max-width: 480px) {
+  .df2-step-back-label {
+    display: none;
+  }
+
+  .df2-step-back-label-narrow {
+    display: inline;
+  }
+}
+
 .df2-page-transfer-studio.is-studio-next .df2-map-footer-status,
 .df2-page-transfer-studio.is-studio-next .df2-wizard-footer .df2-label-hint {
   flex: 1 1 auto;
@@ -1611,39 +1648,6 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   .df2-page-transfer-studio.is-studio-next .df2-source-step.df2-transfer-step-viewport > .df2-card-body {
     overflow: auto;
   }
-}
-
-.df2-canvas-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: var(--df-z-canvas-menu);
-  display: flex;
-  flex-direction: column;
-  min-width: 220px;
-  padding: var(--df-space-1);
-  background: var(--df-surface);
-  border: 1px solid var(--df-border-strong);
-  border-radius: var(--df-radius-md);
-  box-shadow: var(--df-shadow-xs);
-}
-
-.df2-canvas-menu button {
-  text-align: left;
-  font: inherit;
-  font-size: 13px;
-  color: var(--df-text-primary);
-  background: transparent;
-  border: 0;
-  border-radius: var(--df-radius-sm);
-  min-height: 32px;
-  padding: 0 var(--df-space-2);
-  cursor: pointer;
-}
-
-.df2-canvas-menu button:hover,
-.df2-canvas-menu button[aria-pressed="true"] {
-  background: var(--df-surface-muted);
 }
 
 .df2-canvas-edgebar {
@@ -1982,8 +1986,6 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
 
 .df2-page-transfer-studio.is-studio-next .df2-flow-column-title {
   margin: 0 0 var(--df-space-2);
-  padding-left: var(--df-space-2);
-  border-left: 3px solid var(--df-brand-arrow);
   font-size: 13px;
   font-weight: 600;
   line-height: 16px;

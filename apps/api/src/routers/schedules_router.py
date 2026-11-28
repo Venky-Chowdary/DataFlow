@@ -190,10 +190,19 @@ class ScheduleCreate(PolicyFieldsModel):
     retry_backoff_seconds: int = Field(default=60, ge=0, le=3600)
     notify_on_failure: bool = True
     notify_on_success: bool = False
+    #: Parity at Scale: the next run waits while the previous run is verified after the write.
+    wait_for_verification: bool = True
+    #: Hold one snapshot per side while verifying (None: the workspace setting), for at most N minutes.
+    verification_snapshot: Optional[bool] = None
+    verification_snapshot_max_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    #: How long the next run waits for a verification that is only queued.
+    verification_queue_wait_minutes: int = Field(default=30, ge=0, le=1440)
     enabled: bool = True
     file_wait_seconds: int = Field(default=0, ge=0, le=86400)
     duplicate_policy: str = ""
     in_file_dedupe: str = "block"
+    dedupe_key: str = ""
+    dedupe_key_equality: str = ""
     #: Inbox → Studio footer: persist mappings onto this draft instead of a new row.
     replay_schedule_id: str = ""
     #: Schedules page: with no mappings, plan the route server-side (the
@@ -279,10 +288,16 @@ class ScheduleUpdate(PolicyFieldsModel):
     retry_backoff_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     notify_on_failure: Optional[bool] = None
     notify_on_success: Optional[bool] = None
+    wait_for_verification: Optional[bool] = None
+    verification_snapshot: Optional[bool] = None
+    verification_snapshot_max_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    verification_queue_wait_minutes: Optional[int] = Field(default=None, ge=0, le=1440)
     enabled: Optional[bool] = None
     file_wait_seconds: Optional[int] = Field(default=None, ge=0, le=86400)
     duplicate_policy: Optional[str] = None
     in_file_dedupe: Optional[str] = None
+    dedupe_key: Optional[str] = None
+    dedupe_key_equality: Optional[str] = None
 
 
 class ScheduleResponse(BaseModel):
@@ -346,10 +361,16 @@ class ScheduleResponse(BaseModel):
     retry_backoff_seconds: int = 60
     notify_on_failure: bool = True
     notify_on_success: bool = False
+    wait_for_verification: bool = True
+    verification_snapshot: Optional[bool] = None
+    verification_snapshot_max_minutes: Optional[int] = None
+    verification_queue_wait_minutes: int = 30
     enabled: bool
     file_wait_seconds: int = 0
     duplicate_policy: str = ""
     in_file_dedupe: str = "block"
+    dedupe_key: str = ""
+    dedupe_key_equality: str = ""
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
     last_job_id: Optional[str] = None
@@ -477,6 +498,8 @@ class ScheduleSummaryResponse(BaseModel):
     file_wait_seconds: int = 0
     duplicate_policy: str = ""
     in_file_dedupe: str = "block"
+    dedupe_key: str = ""
+    dedupe_key_equality: str = ""
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
     last_job_id: Optional[str] = None
@@ -546,6 +569,74 @@ class ScheduleSummaryResponse(BaseModel):
             authorized=bool(grant.get("id")) and not grant.get("revoked_at"),
         )
         return cls(**{k: v for k, v in payload.items() if k in cls.model_fields})
+
+
+class NextRunsPreviewBody(BaseModel):
+    interval: str = Field(default="daily", max_length=64)
+    cron: str = Field(default="", max_length=256)
+    timezone: str = Field(default="UTC", max_length=64)
+    stored_next_run_at: str | None = Field(default=None, max_length=64)
+    cadence_changed: bool = True
+    enabled: bool = True
+    count: int = Field(default=5, ge=1, le=10)
+
+
+#: Preview calls per caller per window (10 per 10 s), shared by every worker
+#: and replica through the shared limiter (Redis when REDIS_URL is set).
+PREVIEW_RATE_LIMIT = 10
+PREVIEW_RATE_WINDOW_SEC = 10
+
+
+def _preview_caller_key(request: Request) -> str:
+    """Who the preview limit counts: the authenticated principal, else the trusted client address.
+
+    A signed-in account or an API key / service account is one caller
+    whatever address it comes from (services.audit_coverage.request_principal:
+    the key id for keys, the account for sessions; hashed, so no address book
+    lands in the limiter store). An anonymous caller is its client address as
+    the app's forwarded-for trust setting resolves it (services.client_ip:
+    TRUSTED_PROXY_COUNT hops), never a header it could choose.
+    """
+    import hashlib
+
+    from services.audit_coverage import request_principal
+    from services.client_ip import client_ip_from_request
+
+    who = request_principal(request)
+    if who.get("actor_id"):
+        digest = hashlib.sha256(f"{who['actor_type']}:{who['actor_id'].strip().lower()}".encode()).hexdigest()[:32]
+        return f"schedule-preview:principal:{digest}"
+    return f"schedule-preview:ip:{client_ip_from_request(request) or 'unknown'}"
+
+
+@router.post("/preview")
+def preview_schedule_next_runs(body: NextRunsPreviewBody, request: Request):
+    # Sync on purpose: FastAPI runs it on the worker thread pool, never on the
+    # event loop; next_run is milliseconds and the service caps count and time.
+    """The next runs the scheduler will use for a cadence (the schedule form's preview).
+
+    Pure computation with the scheduler's own functions: reads no schedule
+    and writes nothing, so the form can never show times the beat will not use.
+    Limited per caller across every worker (the form asks once per edit); a
+    loop asking faster gets 429 and Retry-After.
+    """
+    from services.auth_state import get_auth_state
+    from services.schedule_store import preview_next_runs
+
+    allowed, retry_after = get_auth_state().rate_limit_hit(
+        _preview_caller_key(request), limit=PREVIEW_RATE_LIMIT, window_sec=PREVIEW_RATE_WINDOW_SEC
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many schedule previews; try again in a moment.",
+            headers={"Retry-After": str(max(1, int(retry_after or PREVIEW_RATE_WINDOW_SEC)))},
+        )
+    return preview_next_runs(
+        body.interval, body.cron, body.timezone,
+        stored_next_run_at=body.stored_next_run_at, cadence_changed=body.cadence_changed,
+        enabled=body.enabled, count=body.count,
+    )
 
 
 @router.get("/intervals")
@@ -812,6 +903,8 @@ async def create_pipeline_schedule(
     ws = resolve_write_workspace(request, workspace_id)
     payload = body.model_dump(exclude_none=True)
     plan_mappings = bool(payload.pop("plan_mappings", False))
+    if plan_mappings and "in_file_dedupe" not in body.model_fields_set:
+        payload["in_file_dedupe"] = ""  # follow the plan's dedupe answer (D402)
     if ws and not payload.get("workspace_id"):
         payload["workspace_id"] = ws
     elif payload.get("workspace_id"):

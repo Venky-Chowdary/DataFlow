@@ -525,7 +525,6 @@ function QuarantinePanelJob({
         </div>
       </div>
 
-      <div className="df2-quarantine-notifications" data-df2-toast-dock="" />
       {/* Closed-loop next action — one obvious primary path */}
       <div className="df2-quarantine-next" role="region" aria-label="Next remediation step">
         <div className="df2-quarantine-next-copy">

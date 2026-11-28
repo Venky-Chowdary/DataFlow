@@ -20,7 +20,13 @@ def test_rag_suggest_mapping_uses_map_columns_ssot() -> None:
 
     rag = get_rag_pipeline()
     pin = rag.suggest_mapping("AMT", "amount")
-    assert pin.confidence >= 0.85
+    # The confidence Map's own pipeline gives (names only, no destination
+    # types: reviewed), never the bare scorer's 0.99 (accuracy review 2).
+    from services.semantic_mapper import pair_mapping_authority
+
+    auth = pair_mapping_authority("AMT", "amount")
+    assert auth["proposed_target"] == "amount"
+    assert abs(pin.confidence - auth["confidence"]) < 1e-9
     assert pin.method == "map_columns_ssot"
 
     false_friend = rag.suggest_mapping("user_id", "customer_id")
@@ -38,7 +44,7 @@ def test_retriever_mapping_confidence_matches_mapper() -> None:
     retriever = DataTransferRetriever()
     info = retriever.retrieve_for_mapping("user_id", "customer_id")
     auth = pair_mapping_authority("user_id", "customer_id")
-    assert info["authority"] == "semantic_mapper.map_columns"
+    assert info["authority"] == "mapping_pipeline.run_mapping_pipeline"
     assert abs(float(info["mapping_confidence"]) - auth["confidence"]) < 1e-9
     assert info["requires_review"] is True
     assert float(info["mapping_confidence"]) < 0.85
@@ -52,7 +58,12 @@ def test_smart_mapper_map_columns_is_ssot_not_pair_scorer() -> None:
     rows = mapper.map_columns(["user_id", "AMT"], ["customer_id", "amount"])
     by = {m.source_column: m for m in rows}
     assert by["AMT"].target_column == "amount"
-    assert by["AMT"].confidence >= 0.85
+    # Names only, no destination types: Map's pipeline keeps it for review, so
+    # the AI surface may not present the bare scorer's 0.99 (accuracy review 2).
+    from services.semantic_mapper import authority_mappings
+
+    pipe = {m["source"]: m for m in authority_mappings(["user_id", "AMT"], ["customer_id", "amount"])}
+    assert abs(by["AMT"].confidence - float(pipe["AMT"]["confidence"])) < 1e-9
     assert by["user_id"].confidence < 0.85
 
 
@@ -73,7 +84,6 @@ def test_reasoning_chain_and_enhanced_mapper_hold_false_friends() -> None:
     )
     by_e = {m.source_column: m for m in enhanced}
     assert by_e["AMT"].target_column == "amount"
-    assert by_e["AMT"].confidence >= 0.85
     assert by_e["AMT"].method == "map_columns_ssot"
     assert by_e["user_id"].confidence < 0.85
 
@@ -97,7 +107,8 @@ def test_ai_mapping_authority_proof_artifact(tmp_path: Path) -> None:
         auth = pair_mapping_authority(src, tgt)
         aligned = abs(suggestion.confidence - auth["confidence"]) < 1e-9
         if auto_ok:
-            ok = aligned and suggestion.confidence >= 0.85
+            # The right pair: the surface shows exactly Map's confidence and target.
+            ok = aligned and auth["proposed_target"] == tgt
         else:
             ok = aligned and suggestion.confidence < 0.85
         correct += int(ok)
@@ -118,7 +129,8 @@ def test_ai_mapping_authority_proof_artifact(tmp_path: Path) -> None:
         "floor": 1.0,
         "passed": correct == len(cases),
         "honesty": (
-            "RAG confidence must equal map_columns. False-friends stay below G4. "
+            "RAG confidence must equal Map's pipeline (run_mapping_pipeline, no LLM). "
+            "False-friends stay below G4. "
             "Not a claim that Pilot LLM is better than Informatica CLAIRE on breadth."
         ),
         "cases": rows,

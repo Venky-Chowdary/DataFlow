@@ -28,7 +28,7 @@ import logging
 import math
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -289,18 +289,31 @@ def bounded_marker_count(conn: Any, tbl: Any, text_cols: list[str], hit: Any, sc
 
 
 def _columns(conn: Any, table: str, schema: str | None, wanted: list[str],
-             key: str = "") -> tuple[list[str], set[int], Any]:
-    """(text columns to probe, positions of fixed-width CHAR ones, the key column's type)."""
+             key: str = "") -> tuple[list[str], set[int], Any, dict[str, Any], str]:
+    """(text columns to probe, positions of fixed-width CHAR ones, the key column's type,
+    each text column's reflected type, the key column's reflected name).
+
+    The key is matched exactly first, then case-insensitively when exactly one
+    column matches that way. SQLAlchemy reflects an Oracle (and Snowflake)
+    upper-case identifier as lower case, so the run's key ``ID`` comes back as
+    ``id``; an exact-only match called the key missing and every Oracle upsert
+    ended "NULL-marker check not measured" (seen in the oracle-live CI job).
+    """
     import sqlalchemy as sa
 
     folded = {c.lower() for c in wanted}
     out: list[str] = []
     fixed: set[int] = set()
     key_type: Any = None
+    key_name = ""
+    loose: list[tuple[str, Any]] = []
+    types: dict[str, Any] = {}
     for col in sa.inspect(conn).get_columns(table, schema=schema or None):
         name = str(col.get("name") or "")
         if key and name == key:
-            key_type = col.get("type")
+            key_type, key_name = col.get("type"), name
+        elif key and name.lower() == key.lower():
+            loose.append((name, col.get("type")))
         if folded and name.lower() not in folded:
             continue
         kind = col.get("type")
@@ -308,7 +321,28 @@ def _columns(conn: Any, table: str, schema: str | None, wanted: list[str],
             if isinstance(kind, sa.CHAR) and not isinstance(kind, sa.VARCHAR):
                 fixed.add(len(out))
             out.append(name)
-    return out, fixed, key_type
+            types[name] = kind
+    if key and not key_name and len(loose) == 1:
+        key_name, key_type = loose[0]
+    return out, fixed, key_type, types, key_name
+
+
+def probe_table(bare: str, schema: str | None, text_cols: list[str], types: dict[str, Any],
+                key_column: str = "", key_type: Any = None) -> Any:
+    """The probe's table, each text column carrying its reflected type.
+
+    The predicate is chosen per column type: an Oracle CLOB/NCLOB cannot be an
+    ``IN`` key (ORA-22848) and is compared through ``DBMS_LOB.SUBSTR``. An
+    untyped column hid the CLOB, so the live probe sent a plain ``IN`` and every
+    Oracle run with a CLOB carrier ended "not measured" (D362, seen on Oracle
+    Database Free in the oracle-live CI job).
+    """
+    import sqlalchemy as sa
+
+    cols = [sa.column(c, types.get(c)) for c in text_cols]
+    if key_column and key_column not in text_cols:
+        cols.append(sa.column(key_column, key_type))
+    return sa.table(bare, *cols, schema=schema or None)
 
 
 #: Columns per chunk of the marker predicate (data audit DATA-9). A flat ``OR``
@@ -437,8 +471,6 @@ def count_marker_rows(
     is ``not_applicable``. The SQL filter only narrows the candidates; every
     candidate is classified byte for byte here (review F4).
     """
-    import sqlalchemy as sa
-
     from connectors.sql_identifiers import split_qualified_table
     from services.engine_pool import release_engine
 
@@ -472,15 +504,19 @@ def count_marker_rows(
             if dialect == "mysql" and getattr(engine.dialect, "is_mariadb", False):
                 dialect = "mariadb"
             try:
-                text_cols, fixed, key_type = _columns(conn, bare, schema, columns, scope.key_column)
+                text_cols, fixed, key_type, types, key_name = _columns(
+                    conn, bare, schema, columns, scope.key_column
+                )
                 if not text_cols:
                     return MarkerCount(0)
-                if scope.kind == "run_keys" and key_type is None:
+                if scope.kind == "run_keys" and not key_name:
                     return MarkerCount(None, f"the key column {scope.key_column!r} is not in {table}")
-                cols = [sa.column(c) for c in text_cols]
-                if scope.kind == "run_keys" and scope.key_column not in text_cols:
-                    cols.append(sa.column(scope.key_column, key_type))
-                tbl = sa.table(bare, *cols, schema=schema or None)
+                if scope.kind == "run_keys" and key_name != scope.key_column:
+                    scope = replace(scope, key_column=key_name)
+                tbl = probe_table(
+                    bare, schema, text_cols, types,
+                    scope.key_column if scope.kind == "run_keys" else "", key_type,
+                )
                 hit = marker_predicate(tbl, text_cols, dialect, sorted(raw_forms | escaped_forms))
                 with statement_timeout(conn, _TIMEOUT_DIALECT.get(dialect, dialect), seconds) as enforced:
                     result = bounded_marker_count(

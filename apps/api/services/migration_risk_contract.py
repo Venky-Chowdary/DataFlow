@@ -212,10 +212,51 @@ def _canonical_payload(payload: dict[str, Any]) -> str:
     return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
 
 
+#: Keyed signature: ``mrc-hmac:<key_id>:<hex>``, an HMAC-SHA256 of the
+#: canonical body under a key derived from the deployment's signing key
+#: (services.audit_chain_keys, the keyring the Check-now stamp uses). Only the
+#: server can produce one, so a contract written by a client is never honoured.
+HMAC_PREFIX = "mrc-hmac:"
+_HMAC_LABEL = b"datawrap-migration-risk-contract\x00"
+#: A contract this server cannot verify: written or edited by a client, or
+#: approved before this release (unkeyed ``mrc-sha256:``; services.risk_contract_store
+#: lists those for re-approval), or signed by an older replica during the upgrade.
+REAPPROVE_MESSAGE = (
+    "This risk approval was not signed by this server, was changed after it was, or was approved "
+    "before this release (or during the upgrade window): re-approve this risk once."
+)
+
+
+def _hmac_hex(payload: dict[str, Any], key: bytes) -> str:
+    import hmac
+
+    sub = hmac.new(key, _HMAC_LABEL, hashlib.sha256).digest()
+    return hmac.new(sub, _canonical_payload(payload).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def sign_risk_contract(payload: dict[str, Any]) -> str:
-    """Tamper-evident digest of the contract body (not a PKI signature)."""
-    digest = hashlib.sha256(_canonical_payload(payload).encode("utf-8")).hexdigest()
-    return f"mrc-sha256:{digest}"
+    """Keyed signature of the contract body (server-only; see HMAC_PREFIX)."""
+    from services.audit_chain_keys import signing_key
+
+    key_id, key, _source = signing_key()
+    return f"{HMAC_PREFIX}{key_id}:{_hmac_hex(payload, key)}"
+
+
+def _signature_valid(payload: dict[str, Any]) -> bool:
+    """A keyed signature this deployment verifies. Nothing else (pre-release digests included) is valid."""
+    import hmac
+
+    sig = str(payload.get("signature") or "")
+    if not sig.startswith(HMAC_PREFIX):
+        return False
+    key_id, _sep, mac = sig[len(HMAC_PREFIX):].partition(":")
+    try:
+        from services.audit_chain_keys import server_key_for
+
+        key = server_key_for(key_id) if key_id else None
+    except Exception:  # noqa: BLE001 - an unreadable keyring verifies nothing
+        key = None
+    return bool(key) and hmac.compare_digest(_hmac_hex(payload, key), mac)
 
 
 def infer_loss_classification(
@@ -341,7 +382,38 @@ def create_migration_risk_contract(
         "metadata": meta,
     }
     signature = sign_risk_contract(draft)
-    return MigrationRiskContract(**draft, signature=signature)
+    contract = MigrationRiskContract(**draft, signature=signature)
+    _record_signed(contract.to_dict())
+    return contract
+
+
+def _record_signed(payload: dict[str, Any]) -> None:
+    """Write the audit event for a signed contract (no data values)."""
+    from services.transform_engine import _current_workspace
+
+    workspace = str((payload.get("metadata") or {}).get("workspace_id") or _current_workspace() or "")
+    from services.audit_log import append_audit_event
+
+    meta = payload.get("metadata") or {}
+    append_audit_event(
+        action="migration_risk_contract.signed",
+        resource=f"risk_contract:{payload.get('risk_id')}",
+        actor=str(payload.get("approved_by") or "system"),
+        workspace_id=workspace or None,
+        details={
+            "risk_id": payload.get("risk_id"),
+            "kind": payload.get("loss_classification"),
+            "column": payload.get("column"),
+            "target": payload.get("target"),
+            "table": payload.get("table"),
+            "destination": meta.get("destination"),
+            "route": meta.get("route"),
+            "execution_policy": payload.get("execution_policy"),
+            "approved_by": payload.get("approved_by"),
+            "reason": payload.get("reason"),
+            "digest": payload.get("signature"),
+        },
+    )
 
 
 def verify_risk_contract(contract: MigrationRiskContract | dict[str, Any]) -> bool:
@@ -354,8 +426,7 @@ def verify_risk_contract(contract: MigrationRiskContract | dict[str, Any]) -> bo
         payload = contract.to_dict()
     else:
         payload = dict(contract or {})
-    expected = sign_risk_contract(payload)
-    return bool(payload.get("signature")) and payload.get("signature") == expected
+    return bool(payload.get("signature")) and _signature_valid(payload)
 
 
 def contract_from_dict(raw: dict[str, Any] | None) -> MigrationRiskContract | None:
@@ -493,6 +564,14 @@ def hydrate_risk_contract_dict(
             return dict(raw)
         if has_sig:
             return None
+        if str(raw.get("loss_classification") or "") == "oracle_empty_string_as_null":
+            return None  # signed only by services.oracle_empty_not_null.sign_empty_as_null
+        from services.workspace_filter import current_actor
+
+        # With a signed-in user the approval is in that user's name, never the draft's.
+        actor = str(current_actor() or "").strip()
+        if actor:
+            raw = {**raw, "approved_by": actor}
         meta = dict(raw.get("metadata") or {})
         if raw.get("loss_classification") and "loss_classification" not in meta:
             meta["loss_classification"] = raw.get("loss_classification")
@@ -552,24 +631,8 @@ def hydrate_risk_contract_dict(
             fidelity=str(mapping.get("fidelity") or ""),
             metadata=meta,
         )
-        payload = signed.to_dict()
-        try:
-            from services.audit_log import append_audit_event
-
-            append_audit_event(
-                action="migration_risk_contract.signed",
-                resource=f"risk_contract:{payload.get('risk_id')}",
-                actor=str(payload.get("approved_by") or "system"),
-                details={
-                    "risk_id": payload.get("risk_id"),
-                    "column": payload.get("column"),
-                    "execution_policy": payload.get("execution_policy"),
-                    "approved_by": payload.get("approved_by"),
-                },
-            )
-        except Exception:
-            pass
-        return payload
+        # create_migration_risk_contract recorded it and wrote the audit event.
+        return signed.to_dict()
     except (TypeError, ValueError):
         return None
 
@@ -589,6 +652,9 @@ def hydrate_mappings_risk_contracts(
         signed = hydrate_risk_contract_dict(
             row, table=table, migration_id=migration_id
         )
+        raw = row.get("risk_contract") or row.get("riskContract")
+        if signed is None and isinstance(raw, dict) and str(raw.get("signature") or "").strip():
+            row["risk_contract_refused"] = REAPPROVE_MESSAGE
         if signed is not None:
             row["risk_contract"] = signed
             if contract_clears_validate_block(signed):

@@ -28,6 +28,53 @@ TAMPER_NOTE = (
 )
 
 
+NOT_ESTABLISHED_NOTE = (
+    "The tables matched at scan time, but writes during the scan were not ruled out."
+)
+
+
+def _ms_apart(a: Any, b: Any) -> int | None:
+    from datetime import datetime, timezone
+
+    def parse(value: Any) -> datetime | None:
+        try:
+            parsed = datetime.fromisoformat(str(value).strip().replace(" ", "T", 1))
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    left, right = parse(a), parse(b)
+    if left is None or right is None:
+        return None
+    return int(round(abs((left - right).total_seconds()) * 1000))
+
+
+def consistency_of(state: dict[str, Any]) -> dict[str, Any]:
+    """What the scan established about writes during it, and nothing more.
+
+    ``pinned``: each side was read from one snapshot for the whole scan, so the
+    comparison is of the destination as of its snapshot against the source as
+    of its snapshot. Anything else is ``not_established`` with the reasons.
+    """
+    recorded = state.get("consistency") or {}
+    sides = {role: recorded.get(role) or {} for role in ("source", "destination")}
+    if recorded.get("off"):
+        return {"kind": "not_established", "reasons": [str(recorded["off"])], "note": NOT_ESTABLISHED_NOTE,
+                "source": {}, "destination": {}}
+    reasons = [str(recorded["broken"])] if recorded.get("broken") else []
+    for role, info in sides.items():
+        if info.get("kind") != "pinned":
+            reasons.append(f"{role}: {info.get('reason') or 'read statement by statement, not from one snapshot'}")
+    if not reasons:
+        out = {"kind": "pinned", "source": sides["source"], "destination": sides["destination"]}
+        apart = _ms_apart(sides["source"].get("at"), sides["destination"].get("at"))
+        if apart is not None:
+            out["snapshots_ms_apart"] = apart
+        return out
+    return {"kind": "not_established", "reasons": reasons, "note": NOT_ESTABLISHED_NOTE,
+            "source": sides["source"], "destination": sides["destination"]}
+
+
 def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
     plan = state["plan"]
     columns = plan["columns"]
@@ -38,7 +85,9 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
     keyless = not plan.get("key")
     systematic = state.get("systematic")
     done = state["status"] == "done"
-    complete = done and not not_compared and not systematic
+    # A match needs the units to add up to each side's row count (the population check).
+    population_check = state.get("population_check") or {}
+    complete = done and not not_compared and not systematic and population_check.get("ok") is True
 
     engine_changed = int(diff["changed"])
     judged_equal = int(judge["ce_stricter_than_fp"])
@@ -68,6 +117,7 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
                 "changed_rows_by_engine_digest": engine_changed,
                 "duplicate_keys": int(diff["duplicate"]),
                 "changed_cells_by_column": dict(judge["cells_by_column"]),
+                "by_column": judge.get("by_column") or {},
                 "causes": dict(judge["causes"]),
                 "explained_rows": int(judge["explained_rows"]),
                 "unexplained_rows": int(judge["unexplained_rows"]),
@@ -83,6 +133,18 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
                 "examples": judge["examples"],
             }
         )
+        null_keys = state.get("null_keys") or {}
+        if null_keys.get("source") or null_keys.get("destination"):
+            differences["rows_without_key"] = {
+                "rows_source": int(null_keys.get("source") or 0),
+                "rows_destination": int(null_keys.get("destination") or 0),
+                "missing_in_destination": int(null_keys.get("missing") or 0),
+                "extra_in_destination": int(null_keys.get("extra") or 0),
+                "missing_content_examples": null_keys.get("missing_examples") or [],
+                "extra_content_examples": null_keys.get("extra_examples") or [],
+                "note": "Rows whose key is NULL are in no key range: they were compared as whole rows "
+                        "(content), and a difference among them cannot be attributed to a key.",
+            }
     any_difference = bool(
         differences["missing_in_destination"]
         or differences["extra_in_destination"]
@@ -129,6 +191,7 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
             "rows_destination": int(state["rows"]["destination"]),
             "rows_compared_complete": bool(state["rows"].get("level0_complete")) and not not_compared,
             "held_out": held,
+            "population_check": population_check or None,
         },
         "coverage": {
             "complete": complete,
@@ -139,14 +202,13 @@ def build_evidence(state: dict[str, Any]) -> dict[str, Any]:
             "columns_streamed": sum(1 for c in columns if c["cls"] == "stream"),
             "columns_excluded": sum(1 for c in columns if c["cls"] == "excluded"),
             "stream": state.get("stream"),
+            # How the streamed pass was read: in key-range parts, or in one read (and why).
+            "stream_reads": state.get("stream_reads"),
         },
         "units": dict(units),
         "differences": differences,
         "outcome": outcome,
-        "consistency": {
-            "kind": "not_established",
-            "note": "Per-statement reads of a possibly moving source; pinned and quiesced scans are phase 4.",
-        },
+        "consistency": consistency_of(state),
         "statements": state["statements"],
         "elapsed_s": state["elapsed_s"],
         "started_at": state["started_at"],

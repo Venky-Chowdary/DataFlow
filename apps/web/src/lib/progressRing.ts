@@ -29,8 +29,22 @@ export function reconcileBarPercent(
 }
 
 /**
- * Validate hero ring. Skipped gates are N/A — they must not leave a finished
- * approve run looking stuck at 88%. Blocked runs show passed / actionable.
+ * passed / applicable as a whole percent that reaches 100 only when every
+ * applicable check passed: 199 of 200 is 99%, never a rounded-up 100%.
+ */
+export function ratioPercent(passed: number, applicable: number): number {
+  if (!(applicable > 0)) return 0;
+  const p = Math.max(0, Math.min(passed, applicable));
+  if (p >= applicable) return 100;
+  return Math.min(99, clampPercent((p / applicable) * 100));
+}
+
+/**
+ * Validate hero ring: passed ÷ applicable, where applicable is every gate
+ * except the skipped ones (N/A — they must not leave a finished run stuck at
+ * 88%). Gates in review or blocked count against the ring, so "16/22 passed ·
+ * 5 skipped · 1 review" reads 94%, not 100%. The decision (approve / review)
+ * never fills the ring on its own; the decision chip says that.
  */
 export function validateRingPercent(opts: {
   running: boolean;
@@ -38,15 +52,21 @@ export function validateRingPercent(opts: {
   decision?: string;
   passedCount: number;
   blockedCount: number;
+  /** Every gate in the run, skipped included. */
+  totalCount?: number;
+  skippedCount?: number;
+  /** Gates that ended in review (not passed, not blocked). */
+  reviewCount?: number;
   readinessScore?: number;
 }): { pct: number; indeterminate: boolean } {
   if (opts.running) return { pct: 0, indeterminate: true };
-  if (opts.passed && (opts.decision === "approve" || opts.decision === "review")) {
-    return { pct: 100, indeterminate: false };
-  }
-  const actionable = Math.max(0, opts.passedCount) + Math.max(0, opts.blockedCount);
-  if (actionable > 0) {
-    return { pct: clampPercent((opts.passedCount / actionable) * 100), indeterminate: false };
+  const passed = Math.max(0, opts.passedCount);
+  const total = Math.max(0, opts.totalCount ?? 0);
+  const applicable = total > 0
+    ? Math.max(passed, total - Math.max(0, opts.skippedCount ?? 0))
+    : passed + Math.max(0, opts.blockedCount) + Math.max(0, opts.reviewCount ?? 0);
+  if (applicable > 0) {
+    return { pct: ratioPercent(passed, applicable), indeterminate: false };
   }
   return { pct: clampPercent(opts.readinessScore ?? 0), indeterminate: false };
 }

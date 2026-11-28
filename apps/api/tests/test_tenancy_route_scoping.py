@@ -194,7 +194,7 @@ def _seed_job(world) -> Seeded:
         job = get_mongodb_service().get_job(job_id) or {}
         return job.get("status") == "failed" and job.get("name") == SENTINEL
 
-    return Seeded({"job_id": job_id, "fix_id": "fix-1", "signal_id": signal.json()["id"]}, intact)
+    return Seeded({"job_id": job_id, "fix_id": "fix-1", "signal_id": signal.json()["id"], "table": "t"}, intact)
 
 
 def _seed_proposal(world) -> Seeded:
@@ -637,6 +637,9 @@ _BODIES: dict[str, Any] = {
     "POST /api/v1/transfer/plans/{plan_id}/map": {"use_llm": False},
     "POST /api/v1/transfer/plans/{plan_id}/preflight": {},
     "PATCH /api/v1/connectors/saved/{connector_id}": {"name": "renamed-by-b"},
+    "POST /api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement": {
+        "table": "orders", "reason": "tenancy probe: duplicates tolerated",
+    },
     "PUT /api/v1/connectors/saved/{connector_id}": {
         "name": "renamed-by-b", "type": "postgresql", "host": "b.example.com", "port": 5432,
     },
@@ -674,6 +677,7 @@ _BODIES: dict[str, Any] = {
 }
 _QUERY: dict[str, dict[str, str]] = {
     "POST /api/v1/connectors/jobs/{job_id}/resume": {"request": "{}"},
+    "DELETE /api/v1/connectors/saved/{connector_id}/boundary-duplicates-acknowledgement": {"table": "orders"},
 }
 #: Statuses that mean "refused for who is asking".
 _REFUSED = {403, 404}

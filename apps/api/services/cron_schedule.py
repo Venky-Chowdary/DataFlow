@@ -25,6 +25,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from services import schedule_clock
+
 _MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
 _DOW = {d: i for i, d in enumerate(
@@ -140,7 +142,7 @@ class CronExpression:
         fields can make an expression unsatisfiable. One pass over the horizon's
         days, independent of the timezone (a zone only shifts the wall clock).
         """
-        start = today or datetime.now(timezone.utc).date()
+        start = today or schedule_clock.utc_now().date()
         for offset in range(FIRE_HORIZON_DAYS):
             if self.matches_day(start + timedelta(days=offset)):
                 return
@@ -180,11 +182,126 @@ def next_run(expr: str, after: datetime, tz: str | ZoneInfo = "UTC") -> datetime
     if after.tzinfo is None:
         after = after.replace(tzinfo=timezone.utc)
     # Advance to the start of the next minute (cron has minute resolution).
-    candidate = (after.astimezone(timezone.utc) + timedelta(minutes=1)).replace(
+    start = (after.astimezone(timezone.utc) + timedelta(minutes=1)).replace(
         second=0, microsecond=0
     )
-    for _ in range(_MAX_MINUTES):
-        if cron.matches(candidate.astimezone(zone)):
-            return candidate
-        candidate += timedelta(minutes=1)
-    raise CronError(f"No matching time found for cron '{expr}' within horizon")
+    found = _first_match_from(cron, zone, start)
+    if found is None:
+        raise CronError(f"No matching time found for cron '{expr}' within horizon")
+    return found
+
+
+_MINUTE = timedelta(minutes=1)
+
+
+def _ceil_minute(t: datetime) -> datetime:
+    floor = t.replace(second=0, microsecond=0)
+    return floor if floor == t else floor + _MINUTE
+
+
+def _minutes_of_day(cron: CronExpression) -> list[int]:
+    """Every matching wall-clock minute of a day (hour * 60 + minute), ascending."""
+    return [h * 60 + m for h in sorted(cron.hours) for m in sorted(cron.minutes)]
+
+
+def _local_days(zone: ZoneInfo, start: datetime, end: datetime):
+    """Split the UTC minutes [start, end) at local midnights, in time order.
+
+    Yields ``(lo, hi, regular, local)``: ``regular`` when the zone's offset is
+    the same whole number of minutes at both ends, so every minute in between
+    has the local date and wall clock ``local + (t - lo)``. A day with a DST
+    change (or an offset with seconds) is not regular and is walked minute by
+    minute, exactly as the definition reads.
+    """
+    t = start
+    while t < end:
+        local = t.astimezone(zone)
+        d = local.date() + timedelta(days=1)
+        midnight = _ceil_minute(datetime(d.year, d.month, d.day, tzinfo=zone).astimezone(timezone.utc))
+        hi = min(midnight if midnight > t else t + _MINUTE, end)
+        off = local.utcoffset()
+        regular = (
+            off is not None
+            and off.total_seconds() % 60 == 0
+            and (hi - _MINUTE).astimezone(zone).utcoffset() == off
+        )
+        yield t, hi, regular, local
+        t = hi
+
+
+def _may_match(cron: CronExpression, zone: ZoneInfo, lo: datetime, hi: datetime, local: datetime) -> bool:
+    """Whether any local date the UTC minutes [lo, hi) fall on satisfies the day fields."""
+    return cron.matches_day(local) or cron.matches_day((hi - _MINUTE).astimezone(zone))
+
+
+def _first_match_from(cron: CronExpression, zone: ZoneInfo, start: datetime) -> datetime | None:
+    """The earliest instant >= ``start`` whose wall clock in ``zone`` matches ``cron``.
+
+    Walks forward in time one local day at a time. On a day without an
+    offset change the first matching minute is a binary search over the
+    day's matching wall-clock minutes, so a dense expression ("* * * * *")
+    answers in microseconds and a sparse one ("0 0 29 2 *") skips whole days
+    on the day fields. A day with a DST change is walked minute by minute
+    (the definition itself). Same horizon as before: an instant counts only
+    within _MAX_MINUTES of ``start``.
+    """
+    from bisect import bisect_left
+
+    limit = start + timedelta(minutes=_MAX_MINUTES)
+    day_minutes = _minutes_of_day(cron)
+    for lo, hi, regular, local in _local_days(zone, start, limit):
+        if not _may_match(cron, zone, lo, hi, local):
+            continue
+        if regular:
+            wall = local.hour * 60 + local.minute
+            idx = bisect_left(day_minutes, wall)
+            if idx < len(day_minutes):
+                candidate = lo + timedelta(minutes=day_minutes[idx] - wall)
+                if candidate < hi:
+                    return candidate
+            continue
+        t = lo
+        while t < hi:
+            if cron.matches(t.astimezone(zone)):
+                return t
+            t += _MINUTE
+    return None
+
+
+def count_matches(expr: str, after: datetime, until: datetime, tz: str | ZoneInfo = "UTC", *, limit: int) -> int:
+    """How many instants ``next_run`` would step through in (``after``, ``until``], at most ``limit``.
+
+    The same instants as calling ``next_run`` repeatedly from ``after`` while
+    the result is <= ``until``, counted a local day at a time (a binary search
+    per day) instead of one call per instant: a schedule overdue three days on
+    "* * * * *" is 4,320 instants, which the scheduler counted inside its claim
+    lock one ``next_run`` at a time.
+    """
+    from bisect import bisect_left, bisect_right
+
+    cron = CronExpression(expr)
+    zone = tz if isinstance(tz, ZoneInfo) else resolve_timezone(tz)
+    if after.tzinfo is None:
+        after = after.replace(tzinfo=timezone.utc)
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    start = (after.astimezone(timezone.utc) + _MINUTE).replace(second=0, microsecond=0)
+    end = until.astimezone(timezone.utc).replace(second=0, microsecond=0) + _MINUTE
+    day_minutes = _minutes_of_day(cron)
+    total = 0
+    for lo, hi, regular, local in _local_days(zone, start, end):
+        if total >= limit:
+            break
+        if not _may_match(cron, zone, lo, hi, local):
+            continue
+        if regular:
+            first = local.hour * 60 + local.minute
+            last = first + int((hi - lo).total_seconds() // 60) - 1
+            total += bisect_right(day_minutes, last) - bisect_left(day_minutes, first)
+            continue
+        t = lo
+        while t < hi:
+            if cron.matches(t.astimezone(zone)):
+                total += 1
+            t += _MINUTE
+    return min(total, limit)

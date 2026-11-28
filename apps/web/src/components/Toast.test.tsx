@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { afterEach, it } from "node:test";
 import { createRequire } from "node:module";
 import type { Root } from "react-dom/client";
@@ -11,268 +12,140 @@ const { JSDOM } = createRequire(import.meta.url)("jsdom") as {
 const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/", pretendToBeVisual: true });
 Object.assign(globalThis, {
   window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement,
+  MouseEvent: dom.window.MouseEvent, Node: dom.window.Node,
   MutationObserver: dom.window.MutationObserver, IS_REACT_ACT_ENVIRONMENT: true,
 });
 Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
 dom.window.requestAnimationFrame = (callback: FrameRequestCallback) => dom.window.setTimeout(() => callback(0), 0);
 dom.window.cancelAnimationFrame = (handle: number) => dom.window.clearTimeout(handle);
+Object.assign(globalThis, { requestAnimationFrame: dom.window.requestAnimationFrame, cancelAnimationFrame: dom.window.cancelAnimationFrame });
 let root: Root | null = null;
-let host: HTMLElement | null = null;
 
-async function mount() {
+type Notify = (title: string, message?: string, tone?: "info" | "success" | "warning" | "error") => Promise<void>;
+
+async function settle(ms = 0) {
+  const { act } = await import("react");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, ms)); });
+}
+
+async function mount(page?: () => unknown) {
   const { act, createElement } = await import("react");
   const { createRoot } = await import("react-dom/client");
   const { ToastProvider, useToast } = await import("./Toast");
-  let notify: ReturnType<typeof useToast>["toast"];
+  let api!: ReturnType<typeof useToast>;
   function Emitter() {
-    notify = useToast().toast;
-    return null;
+    api = useToast();
+    return (page?.() as never) ?? null;
   }
-  host = document.createElement("div");
+  const host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
   await act(async () => root!.render(createElement(ToastProvider, null, createElement(Emitter))));
-  return async (title: string, message = "message") => {
-    await act(async () => notify({ title, message, tone: "warning" }));
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  const notify: Notify = async (title, message = "message", tone = "warning") => {
+    await act(async () => api.toast({ title, message, tone }));
+    await settle(5);
   };
+  return { notify, api: () => api, host };
 }
+
+/** Toasts on screen (a dismissed one animates out with data-removed="true"). */
+const toasts = () => Array.from(document.querySelectorAll<HTMLElement>('[data-sonner-toast]:not([data-removed="true"]) .dt-toast'));
 
 afterEach(async () => {
   const { act } = await import("react");
+  const { toast } = await import("sonner");
+  await act(async () => { toast.dismiss(); });
+  await settle(300);
   if (root) await act(async () => root!.unmount());
   root = null;
-  host = null;
   document.body.replaceChildren();
 });
 
-it("keeps a reviewed notification identity when re-emitted after the dedupe window", async () => {
-  const notify = await mount();
-  await notify("Repeated warning", "Same finding");
-  const trigger = document.querySelector<HTMLButtonElement>('[aria-label="View notification details"]')!;
-  trigger.focus();
-  const { act } = await import("react");
-  await act(async () => trigger.click());
-  const realNow = Date.now;
-  const later = realNow() + 5_000;
-  try {
-    Date.now = () => later;
-    await notify("Repeated warning", "Same finding");
-    assert.equal(trigger.isConnected, true);
-    await act(async () => document.querySelector<HTMLButtonElement>('[role="dialog"] [aria-label="Close"]')!.click());
-    assert.equal(document.activeElement === trigger, true);
-  } finally {
-    Date.now = realNow;
+it("renders in one notification region outside the page, with the full title and message (P1-4)", async () => {
+  const { notify, host } = await mount();
+  await notify("Source profiled", "5 rows and 5 columns detected.", "success");
+  const [card] = toasts();
+  assert.ok(card);
+  assert.equal(host.contains(card), false, "never inside the page tree it was raised from");
+  const region = card.closest("section");
+  assert.match(region?.getAttribute("aria-label") || "", /^Notifications/);
+  assert.equal(region?.getAttribute("aria-live"), "polite");
+  assert.ok(card.classList.contains("dt-toast--success"));
+  assert.equal(card.querySelector(".dt-toast-title")?.textContent, "Source profiled");
+  assert.equal(card.querySelector(".dt-toast-message")?.textContent, "5 rows and 5 columns detected.");
+  assert.equal(document.querySelector("[data-df2-toast-dock]"), null);
+});
+
+it("uses the standard status glyph for every tone (P1-5)", async () => {
+  const { notify } = await mount();
+  const glyph: Record<string, string> = { info: "lucide-info", success: "lucide-circle-check", warning: "lucide-triangle-alert", error: "lucide-circle-x" };
+  for (const tone of ["info", "success", "warning", "error"] as const) {
+    await notify(`Tone ${tone}`, "m", tone);
+    const card = toasts().find((t) => t.textContent?.includes(`Tone ${tone}`))!;
+    assert.ok(card.querySelector(`.dt-toast-icon svg.${glyph[tone]}`), `${tone} uses ${glyph[tone]}`);
+    assert.match(card.querySelector(".dt-toast-icon")?.textContent || "", /\w+: /, "the tone is spoken, not only coloured");
   }
 });
 
-it("never portals notifications into a hidden retained screen", async () => {
-  const screen = document.createElement("section");
-  screen.hidden = true;
-  screen.innerHTML = '<div data-df2-toast-dock=""></div>';
-  document.body.appendChild(screen);
-  const notify = await mount();
-  await notify("Visible warning");
-  assert.equal(document.querySelector(".dt-toast-host")?.closest("[hidden]") === null, true);
+it("collapses an identical notification into the one already showing", async () => {
+  const { notify } = await mount();
+  await notify("Repeated warning", "Same finding");
+  await notify("Repeated warning", "Same finding");
+  await notify("Repeated warning", "Same finding");
+  assert.equal(toasts().filter((t) => t.textContent?.includes("Repeated warning")).length, 1);
 });
 
-it("moves the toast host when a dock becomes hidden without unmounting", async () => {
-  const screen = document.createElement("section");
-  screen.innerHTML = '<div data-df2-toast-dock=""></div>';
-  document.body.appendChild(screen);
-  const notify = await mount();
-  await notify("Route warning");
+it("dismisses by its close button and by title", async () => {
+  const { notify, api } = await mount();
+  await notify("First", "one");
+  await notify("Second", "two");
   const { act } = await import("react");
-  await act(async () => {
-    screen.style.display = "none";
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
-  assert.equal(screen.querySelector(".dt-toast-host"), null);
-  assert.match(document.querySelector(".dt-toast-host")?.textContent || "", /Route warning/);
+  await act(async () => toasts().find((t) => t.textContent?.includes("First"))!.querySelector<HTMLButtonElement>('[aria-label="Dismiss notification"]')!.click());
+  await settle(300);
+  assert.deepEqual(toasts().map((t) => t.querySelector(".dt-toast-title")?.textContent), ["Second"]);
+  await act(async () => api().dismissMatching("Second"));
+  await settle(300);
+  assert.equal(toasts().length, 0);
 });
 
-it("offers full notification details without expanding the preview", async () => {
-  const notify = await mount();
-  const message = "Migration diagnostics ".repeat(60);
-  await notify("Long warning", message);
-  const details = document.querySelector<HTMLButtonElement>('[aria-label="View notification details"]');
-  assert.ok(details);
+it("shows at most three; the rest wait behind them", async () => {
+  const { notify } = await mount();
+  for (const n of [1, 2, 3, 4, 5]) await notify(`Notice ${n}`, "m", "info");
+  const visible = Array.from(document.querySelectorAll('[data-sonner-toast][data-visible="true"]'));
+  assert.equal(visible.length, 3);
+});
+
+it("long text clamps and opens in full under Details; the toast waits and focus returns", async () => {
+  const { notify } = await mount();
+  const message = "Full diagnostic\n" + "recovery-step ".repeat(30);
+  await notify("Expiring warning", message);
+  const card = toasts()[0];
+  assert.ok(card.querySelector(".dt-toast-message.is-clamped"));
+  const details = Array.from(card.querySelectorAll("button")).find((b) => b.textContent === "Details")!;
+  assert.ok(details, "a text action, not an icon");
+  details.focus();
   const { act } = await import("react");
   await act(async () => details.click());
-  assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /Migration diagnostics/);
-  assert.equal(document.querySelector('[role="dialog"]')?.textContent?.includes(message.trim()), true);
-});
-
-it("makes dock overflow accessible instead of hiding notification history", async () => {
-  const dock = document.createElement("div");
-  dock.setAttribute("data-df2-toast-dock", "");
-  document.body.appendChild(dock);
-  const notify = await mount();
-  await notify("First warning");
-  await notify("Second warning");
-  await notify("Third warning");
-  const more = document.querySelector<HTMLButtonElement>("button.dt-toast-more");
-  assert.ok(more);
-  const { act } = await import("react");
-  await act(async () => more.click());
-  assert.match(document.querySelector('[role="dialog"]')?.textContent || "", /First warning/);
-});
-
-for (const hiddenState of ["hidden", "inert", "aria-hidden", "visibility", "class"]) {
-  it(`switches to another visible dock when the retained route uses ${hiddenState}`, async () => {
-    const style = document.createElement("style");
-    style.textContent = ".toast-test-hidden { display: none; }";
-    document.body.appendChild(style);
-    const screen = document.createElement("section");
-    screen.innerHTML = '<div data-df2-toast-dock=""></div>';
-    document.body.appendChild(screen);
-    const notify = await mount();
-    await notify("Retained route warning");
-    assert.ok(screen.querySelector(".dt-toast-host"));
-    const otherDock = document.createElement("div");
-    otherDock.setAttribute("data-df2-toast-dock", "");
-    const { act } = await import("react");
-    await act(async () => {
-      document.body.appendChild(otherDock);
-      if (hiddenState === "visibility") screen.style.visibility = "hidden";
-      else if (hiddenState === "class") screen.classList.add("toast-test-hidden");
-      else screen.setAttribute(hiddenState, hiddenState === "aria-hidden" ? "true" : "");
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-    assert.equal(screen.querySelector(".dt-toast-host"), null);
-    assert.match(otherDock.textContent || "", /Retained route warning/);
-  });
-}
-
-it("bounds the floating stack and reviews every active message", async () => {
-  const notify = await mount();
-  await notify("First warning", "First recovery step");
-  await notify("Second warning", "Second recovery step");
-  await notify("Third warning", "Third recovery step");
-  assert.equal(document.querySelectorAll(".dt-toast").length, 2);
-  const more = document.querySelector<HTMLButtonElement>("button.dt-toast-more")!;
-  assert.equal(more.getAttribute("aria-label"), "Review 1 more notifications");
-  assert.equal(more.getAttribute("aria-haspopup"), "dialog");
-  const { act } = await import("react");
-  await act(async () => more.click());
-  assert.deepEqual(Array.from(document.querySelectorAll(".dt-toast-review-item p"), node => node.textContent),
-    ["Third recovery step", "Second recovery step", "First recovery step"]);
-});
-
-it("returns keyboard focus to the details trigger after Escape", async () => {
-  const notify = await mount();
-  await notify("Keyboard warning");
-  const trigger = document.querySelector<HTMLButtonElement>('[aria-label="View notification details"]')!;
-  trigger.focus();
-  const { act } = await import("react");
-  await act(async () => trigger.click());
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
-  const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
-  assert.equal(document.activeElement, dialog);
-  await act(async () => {
-    document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
-  });
-  assert.equal(document.activeElement, dialog.querySelector('[aria-label="Close"]'));
-  await act(async () => {
-    document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-  });
+  await settle(20);
+  const dialog = document.querySelector('[role="dialog"]');
+  assert.ok(dialog);
+  assert.match(dialog.querySelector(".dt-toast-review-item p")?.textContent || "", /^Full diagnostic/);
+  assert.equal(toasts().length, 1, "the toast stays while its details are open");
+  await act(async () => document.querySelector<HTMLButtonElement>('[role="dialog"] [aria-label="Close"]')!.click());
+  await settle(20);
   assert.equal(document.querySelector('[role="dialog"]'), null);
-  assert.equal(document.activeElement, trigger);
+  assert.equal(document.activeElement?.textContent, "Details");
 });
 
-function controlDismissTimers() {
-  const original = window.setTimeout;
-  const originalClear = window.clearTimeout;
-  const pending = new Map<number, () => void>();
-  let nextHandle = 987654;
-  window.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
-    if (delay === 10000) {
-      const handle = nextHandle++;
-      pending.set(handle, callback as () => void);
-      return handle;
-    }
-    return Reflect.apply(original, window, [callback, delay, ...args]) as number;
-  }) as typeof window.setTimeout;
-  window.clearTimeout = (handle?: number) => {
-    if (handle != null && pending.delete(handle)) return;
-    originalClear.call(window, handle);
-  };
-  return {
-    pending,
-    expire: () => {
-      for (const [handle, callback] of [...pending]) {
-        pending.delete(handle);
-        callback();
-      }
-    },
-    restore: () => {
-      window.setTimeout = original;
-      window.clearTimeout = originalClear;
-    },
-  };
-}
+it("keeps the reference chip outside the clamped text", async () => {
+  const { notify } = await mount();
+  await notify("Couldn't load job history", "The server did not answer. Reference: ref_8f2a91", "error");
+  const card = toasts()[0];
+  assert.doesNotMatch(card.querySelector(".dt-toast-message")?.textContent || "", /ref_8f2a91/);
+  assert.match(card.querySelector(".dt-toast-actions")?.textContent || "", /ref_8f2a91/);
+});
 
-for (const close of ["Escape", "Close"]) {
-  it(`pauses detail expiry and restores opener focus after ${close}, then resumes expiry`, async () => {
-    const timers = controlDismissTimers();
-    try {
-      const notify = await mount();
-      const message = "Full diagnostic\n" + "recovery-step ".repeat(100);
-      await notify("Expiring warning", message);
-      await notify("Unrelated warning");
-      assert.equal(timers.pending.size, 2);
-      const trigger = document.querySelector<HTMLButtonElement>('[aria-label="View notification details"]')!;
-      trigger.focus();
-      const { act } = await import("react");
-      await act(async () => trigger.click());
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
-      assert.equal(document.activeElement, document.querySelector('[role="dialog"]'));
-      await act(async () => timers.expire());
-      assert.equal(trigger.isConnected, true);
-      assert.equal(document.querySelectorAll(".dt-toast").length, 1);
-      assert.equal(document.querySelector(".dt-toast-review-item p")?.textContent, message.trim());
-      await act(async () => {
-        if (close === "Escape") document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-        else document.querySelector<HTMLButtonElement>('[role="dialog"] [aria-label="Close"]')!.click();
-      });
-      assert.equal(document.querySelector('[role="dialog"]'), null);
-      assert.equal(document.activeElement, trigger);
-      assert.equal(timers.pending.size, 1);
-      await act(async () => timers.expire());
-      assert.equal(document.querySelectorAll(".dt-toast").length, 0);
-    } finally {
-      timers.restore();
-    }
-  });
-}
-
-it("keeps the overflow review opener through expiry and restores focus on close", async () => {
-  const timers = controlDismissTimers();
-  try {
-    const notify = await mount();
-    await notify("First warning", "First recovery step");
-    await notify("Second warning", "Second recovery step");
-    await notify("Third warning", "Third recovery step");
-    const trigger = document.querySelector<HTMLButtonElement>("button.dt-toast-more")!;
-    trigger.focus();
-    const { act } = await import("react");
-    await act(async () => trigger.click());
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
-    assert.equal(document.querySelector<HTMLElement>(".dt-toast-host")?.style.display, "none");
-    await act(async () => timers.expire());
-    assert.equal(trigger.isConnected, true);
-    assert.equal(document.querySelectorAll(".dt-toast").length, 2);
-    assert.deepEqual(Array.from(document.querySelectorAll(".dt-toast-review-item p"), node => node.textContent),
-      ["Third recovery step", "Second recovery step", "First recovery step"]);
-    await act(async () => document.querySelector<HTMLButtonElement>('[role="dialog"] [aria-label="Close"]')!.click());
-    assert.equal(document.querySelector('[role="dialog"]'), null);
-    assert.notEqual(document.querySelector<HTMLElement>(".dt-toast-host")?.style.display, "none");
-    assert.equal(document.activeElement, trigger);
-    assert.equal(timers.pending.size, 3);
-    await act(async () => timers.expire());
-    assert.equal(document.querySelector("button.dt-toast-more"), null);
-    assert.equal(document.querySelectorAll(".dt-toast").length, 0);
-  } finally {
-    timers.restore();
-  }
+it("has no body-wide MutationObserver and no dock lookup (P1-5)", () => {
+  const source = readFileSync(new URL("./Toast.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /MutationObserver|data-df2-toast-dock|getComputedStyle/);
 });

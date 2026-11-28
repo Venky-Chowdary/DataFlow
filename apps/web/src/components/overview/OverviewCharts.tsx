@@ -1,5 +1,5 @@
 import { useElementWidth } from "../charts/useElementWidth";
-import { DtIcon } from "../DtIcon";
+import { DtIcon, type IconName } from "../DtIcon";
 import type { DayThroughput, JobStatusSlice } from "../../lib/overviewAnalytics";
 
 const CHART_HEIGHT = 140;
@@ -178,7 +178,7 @@ interface MetricGlassTileProps {
   label: string;
   value: string | number;
   sub?: string;
-  icon: string;
+  icon: IconName;
   sparkline?: number[];
   tone?: "default" | "teal" | "green" | "amber";
   /** 0–100 progress ring in the accent well (e.g. success rate). */

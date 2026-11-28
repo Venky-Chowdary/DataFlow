@@ -5,7 +5,8 @@
  * The footer rail owns that teal control. Dashboard cards diagnose and offer
  * ghost/secondary copies only — never a second enabled primary.
  *
- * Execute unlocks only when API Validate passed AND decision === "approve".
+ * Run transfer unlocks only when API Validate passed AND decision === "approve".
+ * One label in every state: the reason it is disabled is said beside it.
  */
 import type { PreflightResult } from "./types.js";
 import type { DisplayBlocker } from "./validateIssueGrouping.js";
@@ -62,7 +63,7 @@ export interface ValidateStudioPrimary {
   family: ValidateActionFamily | null;
   label: string;
   enabled: boolean;
-  executeLabel: "Execute" | "Execute (blocked)" | "Execute (review)" | null;
+  executeLabel: "Run transfer" | null;
   executeIsPrimary: boolean;
   executeEnabled: boolean;
 }
@@ -84,8 +85,8 @@ export function actionFamilyFromLabel(label: string | undefined | null): Validat
   if (/fk risk|foreign.?key/i.test(label)) return "acknowledge_fk";
   if (/approve mapping/i.test(label)) return "approve_mappings";
   if (/live progress/i.test(label)) return "open_live";
-  if (/^execute/i.test(label)) return "execute";
-  if (/run preflight/i.test(label)) return "run_preflight";
+  if (/^execute|^run transfer/i.test(label)) return "execute";
+  if (/run preflight|run validate/i.test(label)) return "run_preflight";
   if (/map|remap|target ddl|breaking change|include column|choose policy/i.test(label)) {
     return "map_open";
   }
@@ -130,13 +131,7 @@ export function resolveValidateStudioPrimary(
     input.preflight?.blockers?.some((b) => b.id.includes("mapping")),
   );
   const executeEnabled = !input.transferring && passed && !reviewGrade && !input.executeBlocked;
-  const executeLabel = !input.preflight
-    ? null
-    : (input.executeBlocked || !passed)
-      ? "Execute (blocked)"
-      : reviewGrade
-        ? "Execute (review)"
-        : "Execute";
+  const executeLabel = input.preflight ? "Run transfer" : null;
 
   if (input.transferLaunch) {
     return {
@@ -154,7 +149,7 @@ export function resolveValidateStudioPrimary(
     return {
       kind: "run_preflight",
       family: "run_preflight",
-      label: "Run preflight",
+      label: "Run Validate",
       enabled: !input.preflighting,
       executeLabel: null,
       executeIsPrimary: false,
@@ -218,7 +213,7 @@ export function resolveValidateStudioPrimary(
   return {
     kind: "execute",
     family: "execute",
-    label: executeLabel || "Execute",
+    label: executeLabel || "Run transfer",
     enabled: executeEnabled,
     executeLabel,
     executeIsPrimary: true,

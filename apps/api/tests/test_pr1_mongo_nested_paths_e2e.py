@@ -72,6 +72,9 @@ MAPPINGS = [
     {"source": "zip", "target": "address.zip", "confidence": 1.0},
     {"source": "tags", "target": "meta.tags", "confidence": 1.0},
 ]
+#: Without the recipe, tier and segment are not nested into meta.tags: the plain
+#: map leaves them out, which a run without Validate must declare (G13 at Execute).
+_PLAIN_OMITS = [{"source": c, "target": "", "intentional_omit": True} for c in ("tier", "segment")]
 ROWS = [
     (1, "Ada", "Paris", "75001", "gold", "smb"),
     (2, "Grace", "Oslo", "0150", "silver", "ent"),
@@ -114,7 +117,7 @@ def _request(src: Path, db: str, sync_mode: str, *, recipe: bool = True):
         if recipe else {}
     )
     return TransferRequest(
-        mappings=[dict(m) for m in (MAPPINGS if recipe else MAPPINGS[:4])],
+        mappings=[dict(m) for m in (MAPPINGS if recipe else [*MAPPINGS[:4], *_PLAIN_OMITS])],
         source=EndpointConfig(kind="database", format="sqlite", database=str(src), table="customers"),
         destination=EndpointConfig(
             kind="database", format="mongodb", connection_string=MONGO_URI,

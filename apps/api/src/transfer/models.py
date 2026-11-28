@@ -211,6 +211,12 @@ class TransferRequest:
     # Operator accepted a load far smaller than this route's history (the
     # strict load-volume guard) - D82.
     load_volume_acknowledged: bool = False
+    # Operator accepted, once per route, that pinning Oracle sessions to UTC
+    # changes what this route's own SQL evaluates (finding 8 upgrade).
+    session_zone_acknowledged: bool = False
+    # Its own attestation: never the actor/reason given for another acknowledgement.
+    session_zone_ack_actor: str = ""
+    session_zone_ack_reason: str = ""
     # Sync now / full re-sync. Empty scope runs the full gate set.
     # ``drift_connectivity`` rechecks only drift and connectivity on a signed contract.
     preflight_scope: str = ""
@@ -426,6 +432,9 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "allow_duplicates": bool(request.allow_duplicates),
         "file_wait_seconds": int(request.file_wait_seconds or 0),
         "load_volume_acknowledged": bool(request.load_volume_acknowledged),
+        "session_zone_acknowledged": bool(request.session_zone_acknowledged),
+        "session_zone_ack_actor": request.session_zone_ack_actor or "",
+        "session_zone_ack_reason": request.session_zone_ack_reason or "",
         "preflight_scope": request.preflight_scope or "",
         "parent_job_id": request.parent_job_id or "",
         "historical_resync": bool(request.historical_resync),
@@ -506,6 +515,29 @@ def _endpoint_address(ep: dict) -> dict:
     return {"type": kind.lower(), "host": host.lower(), "port": port, "database": database}
 
 
+def _strip_verification_internals(out: dict) -> None:
+    """Parity at Scale's checkpoints, lease and evidence bodies are the worker's, not the client's.
+
+    The verification state and outcome stay; scan state (keys, examples) is
+    served only by the explorer routes, which mask protected columns.
+    """
+    for name in ("parity_scale_checkpoints", "parity_scale_lease", "parity_scale_pending_cursor"):
+        out.pop(name, None)
+    block = out.get("parity_scale")
+    if isinstance(block, dict):
+        tables = []
+        for table in block.get("tables") or []:
+            if not isinstance(table, dict):
+                continue
+            evidence = table.get("evidence") if isinstance(table.get("evidence"), dict) else {}
+            tables.append({
+                **{k: v for k, v in table.items() if k != "evidence"},
+                "outcome": evidence.get("outcome"),
+                "check_kind": evidence.get("check_kind"),
+            })
+        out["parity_scale"] = {**block, "tables": tables}
+
+
 def sanitize_job_for_api(job: dict) -> dict:
     """Strip plaintext connector secrets from a job document before returning to clients."""
     import copy
@@ -520,6 +552,7 @@ def sanitize_job_for_api(job: dict) -> dict:
                 tr[side]["address"] = address
         out["transfer_request"] = tr
     _project_operator_quarantine(out)
+    _strip_verification_internals(out)
     from src.ai.copilot.job_reads import job_lineage
 
     lineage = job_lineage(out)
@@ -702,6 +735,9 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
             data.get("empty_source_overwrite_acknowledged")
         ),
         load_volume_acknowledged=bool(data.get("load_volume_acknowledged")),
+        session_zone_acknowledged=bool(data.get("session_zone_acknowledged")),
+        session_zone_ack_actor=str(data.get("session_zone_ack_actor") or ""),
+        session_zone_ack_reason=str(data.get("session_zone_ack_reason") or ""),
         preflight_scope=str(data.get("preflight_scope") or "").strip(),
         parent_job_id=str(data.get("parent_job_id") or "").strip(),
         rerun_of=str(data.get("rerun_of") or "").strip(),

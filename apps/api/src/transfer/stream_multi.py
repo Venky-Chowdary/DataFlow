@@ -240,6 +240,8 @@ def run_non_cdc_multi_stream_sequential(
         completed_streams,
         forget_all_progress,
         record_stream_completed,
+        forget_stream_started,
+        record_stream_started,
         skip_reason,
     )
 
@@ -259,6 +261,8 @@ def run_non_cdc_multi_stream_sequential(
     begin_undo_pass(destination)  # C4: undo facts belong to this pass only
     total_rows = 0
     shaped_out = 0
+    #: Destination table (folded) -> the stream that wrote it, for the stop record.
+    landed_streams: dict[str, str] = {}
     ddl_log: list[str] = [
         f"MULTI-STREAM sequential ({len(selected_list)} streams, sync={sync_mode}; "
         "each stream has its own watermark; at-least-once)"
@@ -282,6 +286,25 @@ def run_non_cdc_multi_stream_sequential(
     original_collection = getattr(source, "collection", None)
     original_dest_table = getattr(destination, "table", None)
     original_dest_collection = getattr(destination, "collection", None)
+
+    # SCD2 / mirror tables never reach the stream's map step: each is judged,
+    # with the map it writes with, before the first table is touched.
+    from .source_column_coverage import judge_tables_before_any_write
+
+    staged_tables = []
+    for contract in selected_list:
+        name = (contract.name or "").strip() or "stream"
+        own = contract_for_stream(stream_contracts, name).get("mappings")
+        if resolve_effective_sync_mode(sync_mode, contract.sync_mode or sync_mode).lower() in (
+            "full_refresh_mirror", "mirror", "scd2"
+        ):
+            # No map of its own: the table's own columns, as the row path adopts them.
+            staged_tables.append((name, own if isinstance(own, list) and own else None))
+    judged = judge_tables_before_any_write(
+        source=source, destination=destination, streams=staged_tables,
+        request_mappings=mappings,
+        original=(original_table, original_collection, original_dest_table, original_dest_collection),
+    ) if staged_tables else {}
 
     session_before, session_after = endpoint_session_hooks(destination)
     session_plan = None
@@ -348,6 +371,8 @@ def run_non_cdc_multi_stream_sequential(
             use_mappings = (
                 stream_maps if isinstance(stream_maps, list) and stream_maps else mappings
             )
+            if stream_name in judged and not (isinstance(stream_maps, list) and stream_maps):
+                use_mappings = judged[stream_name]["mappings"]  # SCD2 / mirror: the map judged
             # The FK planner translates key columns through this map; without it
             # a reference would be emitted against a destination column name
             # that the load never wrote.
@@ -380,6 +405,13 @@ def run_non_cdc_multi_stream_sequential(
                 ddl_log.append(f"RESUME {stream_name}: {skip_reason(prior)}")
                 continue
 
+            # This table's columns before an overwrite sets it aside: the
+            # per-table verdict judges the table the operator had.
+            from .source_column_coverage import capture_stream_dest_types, table_existed_before
+
+            stream_dest_types = capture_stream_dest_types(destination, stream_name)
+            # Asked before the set-aside: False is a table this run creates.
+            stream_existed = table_existed_before(destination, stream_name)
             # Per-stream overwrite: drop remapped dest (outer engine skip when N>1).
             if should_drop_destination_for_sync(
                 request_sync_mode=sync_mode,
@@ -392,6 +424,8 @@ def run_non_cdc_multi_stream_sequential(
             rows = 0
             summary: dict[str, Any] = {}
             stream_limit = remaining_limit if limit > 0 else 0
+            # The Run screen's per-table progress: this table is loading now.
+            record_stream_started(str(job_id or ""), stream_name)
             source_patch, dest_patch = patches_for_stream(raw)
             if session_plan is not None:
                 dest_patch = strip_session_hooks(dest_patch)
@@ -458,6 +492,8 @@ def run_non_cdc_multi_stream_sequential(
                                 ),
                             )
                         )
+                        if stream_name in judged:
+                            summary = {**(summary or {}), "schema_propagation": judged[stream_name]["record"]}
                     else:
                         rows, stream_ddl, summary, headers = stream_database_transfer(
                             source,
@@ -479,6 +515,9 @@ def run_non_cdc_multi_stream_sequential(
                             shape_steps=_steps_for(stream_name),
                             mappings_inherited=not declared_maps,
                             workspace_id=workspace_id,
+                            per_stream_coverage={
+                                "dest_types": stream_dest_types, "existed": stream_existed,
+                            },
                         )
                 # The stream landed: park its overwrite backup under its table
                 # (the next stream's clear must not inherit it, and a later
@@ -500,7 +539,21 @@ def run_non_cdc_multi_stream_sequential(
                         str(job_id or ""), str((summary or {}).get("table") or stream_name)
                     ),
                 )
+                landed_table = str((summary or {}).get("table") or "")
+                if landed_table:
+                    landed_streams[landed_table.lower()] = stream_name
                 last_stream_mappings = list(use_mappings or [])
+                if not declared_maps and headers and not _steps_for(stream_name):
+                    # A borrowed map that does not name this table's columns was
+                    # replaced by the stream with its own columns
+                    # (adopt_stream_column_map). Gate-8 must digest under the
+                    # map the rows were written with, or a correct load fails
+                    # on another table's column names.
+                    from services.multi_stream_plan import adopt_inherited_mappings
+
+                    last_stream_mappings, _ = adopt_inherited_mappings(
+                        last_stream_mappings, [str(h) for h in headers]
+                    )
                 _publish_stream_written(job_id, stream_name, rows)
                 shaped_out += int((summary or {}).get("rows_shaped_out") or 0)
                 if limit > 0:
@@ -508,6 +561,7 @@ def run_non_cdc_multi_stream_sequential(
             except Exception as exc:
                 status = "failed"
                 error = str(exc)
+                forget_stream_started(str(job_id or ""), stream_name)
                 # This stream's cleared table goes back now, while the endpoint
                 # still names it; the engine's settle would put the backup on
                 # the request's table instead (and leave this one empty).
@@ -531,6 +585,22 @@ def run_non_cdc_multi_stream_sequential(
                 # Every table's failed restore (this one's and the undo's) goes
                 # onto the run's error now, whatever path reports it (review 3).
                 carry_onto_exception(destination, exc)
+                # The stop record rides on the exception: job_failure writes it into
+                # error_details in the same update as the failed status, with each
+                # undo entry named by its stream (re-review D).
+                failed_dest = str(
+                    resolve_dest_table(
+                        str(getattr(destination, "format", "") or ""), destination, stream_name
+                    ) or ""
+                )
+                if failed_dest:
+                    landed_streams.setdefault(failed_dest.lower(), stream_name)
+                undo_entries = [dict(e) for e in (getattr(exc, "multi_stream_undo", None) or []) if isinstance(e, dict)]
+                for entry in undo_entries:
+                    entry.setdefault("stream", landed_streams.get(str(entry.get("table") or "").lower(), ""))
+                if undo_entries:
+                    setattr(exc, "multi_stream_undo", undo_entries)
+                setattr(exc, "stopped_stream", stream_name)
                 record_stream_health(
                     stream_health,
                     name=stream_name,
@@ -574,6 +644,9 @@ def run_non_cdc_multi_stream_sequential(
                     # was handed none, else what its route recorded (review 6).
                     "resumed_checkpoint_rows": summary.get("resumed_checkpoint_rows")
                     if handed_rows else 0,
+                    # Which source columns this table added, left out or carried.
+                    "schema_propagation": summary.get("schema_propagation"),
+                    "columns_added_during_run": summary.get("columns_added_during_run"),
                 },
                 sync_mode=sync_mode,
                 source=source,

@@ -1,13 +1,16 @@
-"""Parity Studio on a live PostgreSQL: a scale cut, widened in place, then re-synced.
+"""Parity Studio on a live PostgreSQL: a scale cut is held back, never rounded.
 
 The destination already exists with ``amount NUMERIC(12,2)`` while the source
-holds ``NUMERIC(12,4)``; PostgreSQL rounds every value on insert. The run uses
-``lenient`` validation so the failed batch is kept for inspection (``strict``
-restores the table), which is what lets parity see the rows. Expected: 12 rows
-with an unexplained numeric scale cut, a ``widen_column`` fix through the
-existing widen DDL helper (``NUMERIC(14,4)``: the source's scale without losing
-the destination's integer digits), then ``resync_keys`` through the upsert
-path, ending at zero unexplained differences.
+holds ``NUMERIC(12,4)``. Until edc9573b4 the PostgreSQL merge COPY let the
+server round every value on insert (1.1249 landed as 1.12) and parity then
+found and repaired the cut. Now the merge declines a narrower live column and
+the row path quarantines a value that would round. Half the source values fit
+12,2 exactly (1.1200), half do not (2.1249). Expected, end to end: the six that
+fit land exactly; the six that would round are held in quarantine and none is
+written rounded; the job is completed_with_quarantine, not migration-proven;
+Parity at Scale names the held keys as quarantined, never says proven, and the
+source rows balance as landed + held; the rows that landed are compared by the
+parity judge and 1.1200 against 1.12 is no difference.
 
 Skipped with a message when no PostgreSQL is reachable.
 """
@@ -72,16 +75,20 @@ def pg(monkeypatch, tmp_path):
         conn.close()
 
 
-def test_scale_cut_is_widened_and_resynced_on_postgres(pg):
-    from services.parity_fixes import approve_fix
+def test_scale_cut_holds_the_rows_that_would_round_and_parity_names_them(pg):
     from services.parity_report import build_parity_report
+    from services.signed_proof_pack import classify_post_write_assurance, harvest_reconciliation_for_proof
     from src.transfer.engine import UniversalTransferEngine
     from src.transfer.models import EndpointConfig, TransferRequest, transfer_request_to_dict
 
     conn, cfg, store, (src, dst) = pg
     with conn.cursor() as cur:
         cur.execute(f"CREATE TABLE {src} (id int PRIMARY KEY, amount numeric(12,4), note text)")
-        cur.execute(f"INSERT INTO {src} SELECT g, g + 0.1249, 'n' || g FROM generate_series(1, 12) g")
+        # Odd ids fit NUMERIC(12,2) exactly (g.1200); even ids would round (g.1249).
+        cur.execute(
+            f"INSERT INTO {src} SELECT g, CASE WHEN g % 2 = 1 THEN g + 0.12 ELSE g + 0.1249 END, "
+            "'n' || g FROM generate_series(1, 12) g"
+        )
         cur.execute(f"CREATE TABLE {dst} (id int PRIMARY KEY, amount numeric(12,2), note text)")
         cur.execute(f"INSERT INTO {dst} VALUES (1000, 1.5, 'kept')")
 
@@ -92,43 +99,53 @@ def test_scale_cut_is_widened_and_resynced_on_postgres(pg):
 
     req = TransferRequest(
         source=endpoint(src), destination=endpoint(dst),
-        # Approved mappings: the re-sync job keeps preflight (as the re-run route does).
         mappings=[{"source": c, "target": c, "user_override": True} for c in ("id", "amount", "note")],
         stream_contracts=[{"name": src, "primary_key": ["id"], "sync_mode": "upsert", "selected": True}],
         sync_mode="upsert", skip_preflight=True, validation_mode="lenient",
     )
     job_id = "pgparity" + uuid.uuid4().hex[:12]
     store.update_job_status(job_id, "pending", transfer_request=transfer_request_to_dict(req))
-    UniversalTransferEngine().execute_tracked(req, job_id)
+    result = UniversalTransferEngine().execute_tracked(req, job_id)
+    job = store.get_job(job_id)
 
-    report = build_parity_report(store.get_job(job_id), job_id=job_id)
-    assert report["verdict"] == "unexplained", report["verdict_reason"]
-    scale = next(d for d in report["differences"] if d["cause"]["code"] == "numeric_scale")
-    assert scale["column"] == "amount" and scale["rows"] == 12
-    assert scale["example"] == {"source": "1.1249", "destination": "1.12"}
-    # Gate-8's ladder also named keys 1-12 "extra" (it read no source rows for them); both sides
-    # hold them now, so that named cell cannot be re-checked (re-review 3, H2) until the fix resolves it.
+    fits = {i for i in range(1, 13) if i % 2 == 1}
+    rounds = {i for i in range(1, 13) if i % 2 == 0}
+    # Only the values that fit landed, exactly; nothing was written rounded.
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, amount FROM {dst} ORDER BY id")
+        landed = dict(cur.fetchall())
+        cur.execute(f"SELECT id, amount FROM {src}")
+        source = dict(cur.fetchall())
+    assert set(landed) == fits | {1000}, landed
+    assert all(landed[i] == source[i] for i in fits), landed
+    assert not rounds & set(landed)
+
+    # The job is not green for the held rows.
+    assert result.records_transferred == len(fits)
+    assert job["status"] == "completed_with_quarantine", job.get("status")
+    assert int(job.get("rejected_rows") or 0) == len(rounds)
+    assurance = classify_post_write_assurance(
+        harvest_reconciliation_for_proof(job, job.get("destination_summary") or {})
+    )
+    assert assurance.get("migration_proven") is False, assurance
+
+    report = build_parity_report(job, job_id=job_id)
+    # Never greener than explained: six source rows are not at the destination.
+    assert report["verdict"] in {"explained", "no_difference_found"}, report["verdict_reason"]
+    held = next(d for d in report["differences"] if d["cause"]["code"] == "quarantined")
+    assert held["kind"] == "missing_in_destination" and held["cause"]["explained"] is True
+    assert held["rows"] == len(rounds) and not held["rows_at_least"]
+    assert sorted(int(k) for k in held["keys_sample"]) == sorted(rounds)
     kept = next(d for d in report["differences"] if d["cause"]["code"] == "out_of_scope_population")
-    assert kept["cause"]["code"] == "out_of_scope_population" and kept["rows"] == 1
-    assert report["parity"]["unexplained"] == 12
-    widen = next(f for f in report["fixes"] if f["action"] == "widen_column")
-    assert widen["applicable"], widen["not_applicable_reason"]
-    assert widen["preview"].endswith('ALTER COLUMN "amount" TYPE NUMERIC(14,4)')
-
-    widened = approve_fix(job_id, widen["id"], actor="dba@example.com", note="match the source scale")
-    assert widened["rounds"][-1]["unexplained_before"] == 12
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT numeric_precision, numeric_scale FROM information_schema.columns "
-            "WHERE table_name = %s AND column_name = 'amount'", (dst,),
-        )
-        assert cur.fetchone() == (14, 4)
-
-    resync = next(f for f in widened["fixes"] if f["action"] == "resync_keys" and f["status"] == "proposed")
-    final = approve_fix(job_id, resync["id"], actor="dba@example.com")
-    assert final["parity"]["unexplained"] == 0
-    assert final["verdict"] == "explained"  # the row that was already there stays out of scope
-    assert [r["unexplained_after"] for r in final["rounds"]] == [12, 0]
-    with conn.cursor() as cur:
-        cur.execute(f"SELECT count(*) FROM {dst} d JOIN {src} s USING (id) WHERE d.amount = s.amount")
-        assert cur.fetchone()[0] == 12
+    assert kept["rows"] == 1
+    # Read = landed + held, and the destination = landed + the row it already held.
+    parity = report["parity"]
+    assert parity["rows_source"] == len(fits) + held["rows"] == 12
+    assert parity["rows_destination"] == len(fits) + kept["rows"]
+    assert parity["unexplained"] == 0
+    # The scale cut on the rows that DID land: the judge compared them, and 1.1200
+    # (NUMERIC(12,4)) against 1.12 (NUMERIC(12,2)) is the same value, not a difference.
+    (table,) = report["tables"]
+    assert table["rows_checked"] == len(fits) and table["unexplained"] == 0, table
+    assert not any(d["cause"]["code"] == "numeric_scale" for d in report["differences"])
+    assert not any(f["action"] in {"widen_column", "resync_keys"} for f in report["fixes"]), report["fixes"]

@@ -6,6 +6,8 @@ import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import { TENANT_SAVED_EVENT, WORKSPACE_CHANGED_EVENT, concreteWorkspaceId, getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
 import { Button } from "../../components/ui/Button";
 import { tenantSaveFeedback, type SaveFeedback } from "../../lib/postureCopy";
+import { snapshotModeOf, snapshotPayload, type SnapshotMode } from "../../lib/verificationSnapshot";
+import { VerificationSnapshotFields } from "./VerificationSnapshotFields";
 
 const REGIONS = [
   "us-east-1", "us-east-2", "us-west-1", "us-west-2",
@@ -21,6 +23,7 @@ const PROVIDER_LABELS: Record<ByokKey["provider"], string> = {
   azure_keyvault: "Azure Key Vault",
   gcp_kms: "Google Cloud KMS",
 };
+
 
 export function TenantSettings() {
   const { toast } = useToast();
@@ -47,6 +50,9 @@ export function TenantSettings() {
   const [saveFeedback, setSaveFeedback] = useState<SaveFeedback | null>(null);
   const [ipAllowlist, setIpAllowlist] = useState("");
   const [egressAllowlist, setEgressAllowlist] = useState("");
+  // Parity at Scale for this workspace: "default" follows the deployment's setting.
+  const [snapshotMode, setSnapshotMode] = useState<SnapshotMode>("default");
+  const [snapshotMinutes, setSnapshotMinutes] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
 
   const [newKeyLabel, setNewKeyLabel] = useState("");
@@ -103,6 +109,8 @@ export function TenantSettings() {
           setEnforceTimeout(Boolean(t.enforce_session_timeout));
           setIpAllowlist((t.ip_allowlist || []).join("\n"));
           setEgressAllowlist((t.egress_allowlist || []).join("\n"));
+          setSnapshotMode(snapshotModeOf(t));
+          setSnapshotMinutes(t.verification_snapshot_max_minutes ? String(t.verification_snapshot_max_minutes) : "");
           setWorkspaceId(t.workspace_id);
         } else {
           // The workspace this session is working in — the same one the read is
@@ -153,7 +161,7 @@ export function TenantSettings() {
       };
       let next: Tenant;
       if (tenant) {
-        next = await updateTenant(tenant.id, payload);
+        next = await updateTenant(tenant.id, { ...payload, ...snapshotPayload(snapshotMode, snapshotMinutes) });
       } else {
         next = await createTenant({ workspace_id: scope, ...payload });
       }
@@ -378,6 +386,11 @@ export function TenantSettings() {
               link-local cannot be listed. This does not change deployment config.
             </p>
           </div>
+
+          {tenant && (
+            <VerificationSnapshotFields mode={snapshotMode} minutes={snapshotMinutes} onMode={setSnapshotMode}
+              onMinutes={setSnapshotMinutes} />
+          )}
         </div>
 
         {saveFeedback && (

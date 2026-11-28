@@ -358,6 +358,47 @@ describe("Jobs grid page", () => {
   });
 });
 
+describe("Jobs: command menu actions and retry (review UI2 #3)", () => {
+  it("offers 'Selected job' actions only after an explicit pick with the detail open", async () => {
+    const { getSelectionActions } = await import("../lib/commandRegistry.js");
+    await render();
+    assert.equal(getSelectionActions(), null, "the row selected on arrival is not a pick");
+    row("grid-alpha").focus();
+    await key(row("grid-alpha"), "ArrowDown");
+    await key(row("grid-beta"), "Enter");
+    await settle();
+    assert.match(getSelectionActions()?.title || "", /Synthetic beta/);
+    await act(async () => {
+      document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await settle();
+    assert.equal(getSelectionActions(), null, "closing the detail withdraws them");
+  });
+
+  it("asks before retrying from the start, and starts nothing when kept", async () => {
+    const posts: string[] = [];
+    const before = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method || "GET") === "POST") posts.push(String(input));
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    try {
+      await render();
+      row("grid-beta").focus();
+      await settle();
+      await click(button("Re-run", host));
+      await settle();
+      const dialog = document.querySelector<HTMLElement>('[role="alertdialog"], [role="dialog"]');
+      assert.match(dialog?.textContent || "", /Retry this job from the start\?/);
+      await click(button("Keep as is"));
+      await settle();
+      assert.deepEqual(posts.filter((u) => /retry/.test(u)), [], "no retry request without a confirm");
+    } finally {
+      globalThis.fetch = before;
+    }
+  });
+});
+
 describe("Jobs KPI tiles", () => {
   it("shows a rate only when finished runs exist, and never estimates", () => {
     assert.deepEqual(successRateMetric({ completed: 312, failed: 7 }).value, "97.8%");

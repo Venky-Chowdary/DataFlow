@@ -64,7 +64,10 @@ _NO_OP_TRANSFORMS: Final[frozenset[str]] = frozenset(
      "integer", "boolean", "date", "datetime", "time", "uuid"}
 )
 _BINARY_TEXT_COLLATIONS: Final[frozenset[str]] = frozenset(
-    {"c", "posix", "ucs_basic", "binary", "pg_c_utf8"}
+    # Code-point (UTF-8 byte) order with no padding: PostgreSQL C / POSIX / ucs_basic /
+    # pg_c_utf8; MySQL binary and utf8mb4_0900_bin; MariaDB utf8mb4_nopad_bin. (MySQL's
+    # utf8mb4_bin pads trailing spaces, so it is not one of them.)
+    {"c", "posix", "ucs_basic", "binary", "pg_c_utf8", "utf8mb4_0900_bin", "utf8mb4_nopad_bin"}
 )
 
 
@@ -106,6 +109,9 @@ class ColumnPlan:
     reason: str = ""
     decimal_fit: dict[str, Any] | None = None
     empty_is_null: bool = False
+    #: Code-crosswalked columns: the mapping keys the writer's pipeline reads, so the
+    #: judge replays exactly that pipeline (services.write_replay). None otherwise.
+    write_mapping: dict[str, Any] | None = field(default=None, hash=False, compare=False)
 
     def field_spec(self, dest_engine: str) -> FieldSpec:
         fit = DecimalFit(**self.decimal_fit) if self.decimal_fit else None
@@ -135,6 +141,10 @@ class TablePlan:
     ce_version: str = CE_VERSION
     plan_hash: str = ""
     notes: tuple[str, ...] = field(default_factory=tuple)
+    #: The run's number and date locales: the judge and the streamed pass read a source cell
+    #: under them, as the writer did (a DMY ``to_date``, an EU number).
+    run_number_locale: str = ""
+    run_date_locale: str = ""
 
     @property
     def keyless(self) -> bool:
@@ -164,8 +174,13 @@ class TablePlan:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data["columns"] = [asdict(c) for c in self.columns]
+        # write_mapping is left out when absent, so plans without one hash as before.
+        data["columns"] = [{k: v for k, v in asdict(c).items() if k != "write_mapping" or v is not None}
+                           for c in self.columns]
         data["key"] = [list(k) for k in self.key]
+        for name in ("run_number_locale", "run_date_locale"):
+            if not data.get(name):
+                data.pop(name, None)  # plans without one hash as before
         return data
 
     @classmethod
@@ -182,6 +197,8 @@ class TablePlan:
             ce_version=data.get("ce_version") or CE_VERSION,
             plan_hash=data.get("plan_hash") or "",
             notes=tuple(data.get("notes") or ()),
+            run_number_locale=str(data.get("run_number_locale") or ""),
+            run_date_locale=str(data.get("run_date_locale") or ""),
         )
 
 
@@ -406,10 +423,13 @@ def classify_column(
                 transform=transform)
     if is_intentional_omit(mapping):
         return ColumnPlan(cls="excluded", reason="declared omission", **base)
+    if declared_crosswalk(mapping):
+        # Transform and crosswalk together: the writer's own pipeline is replayed (both, in its order).
+        from services.write_replay import write_mapping
+
+        return ColumnPlan(cls="stream", reason="code crosswalk", write_mapping=write_mapping(mapping), **base)
     if transform not in _NO_OP_TRANSFORMS:
         return ColumnPlan(cls="stream", reason=f"transform {transform!r} is replayed by the judge", **base)
-    if declared_crosswalk(mapping):
-        return ColumnPlan(cls="stream", reason="code crosswalk", **base)
     if mapping.get("rule_contracts"):
         return ColumnPlan(cls="stream", reason="rule contract (held-out rows are phase 3)", **base)
     if not source_type or not dest_type:
@@ -475,6 +495,7 @@ def _order_portable(
     source_engine: str,
     dest_engine: str,
     key_collations: dict[str, str] | None,
+    dest_key_collations: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     if not key_cols:
         return False, "keyless table"
@@ -494,7 +515,10 @@ def _order_portable(
         if kind in {"text", "char"}:
             collations = key_collations or {}
             src_coll = str(collations.get(col.source) or "").strip('"').lower()
-            dst_coll = str(collations.get(col.target) or collations.get(col.source) or "").strip('"').lower()
+            if dest_key_collations is not None:
+                dst_coll = str(dest_key_collations.get(col.target) or "").strip('"').lower()
+            else:
+                dst_coll = str(collations.get(col.target) or collations.get(col.source) or "").strip('"').lower()
             if normalize_engine(source_engine) == "sqlite" and same:
                 if src_coll in {"", "binary"} and dst_coll in {"", "binary"}:
                     continue
@@ -519,8 +543,14 @@ def build_plan(
     allow_native: bool = True,
     key_collations: dict[str, str] | None = None,
     number_locale: str | None = None,
+    dest_key_collations: dict[str, str] | None = None,
+    run_number_locale: str = "",
+    run_date_locale: str = "",
 ) -> TablePlan:
-    """Plan a table. ``key_columns`` are *source* column names (empty: keyless)."""
+    """Plan a table. ``key_columns`` are *source* column names (empty: keyless).
+
+    ``run_number_locale`` / ``run_date_locale``: the run's locales, under which the judge
+    replays a source cell's transform or crosswalk (as the writer did)."""
     src_eng = normalize_engine(source_engine)
     dst_eng = normalize_engine(dest_engine)
     if not mappings:
@@ -568,7 +598,7 @@ def build_plan(
         # A native rendering has no Python reference, so the driver could not
         # name such a key outside the engine.
         key_encodable = False
-    portable, why = _order_portable(key_cols, src_eng, dst_eng, key_collations)
+    portable, why = _order_portable(key_cols, src_eng, dst_eng, key_collations, dest_key_collations)
     notes: list[str] = []
     if not key_encodable and key_cols:
         notes.append("key not encodable in-engine: the table is compared by streamed fingerprint")
@@ -583,6 +613,8 @@ def build_plan(
         order_reason=why,
         key_encodable=key_encodable,
         notes=tuple(notes),
+        run_number_locale=str(run_number_locale or ""),
+        run_date_locale=str(run_date_locale or ""),
     )
     return TablePlan(**{**plan.__dict__, "plan_hash": compute_plan_hash(plan)})
 

@@ -2179,7 +2179,6 @@
   margin: var(--df2-qw-gap) 12px;
   padding: 12px;
   border: 1px solid var(--df-danger-border);
-  border-left: 4px solid var(--df-danger);
   border-radius: var(--df-radius-md);
   background: var(--df-danger-bg);
   color: var(--df-text-primary);
@@ -2249,12 +2248,10 @@
 }
 
 .df2-app .df2-qw-shell .df2-qw-running-spinner svg {
-  animation: df2-qw-spin 900ms linear infinite;
+  animation: df-spin 900ms linear infinite;
 }
 
-@keyframes df2-qw-spin {
-  to { transform: rotate(360deg); }
-}
+
 
 @media (prefers-reduced-motion: reduce) {
   .df2-app .df2-qw-shell .df2-qw-running-spinner svg { animation: none; }

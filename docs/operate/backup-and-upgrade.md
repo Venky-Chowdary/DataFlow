@@ -380,6 +380,78 @@ Changed shapes:
   label that the client does dial (a dot-less host plus a port) is still
   checked.
 
+#### Oracle sessions pinned to UTC (accuracy review finding 8)
+
+- **What changed.** Every Oracle connection now runs
+  `ALTER SESSION SET TIME_ZONE = '+00:00'` and reads `SESSIONTIMEZONE` back.
+  Instants written into `TIMESTAMP WITH TIME ZONE` and
+  `TIMESTAMP WITH LOCAL TIME ZONE` columns are sent as UTC digits. Validate
+  treats an offset or instant column going into one of these as keeping its
+  instant only when the destination session reads back UTC. If it does not,
+  the column needs a Risk Contract, and Validate says why.
+- **Rows written by the previous release may be shifted.** python-oracledb
+  sends a value's clock digits without its offset, and Oracle reads them in
+  the session time zone. Before this release, rows loaded from offset or
+  instant sources (SQL Server `datetimeoffset`, Oracle `TIMESTAMP WITH TIME
+  ZONE`, PostgreSQL `timestamptz`, offset text in files) into those Oracle
+  columns can hold a shifted instant. That happens when the Datawrap
+  process did not run in UTC (`TZ` set on the host, `ORA_SDTZ`, thick-mode
+  client settings), and for `WITH TIME ZONE` columns that received the
+  source's own offset digits. The default container runs in UTC and stores
+  the correct instant for `WITH LOCAL TIME ZONE`.
+- **Finding them.** Validate of a route into such a table shows a one-line
+  advisory when the job history has completed runs into the same connector,
+  schema and table that are from before this release, or whose session did
+  not read back UTC. It looks back 400 days by default
+  (`DATAWRAP_ORACLE_UPGRADE_LOOKBACK_DAYS`).
+  To check the data, compare `SYS_EXTRACT_UTC(column)` on the destination
+  with the source's UTC instant for a few keys, for example with
+  `SELECT id, TO_CHAR(SYS_EXTRACT_UTC(col), 'YYYY-MM-DD"T"HH24:MI:SS.FF6')`.
+- **Fixing them.** A full re-run with overwrite rewrites every row with the
+  correct instant. Append and upsert re-runs only rewrite the rows they touch.
+- **Non-UTC session defaults.** If an Oracle session used to open in another
+  zone, `CURRENT_DATE`, `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`, implicit
+  comparisons with timestamp literals, LogMiner renderings of `WITH LOCAL TIME
+  ZONE` columns, destination `DEFAULT CURRENT_*` values and mirror
+  `_deleted_at` stamps now evaluate in UTC. A route with a custom source
+  query, a source filter, CDC or mirror stops once with a notice until someone
+  acknowledges it (`session_zone_acknowledged` together with its own
+  `session_zone_ack_actor` and `session_zone_ack_reason`; the actor and reason
+  given for another acknowledgement do not count). The acknowledgement is
+  kept per route: workspace, both connectors, host, port, SID or service
+  name, connection string, schema and table.
+
+#### Keyed risk approvals (Oracle '' gate round)
+
+**Every risk approval made before this release must be re-approved in
+Validate before its schedules resume.** Risk contracts are now signed with
+the deployment's key. A contract approved before this release carries an
+older signature that anyone could compute, and nothing recorded at the time
+can tell one the server signed from one an API caller wrote. So none of them
+counts any more. A run that relies on one stops with "re-approve this risk
+once"; a lossy column is refused, and an Oracle column approved as NULL-able
+is blocked again.
+
+How to see the list (rebuilt at every start of the API from stored
+schedules, plans and jobs):
+
+- the start log: `[!] N risk approval(s) made before this release must be
+  re-approved …`, naming the first few schedules, plans or jobs and their
+  routes;
+- `GET /api/v1/ops/risk-contract-upgrade-report`, for workspace admins:
+  every entry, with its kind, id, name, route, risk id and the original
+  approver;
+- a `risk_contract_reapprove` warning in Validate for that route.
+
+What to do: pause schedules, then for each listed route run Validate and
+approve the risk again (or send `risk_acceptance` again over MCP or the
+API), then resume. The new approval is keyed and needs nothing further.
+
+**Upgrade every replica before resuming schedules.** An older replica that
+is still running signs contracts the old way, and they are refused too.
+Drain or stop the old API and worker processes, or keep schedules paused,
+until every process runs this build.
+
 ## Not covered
 
 - Tested restore times or recovery objectives. No restore has been rehearsed

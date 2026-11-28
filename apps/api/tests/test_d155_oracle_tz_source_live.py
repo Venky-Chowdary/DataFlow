@@ -230,7 +230,9 @@ def saved_oracle():
 
     cid = _connector({
         "type": "oracle", "host": ORA["host"], "port": ORA["port"], "database": ORA["database"],
-        "username": ORA["username"], "password": ORA["password"], "schema": "SYSTEM",
+        "username": ORA["username"], "password": ORA["password"],
+        # The table is created by ORA's login, in its own schema.
+        "schema": (os.getenv("DATAFLOW_ORACLE_SCHEMA") or ORA["username"]).upper(),
     })
     yield cid
     delete_connector(cid)

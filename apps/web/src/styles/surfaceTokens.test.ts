@@ -2257,14 +2257,9 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     const studio = sheet("transfer-studio.css");
     const premium = sheet("premium-theme.css");
 
-    assert.match(studio, /th\.df2-type-int \.df2-type-badge \{[\s\S]{0,80}--df-info-bg/);
-    assert.doesNotMatch(studio, /th\.df2-type-int \.df2-type-badge \{[\s\S]{0,80}background: #eff6ff/);
-    assert.match(studio, /th\.df2-type-decimal \.df2-type-badge \{[\s\S]{0,80}--df-surface-muted/);
-    assert.doesNotMatch(studio, /th\.df2-type-decimal \.df2-type-badge \{[\s\S]{0,80}background: #f8fafc/);
-    assert.match(studio, /th\.df2-type-binary \.df2-type-badge \{[\s\S]{0,80}--df-surface-muted/);
-    assert.doesNotMatch(studio, /th\.df2-type-binary \.df2-type-badge \{[\s\S]{0,80}background: #f1f5f9/);
-    assert.match(studio, /th\.df2-type-string \.df2-type-badge \{[\s\S]{0,80}--df-brand-muted/);
-    assert.doesNotMatch(studio, /th\.df2-type-string \.df2-type-badge \{[\s\S]{0,80}background: #f0fdfa/);
+    // P1-10: a data type is a fact, not a status — one neutral chip in the studio, no family tints.
+    assert.doesNotMatch(studio, /th\.df2-type-\w+ \.df2-type-badge \{/);
+    assert.match(studio, /\[class\*="df2-type-"\] \.df2-type-badge\.df2-type-badge,[\s\S]{0,80}--df-surface-muted/);
 
     assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
 
@@ -2280,12 +2275,9 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     const studio = sheet("transfer-studio.css");
     const premium = sheet("premium-theme.css");
 
-    assert.match(studio, /th\.df2-type-temporal \.df2-type-badge \{[\s\S]{0,80}--df-warning/);
-    assert.doesNotMatch(studio, /th\.df2-type-temporal \.df2-type-badge \{[\s\S]{0,80}color: #9a3412/);
-    assert.match(studio, /th\.df2-type-spatial \.df2-type-badge \{[\s\S]{0,80}--df-success-bg/);
-    assert.doesNotMatch(studio, /th\.df2-type-spatial \.df2-type-badge \{[\s\S]{0,80}background: #f0fdf4/);
-    assert.match(studio, /th\.df2-type-uuid \.df2-type-badge \{[\s\S]{0,80}--df-surface-muted/);
-    assert.doesNotMatch(studio, /th\.df2-type-uuid \.df2-type-badge \{[\s\S]{0,80}background: #ecfdf5/);
+    // P1-10: a data type is a fact, not a status — one neutral chip in the studio, no family tints.
+    assert.doesNotMatch(studio, /th\.df2-type-\w+ \.df2-type-badge \{/);
+    assert.match(studio, /\[class\*="df2-type-"\] \.df2-type-badge\.df2-type-badge,[\s\S]{0,80}--df-surface-muted/);
 
     assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
 
@@ -2303,12 +2295,9 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     const studio = sheet("transfer-studio.css");
     const premium = sheet("premium-theme.css");
 
-    assert.match(studio, /th\.df2-type-float \.df2-type-badge \{[\s\S]{0,80}--df-info-bg/);
-    assert.doesNotMatch(studio, /th\.df2-type-float \.df2-type-badge \{[\s\S]{0,80}background: #ecfeff/);
-    assert.match(studio, /th\.df2-type-bool \.df2-type-badge \{[\s\S]{0,80}--df-warning-bg/);
-    assert.doesNotMatch(studio, /th\.df2-type-bool \.df2-type-badge \{[\s\S]{0,80}background: #fdf2f8/);
-    assert.match(studio, /th\.df2-type-json \.df2-type-badge \{[\s\S]{0,80}--df-text-primary/);
-    assert.doesNotMatch(studio, /th\.df2-type-json \.df2-type-badge \{[\s\S]{0,80}color: #5b21b6/);
+    // P1-10: a data type is a fact, not a status — one neutral chip in the studio, no family tints.
+    assert.doesNotMatch(studio, /th\.df2-type-\w+ \.df2-type-badge \{/);
+    assert.match(studio, /\[class\*="df2-type-"\] \.df2-type-badge\.df2-type-badge,[\s\S]{0,80}--df-surface-muted/);
 
     assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
 
@@ -2385,8 +2374,9 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(studio, /\.df2-map-step-head-compact \.is-ok \{[\s\S]{0,40}--df-success/);
     assert.doesNotMatch(studio, /\.df2-map-step-head-compact \.is-ok \{[\s\S]{0,40}color: #0f766e/);
     assert.match(studio, /\.df2-map-step-head-compact \.is-warn \{[\s\S]{0,40}--df-warning/);
-    assert.match(studio, /\.df2-vd-metric\.tone-approve \.df2-vd-metric-val \{[\s\S]{0,40}--df-success/);
-    assert.doesNotMatch(studio, /\.df2-vd-metric\.tone-approve \.df2-vd-metric-val \{[\s\S]{0,40}color: #0f766e/);
+    // Scores are neutral ink; review uses the AA warning text token (P1-10).
+    assert.doesNotMatch(studio, /\.df2-vd-metric\.tone-approve \.df2-vd-metric-val \{/);
+    assert.match(studio, /\.df2-vd-metric\.tone-review \.df2-vd-metric-val \{[\s\S]{0,40}--df-warning-text/);
     assert.match(studio, /\.df2-theater-v3-chunk \.dt-nav-icon \{[\s\S]{0,40}--df-brand-strong/);
     assert.doesNotMatch(studio, /\.df2-theater-v3-chunk \.dt-nav-icon \{[\s\S]{0,40}color: #0f766e/);
     assert.match(studio, /\.df2-theater-v2-log \{[\s\S]{0,200}--df-navy-900/);

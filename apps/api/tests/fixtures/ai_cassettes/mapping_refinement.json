@@ -1,0 +1,76 @@
+{
+  "cases": {
+    "agree": {
+      "prompt_sha256": [
+        "a77f13db15e27fbff77710a90dcdd70f6f075a15124cfb36e8b4ab6e91adb65c"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "{\"mappings\": [{\"source\": \"cust_id\", \"target\": \"customer_id\", \"confidence\": 0.95, \"reasoning\": \"id\"}, {\"source\": \"mail\", \"target\": \"email\", \"confidence\": 0.97, \"reasoning\": \"email\"}, {\"source\": \"balance\", \"target\": \"balance\", \"confidence\": 0.97, \"reasoning\": \"same name\"}]}",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "invalid_json": {
+      "prompt_sha256": [
+        "a77f13db15e27fbff77710a90dcdd70f6f075a15124cfb36e8b4ab6e91adb65c"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "Sure! I think given maps to first_name and family to last_name.",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "invented_transform": {
+      "prompt_sha256": [
+        "a77f13db15e27fbff77710a90dcdd70f6f075a15124cfb36e8b4ab6e91adb65c"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "{\"mappings\": [{\"source\": \"mail\", \"target\": \"email\", \"transform\": \"lower\", \"confidence\": 0.95, \"reasoning\": \"normalise case\"}]}",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "wrong_target": {
+      "prompt_sha256": [
+        "a77f13db15e27fbff77710a90dcdd70f6f075a15124cfb36e8b4ab6e91adb65c"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "{\"mappings\": [{\"source\": \"given\", \"target\": \"last_name\", \"confidence\": 0.9, \"reasoning\": \"name column\"}, {\"source\": \"mail\", \"target\": \"email\", \"confidence\": 0.97, \"reasoning\": \"email\"}]}",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    }
+  },
+  "provenance": {
+    "at": "2026-11-21",
+    "how": "seeded",
+    "model": "hand-written reference and adversarial answers",
+    "note": "Replace with a live recording: run_ai_benchmarks.py --mode live --record DIR",
+    "provider": "anthropic"
+  },
+  "suite": "mapping_refinement"
+}

@@ -459,15 +459,21 @@ def _build_db_endpoint(
                 ),
             },
         ),
+        # The oracle-live CI job (Oracle Database Free, FREEPDB1) exports
+        # DATAFLOW_ORACLE_*; without them, the compose desktop lab's XE.
         "oracle": EndpointConfig(
             kind="database",
             format="oracle",
-            host="127.0.0.1",
-            port=1521,
-            database="XEPDB1",
-            username="dataflow",
+            host=os.environ.get("DATAFLOW_ORACLE_HOST") or "127.0.0.1",
+            port=int(os.environ.get("DATAFLOW_ORACLE_PORT") or 1521),
+            database=os.environ.get("DATAFLOW_ORACLE_SERVICE") or "XEPDB1",
+            username=os.environ.get("DATAFLOW_ORACLE_USER") or "dataflow",
             password=_oracle_sku_password(),
-            schema="DATAFLOW",
+            schema=(
+                os.environ.get("DATAFLOW_ORACLE_SCHEMA")
+                or os.environ.get("DATAFLOW_ORACLE_USER")
+                or "DATAFLOW"
+            ).upper(),
             table="payments_oracle",
         ),
         "kafka": EndpointConfig(
@@ -800,6 +806,28 @@ def test_salesforce_snowflake_fixture_preserves_declared_number_precision(
 
 ROUTES = sorted(LIVE_MATRIX)
 
+#: Source fields the matrix does not move. A run without Validate refuses a
+#: source column that is neither mapped nor declared omitted (G13), so they are
+#: declared here (the Stripe stub's customers carry ``object`` and ``email``).
+_UNMOVED_SOURCE_FIELDS = {
+    "stripe": ("object", "email"),
+    # The pgvector seed table carries a RAG chunk shape next to id/amount.
+    "pgvector": ("content", "embedding", "metadata", "source_id", "chunk_index", "created_at"),
+    # Reader envelopes the matrix does not move (services/desktop_lab_cross.py
+    # declares the same omissions): Mongo's ObjectId, the Redis key/type, and
+    # the Kafka message provenance.
+    "mongodb": ("_id",),
+    "redis": ("redis_key", "redis_type"),
+    "kafka": ("_kafka_topic", "_kafka_partition", "_kafka_offset", "_kafka_key"),
+}
+
+
+def _declared_omissions(src_fmt: str) -> list[dict[str, Any]]:
+    return [
+        {"source": c, "target": "", "intentional_omit": True}
+        for c in _UNMOVED_SOURCE_FIELDS.get(src_fmt, ())
+    ]
+
 
 @pytest.mark.parametrize(
     "route",
@@ -846,7 +874,7 @@ def test_live_transfer_route(
         sync_mode="full_refresh_overwrite",
         skip_preflight=True,
         validation_mode=validation_mode,
-        mappings=MAPPINGS,
+        mappings=[*MAPPINGS, *_declared_omissions(src_fmt)],
     )
 
     # Rely on snowflake_conn auto-patch for local accounts — nesting an outer

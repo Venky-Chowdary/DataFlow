@@ -630,8 +630,8 @@ def coerce_sql_temporal(
             raise ValueError(
                 "value is outside the MySQL TIMESTAMP epoch range "
                 f"({MYSQL_TIMESTAMP_MIN.date()} .. {MYSQL_TIMESTAMP_MAX.date()}) "
-                "— quarantined; map to DATETIME(6) with a UTC-normalize contract "
-                "to carry instants beyond 2038"
+                "— quarantined; map to DATETIME(6) to carry instants beyond 2038 "
+                "(stored as UTC digits in a zone-less column, disclosed at Validate)"
             )
         # Session time_zone is pinned to UTC, so a naive UTC bind stores the
         # same instant the aware wire carried.

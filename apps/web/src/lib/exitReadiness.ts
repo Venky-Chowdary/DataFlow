@@ -10,6 +10,7 @@
  * - an anchor that is not write-once says so, and a failed anchor is never green.
  */
 
+import type { IconName } from "../components/icons/iconMap";
 import { humanize, type ParityApproval, type ParitySignoff, type ParityTone } from "./parity";
 
 /* ── Contract types ─────────────────────────────────────────── */
@@ -498,14 +499,14 @@ export function stageLabel(stage: string): string {
   return STAGES[stage as RehearsalStage] ?? humanize(stage);
 }
 
-const STAGE_STATUS: Record<StageStatus, { label: string; tone: ExitTone; icon: string }> = {
+const STAGE_STATUS: Record<StageStatus, { label: string; tone: ExitTone; icon: IconName }> = {
   done: { label: "Done", tone: "ok", icon: "check" },
   running: { label: "Running", tone: "run", icon: "activity" },
   pending: { label: "Pending", tone: "muted", icon: "clock" },
   failed: { label: "Failed", tone: "danger", icon: "x" },
 };
 
-export function stageStatusPresentation(status: string): { label: string; tone: ExitTone; icon: string } {
+export function stageStatusPresentation(status: string): { label: string; tone: ExitTone; icon: IconName } {
   return STAGE_STATUS[status as StageStatus] ?? { label: humanize(status), tone: "muted", icon: "clock" };
 }
 
@@ -1029,7 +1030,7 @@ export function exitErrorMessage(err: unknown, fallback: string): string {
   const reason = /[.!?]$/.test(raw || fallback) ? raw || fallback : `${raw || fallback}.`;
   if (status === 404) return "Not found in this workspace. It may have been deleted, or it belongs to another workspace.";
   if (status === 409) return `${reason} The page has been refreshed so you can see the current state.`;
-  if (status === 422) return `The request was refused: ${reason}`;
+  // 422: the API's own sentence says what to change; no framing around it.
   if (status >= 500) return `${fallback} The server reported an error (HTTP ${status}). Try again in a moment.`;
   if (/timed out|failed to fetch|network/i.test(reason)) {
     return `${fallback} The request did not reach the server. Check your connection and try again.`;

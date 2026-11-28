@@ -52,6 +52,7 @@ END = "<!-- END GENERATED: connector-matrix -->"
 # (``connector_capabilities.certification_tier``). "Certified" needs CI proof.
 TIER_TEXT = {
     "certified": "Certified",
+    # An emulator-only proof is worded by _tier, never as "Certified".
     "implemented": "Implemented, not yet proven",
     "source_only": "Source only",
     "connect_only": "Connection test only",
@@ -131,8 +132,12 @@ def _tier(driver: str, caps: dict[str, Any]) -> str:
     """The tier the driver's own catalog tile gets, with the product's notes."""
     from src.transfer.connector_capabilities import effective_status, enrich_catalog_entry
 
-    tier = str(enrich_catalog_entry({"id": driver}).get("certification_tier") or "planned")
+    tile = enrich_catalog_entry({"id": driver})
+    tier = str(tile.get("certification_tier") or "planned")
     text = TIER_TEXT.get(tier, tier)
+    if tile.get("proof_scope") == "emulator":
+        # No real cloud account has run it: never "Certified" (P0-4).
+        text = "Proven on an emulator only, not on a real account"
     notes = []
     if effective_status(caps) == "beta":
         notes.append("beta, tested against fixtures")

@@ -9,7 +9,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
+import { Callout } from "../components/ui/Callout";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { SectionLoader } from "../components/LoadingState";
@@ -22,6 +24,8 @@ import { RehearsalPanel } from "../components/exit/RehearsalPanel";
 import { RunRehearsalDialog } from "../components/exit/RunRehearsalDialog";
 import { SystemDrawer } from "../components/exit/SystemDrawer";
 import { SystemFormDrawer } from "../components/exit/SystemFormDrawer";
+import { startErrorCopy } from "../components/exit/rehearsalSummary";
+import "../styles/exit-rehearsal.css";
 import {
   declareExitSystem,
   deleteExitSystem,
@@ -146,7 +150,11 @@ export function ExitReadinessPage({
     } catch (err) {
       const message = exitErrorMessage(err, "Could not start the rehearsal.");
       if (runDialog.open) setRunDialog((d) => ({ ...d, error: message }));
-      else toast({ title: "Could not start the rehearsal", message, tone: "error" });
+      else {
+        // The toast says it in the user's terms; the dialog keeps the administrator detail.
+        const copy = startErrorCopy(message);
+        toast({ title: "Could not start the rehearsal", message: copy.adminDetail ? copy.title : message, tone: "error" });
+      }
       void load();
       setDrawerKey((n) => n + 1);
     } finally {
@@ -201,21 +209,18 @@ export function ExitReadinessPage({
         onChanged={() => {
           if (activeRef.current) void load();
         }}
+        onRerun={(id) => {
+          // The dialog states what will run (and shows a refusal); without the board row, start directly.
+          if (readiness?.systems.some((s) => s.id === id)) setRunDialog({ open: true, systemId: id });
+          else void start(id);
+        }}
+        rerunning={startingId != null}
       />
     );
   } else if (!readiness && (loading || !loadError)) {
     body = <SectionLoader title="Loading exit readiness…" />;
   } else if (!readiness) {
-    body = (
-      <div className="df2-alert df2-alert-error" role="alert">
-        <DtIcon name="alert" size={18} />
-        <div>
-          <strong>Could not load exit readiness</strong>
-          <p>{loadError}</p>
-        </div>
-        <Button size="sm" onClick={() => void load()}>Retry</Button>
-      </div>
-    );
+    body = <ErrorState title="Could not load exit readiness" message={loadError} onRetry={() => void load()} retrying={loading} />;
   } else if (readiness.systems.length === 0) {
     body = (
       <EmptyState
@@ -273,10 +278,14 @@ export function ExitReadinessPage({
           />
         )}
         {loadError && readiness && !rehearsalId && (
-          <p className="df2-parity-notice is-danger" role="alert">
-            <DtIcon name="alert" size={14} />
-            <span>{loadError}</span>
-          </p>
+          <Callout
+            tone="danger"
+            role="alert"
+            title="Could not refresh exit readiness. The board shows the last figures loaded."
+            action={<Button size="sm" onClick={() => void load()}>Retry</Button>}
+          >
+            <p>{loadError}</p>
+          </Callout>
         )}
         {body}
       </PageFrame>

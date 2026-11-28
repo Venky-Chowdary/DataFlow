@@ -61,6 +61,7 @@ from services.transform_engine import (
     set_strict_number_reading,
 )
 from services.type_system import instant_date_carrier, normalize_logical_type
+from services import cell_fastpath as _cell_fastpath
 from services.expected_rows import expected_destination_rows, held_out_rows
 from services.fingerprint_rules import (
     BOOL_STORED_TEXT as _BOOL_STORED_TEXT,
@@ -130,75 +131,13 @@ STORED_MISMATCH_VALUE_CHARS = 120
 
 _INTERVAL_DDL_RE = re.compile(r"interval", re.I)
 
-_PG_INTERVAL_PART_RE = re.compile(
-    r"([+-]?\d+(?:\.\d+)?)\s*(years?|mons?|months?|weeks?|days?|hours?|mins?|minutes?|secs?|seconds?)",
-    re.I,
+# Interval canonical text lives in its own module (size budget); re-exported.
+from services.interval_canonical import (  # noqa: E402,F401 — re-export
+    _PG_INTERVAL_HMS_RE,
+    _PG_INTERVAL_PART_RE,
+    _canonical_interval_text,
+    _interval_canonical_text,
 )
-_PG_INTERVAL_HMS_RE = re.compile(
-    r"([+-])?(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)"
-)
-
-
-def _interval_canonical_text(months: int, seconds: float) -> str:
-    """Canonical interval fingerprint: months distinct, days folded into seconds.
-
-    Matches PG comparison semantics: '1 day 02:00:00' == '26:00:00' (days are
-    24h) but '1 mon' != '30 days' (months are their own field).
-    """
-    if abs(seconds - round(seconds, 6)) < 1e-9:
-        seconds = round(seconds, 6)
-    return f"{months}M+{seconds}S"
-
-
-def _canonical_interval_text(value: str) -> str | None:
-    """Parse a PG-style interval literal to (months, seconds) canonical text.
-
-    Accepts verbose spans ('1 year 2 mons 3 days 04:05:06', '1 day 02:00:00'),
-    bare 'HH:MM:SS[.ffffff]', and python timedelta text ('1 day, 2:00:00').
-    Returns None when the value is not interval-shaped.
-    """
-    text = value.strip()
-    if not text:
-        return None
-    months = 0.0
-    seconds = 0.0
-    matched_any = False
-    for m in _PG_INTERVAL_PART_RE.finditer(text):
-        n = float(m.group(1))
-        unit = m.group(2).lower()
-        if unit.startswith("year"):
-            months += n * 12
-        elif unit.startswith("mon") or unit.startswith("month"):
-            months += n
-        elif unit.startswith("week"):
-            seconds += n * 7 * 86400
-        elif unit.startswith("day"):
-            seconds += n * 86400
-        elif unit.startswith("hour"):
-            seconds += n * 3600
-        elif unit.startswith("min"):
-            seconds += n * 60
-        elif unit.startswith("sec"):
-            seconds += n
-        matched_any = True
-    rest = _PG_INTERVAL_PART_RE.sub("", text).replace(",", " ").strip()
-    hms = _PG_INTERVAL_HMS_RE.search(rest)
-    if hms:
-        sign = -1.0 if hms.group(1) == "-" else 1.0
-        seconds += sign * (
-            int(hms.group(2)) * 3600
-            + int(hms.group(3)) * 60
-            + float(hms.group(4))
-        )
-        matched_any = True
-        rest = _PG_INTERVAL_HMS_RE.sub("", rest).strip()
-    if not matched_any:
-        return None
-    # Leftover 'ago' / stray words => not the forms we understand; stay raw.
-    leftover = re.sub(r"[\s.:-]+", "", rest)
-    if leftover and leftover not in {"ago"}:
-        return None
-    return _interval_canonical_text(int(months), seconds)
 # SQL / CSV scale padding: one dot, digits only. Not ``1,000`` and not ``1.000.000``.
 _PLAIN_SQL_DECIMAL_RE = re.compile(r"^[+-]?(?:\d+\.\d+|\d+\.|\.\d+)$")
 # Numeric-family DDL where two spellings of one value ('1.50E-8' vs
@@ -3856,6 +3795,11 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             return f"{dt}T00:00:00"
     return _text_cell(text)
 
+
+_fingerprint_for_reconcile_full, _normalize_cell_full = fingerprint_for_reconcile, normalize_cell
+fingerprint_for_reconcile, normalize_cell = _cell_fastpath.install(
+    fingerprint_for_reconcile, normalize_cell
+)
 
 def _checksum_datetime_utc_wall(
     iso_text: str, *, original: str | None = None, mark_aware: bool = False

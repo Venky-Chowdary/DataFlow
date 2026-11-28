@@ -1,6 +1,25 @@
 import { useEffect, useMemo, useState } from "react";
 import { Dialog } from "../ui/Dialog";
 import type { AutoMapSuggestion } from "../../lib/mappingStudioApi";
+import { plural } from "../../lib/plural";
+
+/** Type verdicts that change values on write: never pre-selected. */
+const NEEDS_CHOICE = new Set(["lossy", "incompatible", "unknown"]);
+
+const COMPAT_LABEL: Record<string, string> = {
+  safe: "Safe",
+  lossy: "Lossy",
+  incompatible: "Incompatible",
+  unknown: "Unread",
+};
+
+/**
+ * A suggestion starts selected only when the matcher picked it, it clears the
+ * mode's confidence floor, and the type check did not flag it lossy.
+ */
+export function autoMapPreselected(s: AutoMapSuggestion, floor: number): boolean {
+  return Boolean(s.selected) && s.confidence >= floor && !NEEDS_CHOICE.has(s.compat?.verdict ?? "");
+}
 
 export const MATCH_KIND_LABEL: Record<string, string> = {
   exact: "Exact",
@@ -24,6 +43,8 @@ interface AutoMapDialogProps {
   loading: boolean;
   error: string;
   suggestions: AutoMapSuggestion[];
+  /** The validation mode's confidence floor (strict 0.85). Below it the bar is amber and the row starts unselected. */
+  confidenceFloor?: number;
   /** Current target per source, to show what a suggestion replaces. */
   currentTarget: (source: string) => string;
   onApply: (picked: AutoMapSuggestion[]) => void;
@@ -32,8 +53,9 @@ interface AutoMapDialogProps {
 
 /**
  * Preview auto-map before anything changes: each suggestion with its match
- * kind, confidence and type check. Strong matches start selected, weak ones
- * (partial words) do not. Applying is one undo step.
+ * kind, confidence and type check. Only safe matches at or above the
+ * confidence floor start selected; lossy and weak ones wait for a choice.
+ * Applying is one undo step.
  */
 export function AutoMapDialog({
   open,
@@ -43,6 +65,7 @@ export function AutoMapDialog({
   loading,
   error,
   suggestions,
+  confidenceFloor = 0.85,
   currentTarget,
   onApply,
   onClose,
@@ -51,9 +74,9 @@ export function AutoMapDialog({
 
   useEffect(() => {
     setPicked(new Set(
-      suggestions.filter((s) => s.selected && s.compat?.verdict !== "incompatible").map((s) => s.source),
+      suggestions.filter((s) => autoMapPreselected(s, confidenceFloor)).map((s) => s.source),
     ));
-  }, [suggestions]);
+  }, [suggestions, confidenceFloor]);
 
   const changes = useMemo(
     () => suggestions.filter((s) => currentTarget(s.source) !== s.target),
@@ -97,7 +120,7 @@ export function AutoMapDialog({
             disabled={chosen.length === 0}
             onClick={() => onApply(chosen)}
           >
-            Apply {chosen.length} mapping{chosen.length === 1 ? "" : "s"}
+            Apply {plural(chosen.length, "mapping")}
           </button>
         </>
       }
@@ -116,7 +139,12 @@ export function AutoMapDialog({
       ) : (
         <>
           <div className="df2-ms-automap-tools">
-            <span role="status">{chosen.length} of {changes.length} selected</span>
+            <span role="status">
+              {chosen.length} of {changes.length} selected
+              {changes.some((s) => !autoMapPreselected(s, confidenceFloor))
+                ? " · lossy and low-confidence matches start unselected"
+                : ""}
+            </span>
             <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={() => setPicked(new Set(changes.map((s) => s.source)))}>
               Select all
             </button>
@@ -141,6 +169,8 @@ export function AutoMapDialog({
                 {changes.map((s) => {
                   const was = currentTarget(s.source);
                   const pct = Math.round(s.confidence * 100);
+                  const belowFloor = s.confidence < confidenceFloor;
+                  const verdict = s.compat?.verdict;
                   return (
                     <tr key={s.source} className={picked.has(s.source) ? "is-picked" : undefined}>
                       <td>
@@ -158,10 +188,18 @@ export function AutoMapDialog({
                       </td>
                       <td>
                         <span className={`df2-ms-match is-${s.kind}`}>{MATCH_KIND_LABEL[s.kind] ?? s.kind}</span>
-                        <span className="df2-ms-automap-why">{s.reason}</span>
+                        {s.reason ? (
+                          <details className="df2-ms-automap-why">
+                            <summary>Why</summary>
+                            {s.reason}
+                          </details>
+                        ) : null}
                       </td>
                       <td>
-                        <span className="df2-ms-confidence" aria-label={`${pct} percent`}>
+                        <span
+                          className={`df2-ms-confidence${belowFloor ? " is-below-floor" : ""}`}
+                          aria-label={`${pct} percent${belowFloor ? `, below the ${Math.round(confidenceFloor * 100)} percent floor` : ""}`}
+                        >
                           <span className="df2-ms-confidence-bar" aria-hidden="true">
                             <span style={{ width: `${pct}%` }} />
                           </span>
@@ -169,13 +207,14 @@ export function AutoMapDialog({
                         </span>
                       </td>
                       <td>
-                        {s.compat ? (
+                        {s.compat && verdict ? (
                           <>
-                            <span className={`df2-ms-compat is-${s.compat.verdict}`}>{s.compat.verdict}</span>
-                            {s.compat.verdict !== "safe" && s.compat.reasons.length ? (
-                              <span className="df2-ms-automap-why">
+                            <span className={`df2-ms-compat is-${verdict}`}>{COMPAT_LABEL[verdict] ?? verdict}</span>
+                            {verdict !== "safe" && s.compat.reasons.length ? (
+                              <details className="df2-ms-automap-why">
+                                <summary>Why</summary>
                                 {s.compat.reasons.map((r) => r.message).join(" ")}
-                              </span>
+                              </details>
                             ) : null}
                           </>
                         ) : null}

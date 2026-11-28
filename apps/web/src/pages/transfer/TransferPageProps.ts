@@ -8,7 +8,8 @@ import type { Connector, PreflightResult } from "../../lib/types";
  */
 export interface TransferPageProps extends ConnectorListStatusProps {
   connectors: Connector[];
-  onTransferComplete: () => void;
+  /** Called once a run finishes; carries the Trust Report verdict for the toast. */
+  onTransferComplete: (verification?: import("../../lib/runResult").RunVerification) => void;
   onOpenSchedules?: () => void;
   /** Jump to Contracts after Save as contract so the draft is visible immediately. */
   onOpenContracts?: () => void;

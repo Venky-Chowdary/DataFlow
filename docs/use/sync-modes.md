@@ -245,7 +245,8 @@ apply there.
 
 - `reverse_etl`: the mode exists and is used for application destinations
   such as Salesforce and HubSpot. Its guarantees were not traced for this page.
-- Throughput and how each mode behaves at large volume.
+- Throughput and how each mode behaves at large volume: see
+  [throughput](throughput.md) for what is measured so far.
 - Exactly which destinations store the log position per row.
 - Transform steps, which are separate from the sync mode.
 

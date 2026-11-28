@@ -200,3 +200,41 @@ def mongo_up(uri: str = "") -> bool:
             return True
     except (OSError, ValueError):
         return False
+
+
+# Oracle: the connector tests were written against two local containers, an
+# XE 21 (service XEPDB1) and a Free 23ai (FREEPDB1), and each module hard-coded
+# its own. CI's oracle-live job (Oracle Database Free) and a real Oracle wired
+# through the cdc-oracle secrets both export DATAFLOW_ORACLE_*; these win.
+_ORACLE_ENV = {
+    "host": ("DATAFLOW_ORACLE_HOST", "DATAFLOW_TEST_ORACLE_HOST"),
+    "port": ("DATAFLOW_ORACLE_PORT", "DATAFLOW_TEST_ORACLE_PORT"),
+    "database": ("DATAFLOW_ORACLE_SERVICE", "DATAFLOW_ORACLE_DATABASE", "DATAFLOW_TEST_ORACLE_SERVICE"),
+    "username": ("DATAFLOW_ORACLE_USER", "DATAFLOW_TEST_ORACLE_USER"),
+    "password": ("DATAFLOW_ORACLE_PASSWORD", "DATAFLOW_TEST_ORACLE_PASSWORD", "ORA_PASSWORD"),
+    "schema": ("DATAFLOW_ORACLE_SCHEMA", "DATAFLOW_TEST_ORACLE_SCHEMA"),
+}
+
+
+def oracle_creds(default_service: str = "FREEPDB1") -> dict[str, Any]:
+    """Oracle connection fields for a live test: env first, then the local default.
+
+    ``database`` and ``service_name`` both carry the PDB service; ``schema``
+    defaults to the upper-cased login, as Oracle stores an unquoted user.
+    """
+    out: dict[str, Any] = {}
+    for field, names in _ORACLE_ENV.items():
+        out[field] = next((os.environ[n].strip() for n in names if (os.environ.get(n) or "").strip()), "")
+    out["host"] = out["host"] or "127.0.0.1"
+    out["port"] = int(out["port"] or 1521)
+    out["database"] = out["database"] or default_service
+    out["service_name"] = out["database"]
+    out["username"] = out["username"] or "dataflow"
+    out["password"] = out["password"] or "dataflow"
+    out["schema"] = (out["schema"] or out["username"]).upper()
+    return out
+
+
+def oracle_dsn(creds: dict[str, Any] | None = None) -> str:
+    c = creds or oracle_creds()
+    return f"{c['host']}:{c['port']}/{c['database']}"

@@ -141,12 +141,18 @@ class SqliteSide(Side):
     def _key_args(self) -> str:
         return self._cols(self.key_cols)
 
-    def _range(self, lo: KeyBound, hi: KeyBound) -> tuple[str, list[Any]]:
+    def _null_key(self) -> str:
+        return " OR ".join(f"{_quote(self.column_name(c))} IS NULL" for c in self.key_cols)
+
+    def _range(self, lo: KeyBound, hi: KeyBound, *, nulls: bool = False) -> tuple[str, list[Any]]:
+        """Key range over rows with a key value; ``nulls``: the rows with none (their own unit)."""
         if not self.key_cols:
             return "1", []
+        if nulls:
+            return f"({self._null_key()})", []
         quoted = [_quote(self.column_name(c)) for c in self.key_cols]
         sql, params = range_predicate(quoted, lo, hi, "?")
-        return ("1" if sql == "TRUE" else sql), params
+        return f"({'1' if sql == 'TRUE' else sql}) AND NOT ({self._null_key()})", params
 
     def _progress(self) -> int:
         if self._deadline is not None and time.monotonic() > self._deadline:
@@ -154,6 +160,7 @@ class SqliteSide(Side):
         return 0
 
     def _run(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+        self.tick()
         if self.timeout_seconds:
             self._deadline = time.monotonic() + float(self.timeout_seconds)
             self.conn.set_progress_handler(self._progress, 1000)
@@ -311,13 +318,14 @@ class SqliteSide(Side):
         return out
 
     def iter_stream(
-        self, columns: Sequence[ColumnPlan], batch: int = 5000
+        self, columns: Sequence[ColumnPlan], batch: int = 5000, *, nulls: bool = False
     ) -> Iterator[tuple[tuple[Any, ...] | None, tuple[Any, ...]]]:
         width = len(self.key_cols)
         select = ", ".join(x for x in (self._key_args, self._cols(columns)) if x)
-        held = f" WHERE NOT psd1_held({self._row_args})" if self.is_source and self.engine_cols else ""
-        sql = f"SELECT {select} FROM {self._table_ref}{held}"
-        cur = self.conn.execute(sql)
+        where, params = self._range(None, None, nulls=nulls)
+        held = f" AND NOT psd1_held({self._row_args})" if self.is_source and self.engine_cols else ""
+        sql = f"SELECT {select} FROM {self._table_ref} WHERE {where}{held}"
+        cur = self.conn.execute(sql, params)
         try:
             while True:
                 rows = cur.fetchmany(batch)
@@ -327,6 +335,21 @@ class SqliteSide(Side):
                     yield (tuple(row[:width]) if width else None), tuple(row[width:])
         finally:
             cur.close()
+
+    def null_key_count(self) -> int:
+        if not self.key_cols:
+            return 0
+        where, params = self._range(None, None, nulls=True)
+        sql = f"SELECT count(*) FROM {self._table_ref} WHERE {where}"
+        if self.is_source and self.engine_cols:
+            sql += f" AND NOT psd1_held({self._row_args})"
+        return int(self._run(sql, params)[0][0])
+
+    def total_count(self) -> int:
+        sql = f"SELECT count(*) FROM {self._table_ref}"
+        if self.is_source and self.engine_cols:
+            sql += f" WHERE NOT psd1_held({self._row_args})"
+        return int(self._run(sql)[0][0])
 
     def held_count(self) -> int:
         if not self.is_source or not any(c.decimal_fit for c in self.engine_cols):

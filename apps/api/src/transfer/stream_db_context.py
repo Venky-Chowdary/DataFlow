@@ -76,6 +76,8 @@ class RunConfig:
     #: The whole key a re-read row is matched on, and whether it is proven unique.
     replay_key: Any = ()
     replay_key_complete: bool = False
+    #: The route's watermark record key: consecutive boundary hold-backs are counted there (D335).
+    boundary_route_key: Any = ""
     #: ``(every, due this run, counter to store)`` of the periodic key census.
     census_plan: Any = None
     text_cursor_judged: bool = False
@@ -101,6 +103,14 @@ class RunConfig:
     write_mode: Any = None
     chunks: Any = None
     _schema_absorb_lock: Any = None
+    #: Source fields declared omitted; omits leave ``mappings`` before the read.
+    omitted_sources: Any = frozenset()
+    #: This table's own destination columns and whether it existed before the
+    #: run (multi-table runs read each); ``None`` defers to the run's stamp.
+    dest_live_columns: Any = None
+    dest_existed: Any = None
+    #: A multi-table run's per-table verdict when the table took a server copy.
+    coverage_record: Any = None
     ddl_log: Any = None
     _RECONCILE_SAMPLE_CAP: Any = None
     # The run's uniform random Gate-8 draw (services.gate8_uniform_sample.new_draw).

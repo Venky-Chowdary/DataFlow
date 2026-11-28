@@ -1,0 +1,287 @@
+/*
+ * Run step result header, Run-step event log placement, and the list
+ * error / loading states (Jobs, Transforms, Library).
+ * Tokens only: no raw colours, radii or z-index here.
+ *
+ * Danger ink: --df-danger is a fill and fails AA as text on --df-danger-bg.
+ * Until tokens.css carries --df-danger-text, the fallback mixes the fill
+ * toward the theme's primary ink (darker in light, lighter in dark).
+ */
+.df2-run-result,
+.df2-run-chip,
+.df2-run-cancel,
+.df2-theater-v3-alert,
+.df2-theater-v3-phase {
+  --run-danger-ink: var(--df-danger-text, color-mix(in srgb, var(--df-danger) 60%, var(--df-text-primary)));
+}
+
+/* ── Result header ─────────────────────────────────────────────── */
+.df2-run-result {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--df-space-3);
+  margin: 0 0 var(--df-space-4);
+  padding: var(--df-space-4) var(--df-space-5);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-card);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+}
+/* Tone: a 1px hairline and the 16px status icon; never a side stripe. */
+.df2-run-result.is-success { border-color: var(--df-success-border); }
+.df2-run-result.is-warning { border-color: var(--df-warning-border); }
+.df2-run-result.is-danger { border-color: var(--df-danger-border); }
+
+.df2-run-result-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  color: var(--df-text-secondary);
+}
+.df2-run-result.is-success .df2-run-result-icon { color: var(--df-success-text); }
+.df2-run-result.is-warning .df2-run-result-icon { color: var(--df-warning-text); }
+.df2-run-result.is-danger .df2-run-result-icon { color: var(--run-danger-ink); }
+
+.df2-run-result-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-2);
+  min-width: 0;
+}
+.df2-run-result-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-space-2) var(--df-space-3);
+}
+.df2-run-result-title {
+  margin: 0;
+  font-size: var(--df-fs-xl);
+  font-weight: var(--df-fw-semibold);
+  line-height: 1.3;
+  color: var(--df-text-primary);
+}
+.df2-run-result-reason {
+  margin: 0;
+  font-size: var(--df-fs-md);
+  line-height: 1.5;
+  color: var(--df-text-secondary);
+  max-width: 72ch;
+}
+
+.df2-run-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--df-space-1);
+  padding: 2px 10px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-pill);
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+  font-size: var(--df-fs-chip);
+  line-height: 20px;
+  white-space: nowrap;
+}
+.df2-run-chip strong { font-weight: var(--df-fw-semibold); color: inherit; }
+.df2-run-chip.is-success { background: var(--df-success-bg); border-color: var(--df-success-border); color: var(--df-success-text); }
+.df2-run-chip.is-warning { background: var(--df-warning-bg); border-color: var(--df-warning-border); color: var(--df-warning-text); }
+.df2-run-chip.is-danger { background: var(--df-danger-bg); border-color: var(--df-danger-border); color: var(--run-danger-ink); }
+.df2-run-chip.is-neutral strong { color: var(--df-text-primary); }
+
+.df2-run-result-read {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-1);
+  margin: var(--df-space-1) 0 0;
+}
+.df2-run-result-terms {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--df-space-1) var(--df-space-2);
+  font-variant-numeric: tabular-nums;
+}
+.df2-run-term-wrap { display: inline-flex; align-items: baseline; gap: var(--df-space-2); }
+.df2-run-term { display: inline-flex; align-items: baseline; gap: 6px; }
+.df2-run-term-label { font-size: var(--df-fs-label); color: var(--df-text-secondary); }
+.df2-run-term strong { font-size: var(--df-fs-lg); font-weight: var(--df-fw-semibold); color: var(--df-text-primary); }
+.df2-run-term.is-warning strong,
+.df2-run-term.is-warning .df2-run-term-label { color: var(--df-warning-text); }
+.df2-run-op { color: var(--df-text-tertiary); font-size: var(--df-fs-md); }
+.df2-run-result-note { font-size: var(--df-fs-label); color: var(--df-text-secondary); }
+
+.df2-run-result-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--df-space-2);
+}
+.df2-run-result-actions .df2-btn { justify-content: center; white-space: nowrap; text-decoration: none; }
+
+@media (max-width: 767px) {
+  .df2-run-result {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: var(--df-space-3) var(--df-space-4);
+  }
+  .df2-run-result-actions {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .df2-run-result-actions .df2-btn { flex: 1 1 auto; }
+  .df2-run-result-title { font-size: var(--df-fs-lg); }
+}
+
+/* ── Run step status ink: coloured text reads the -text tokens (AA in both themes) ── */
+.df2-app .df2-theater-v3-phase.done { color: var(--df-success-text); }
+.df2-app .df2-theater-v3-phase.failed { color: var(--run-danger-ink); }
+.df2-app .df2-theater-v3-phase .df2-theater-v3-phase-elapsed { opacity: 1; }
+.df2-app .df2-theater-pop-strip strong { color: var(--df-text-secondary); }
+.df2-app .df2-theater-v3-alert.error {
+  color: var(--run-danger-ink);
+  border-color: var(--df-danger-border);
+}
+
+/* Run step evidence captions that sat below AA (axe): the ledger count caption
+   faded with opacity, and the dark event log's counter used page-tertiary ink. */
+.df2-app .df2-conservation-ledger-count span { opacity: 1; color: var(--df-text-secondary); }
+.df2-app .df2-conservation-ledger-compare article span { color: var(--df-text-secondary); }
+.df2-live-log .df2-live-log-head-actions > span { color: color-mix(in srgb, var(--df-on-tile) 72%, transparent); }
+
+/* Live progress captions read theme ink, not fixed slate (AA in dark too). */
+.df2-app .df2-theater-v3 :is(
+  .df2-theater-v3-progress-copy > p,
+  .df2-theater-v3-bar-legend > span,
+  .df2-theater-v3-metric > div > span,
+  .df2-theater-v3-sla-card > span,
+  .df2-theater-v3-sla-card > small
+) {
+  color: var(--df-text-secondary);
+}
+.df2-app .df2-theater-v3 .df2-theater-v3-chunk {
+  background: var(--df-surface-muted);
+  border-color: var(--df-border);
+  color: var(--df-text-secondary);
+}
+
+/* Cancel job: destructive outline, asked first (useConfirm). */
+.df2-app .df2-theater-v3-footer .df2-btn.df2-run-cancel,
+.df2-page-transfer-studio .df2-wizard-footer .df2-btn.df2-run-cancel:not(.df2-btn-primary) {
+  border-color: var(--df-danger-border);
+  background: var(--df-surface);
+  color: var(--run-danger-ink);
+}
+.df2-app .df2-theater-v3-footer .df2-btn.df2-run-cancel:hover:not(:disabled),
+.df2-page-transfer-studio .df2-wizard-footer .df2-btn.df2-run-cancel:not(.df2-btn-primary):hover:not(:disabled) {
+  background: var(--df-danger-bg);
+  border-color: var(--df-danger);
+}
+
+/* Sentence-case labels on the Run step: no ALL-CAPS kickers (PRODUCT_RULES). */
+.df2-theater-v3 :is(
+  .df2-live-log-head strong,
+  .df2-live-log-toggle,
+  .df2-theater-pop-strip strong,
+  .df2-theater-v3-sla-card > span,
+  .df2-theater-v3-metric span,
+  .df2-theater-v3-endpoint-copy span,
+  .df2-conservation-ledger-compare article span,
+  .df2-conservation-ledger-count span
+) {
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: var(--df-fs-label);
+}
+.df2-theater-v3 .df2-live-log-chevron { display: inline-flex; }
+.df2-theater-pop-strip.is-unmeasured {
+  margin: 0;
+  font-size: var(--df-fs-md);
+  color: var(--df-text-secondary);
+}
+
+/* ── Run step: the event log sits in the page flow, collapsed by default ── */
+.df2-run-log {
+  margin: var(--df-space-4) 0 0;
+  min-width: 0;
+}
+
+/* ── List error (ErrorState renders the shared Callout) ─────────────── */
+.df2-error-state { margin: 0 0 var(--df-space-4); }
+.df2-error-state.is-compact { margin: 0; }
+.df2-error-state-cause { margin: 0; }
+.df2-error-state-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--df-space-2); }
+
+/* ── How this was checked (under the result header) ─────────────
+   One compact list in sentence case; the full ledger and Gate-8 cards
+   sit behind the disclosure. Neutral surface: the verdict is the header's. */
+.df2-run-checks {
+  margin: 0 0 var(--df-space-4);
+  padding: var(--df-space-3) var(--df-space-5);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-card);
+  background: var(--df-surface);
+}
+
+.df2-run-checks-title {
+  margin: 0 0 var(--df-space-2);
+  font-size: var(--df-fs-sm);
+  font-weight: 600;
+  color: var(--df-text-primary);
+}
+
+.df2-run-checks-list {
+  display: grid;
+  gap: var(--df-space-1);
+  margin: 0;
+}
+
+.df2-run-checks-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr);
+  gap: var(--df-space-3);
+  font-size: var(--df-fs-sm);
+}
+
+.df2-run-checks-row dt {
+  color: var(--df-text-secondary);
+}
+
+.df2-run-checks-row dd {
+  margin: 0;
+  color: var(--df-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.df2-run-checks-row code {
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-secondary);
+}
+
+.df2-run-checks-row code.has-text {
+  margin-left: var(--df-space-2);
+}
+
+.df2-run-checks-details {
+  margin-top: var(--df-space-3);
+}
+
+.df2-run-checks-details > summary {
+  width: fit-content;
+  cursor: pointer;
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-secondary);
+}
+
+.df2-run-checks-details-body {
+  display: grid;
+  gap: var(--df-space-3);
+  margin-top: var(--df-space-3);
+}
+
+@media (max-width: 640px) {
+  .df2-run-checks { padding: var(--df-space-3); }
+  .df2-run-checks-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}

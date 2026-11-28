@@ -14,15 +14,15 @@ import {
   jobRowsDisplay,
   jobStartedAt,
   jobStatusShortLabel,
-  jobVerification,
-  jobVerificationDisplay,
+  jobVerdict,
+  jobVerdictTitle,
   LIVE_JOB_STATUSES,
   nextJobsGridSort,
-  verificationBadgeClass,
 } from "../../lib/jobGrid";
 import { parseServerTimestampMs } from "../../lib/jobTheaterProgress";
 import type { TransferJob } from "../../lib/types";
 import { jobStatusBadgeClass, jobStatusLabel, presentedJobStatus, uniqueListKey } from "../../lib/uiUtils";
+import { VerdictChip } from "../ui/VerdictChip";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
@@ -252,7 +252,7 @@ export function JobsGrid({
             const live = LIVE_JOB_STATUSES.has(status);
             const name = displayName(job);
             const route = jobRouteLabel(job);
-            const verification = jobVerificationDisplay(jobVerification(job));
+            const verdict = jobVerdict(job);
             const selected = job._id === selectedId;
             const active = job._id === activeId;
             const started = jobStartedAt(job);
@@ -289,8 +289,12 @@ export function JobsGrid({
               mode: <span className="df2-jobs-grid-muted">{job.sync_mode ? jobModeLabel(job) : "—"}</span>,
               rows: <RowsCell job={job} />,
               verification: (
-                <span className="df2-jobs-grid-verify" title={verification.title}>
-                  <span className={verificationBadgeClass(verification.tone)}>{verification.label}</span>
+                <span className="df2-jobs-grid-verify">
+                  <VerdictChip
+                    state={verdict}
+                    unexplainedRows={job.parity_verdict?.unexplained}
+                    title={jobVerdictTitle(job)}
+                  />
                 </span>
               ),
               duration: (

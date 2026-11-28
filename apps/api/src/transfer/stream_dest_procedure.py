@@ -85,6 +85,48 @@ def adopt_stream_column_map(
     return adopt_inherited_mappings(mappings, columns)
 
 
+def copy_declined_for_borrowed_map(cfg: Any, *, inherited: bool) -> bool:
+    """Whether a server-side copy must not run with another table's column map.
+
+    A multi-table run hands every stream the first table's map. The row path
+    replaces it with this stream's own columns when the two differ
+    (:func:`adopt_stream_column_map`), but the COPY decision comes first, before
+    this stream's columns are read. A copy with the borrowed map moved only the
+    columns both tables share: a second table with one more column landed
+    without it, checksums matching on the copied columns. So the map is checked
+    against this table's catalog here, and a mismatch (or a table whose columns
+    cannot be listed) keeps the stream on the row path, which maps each column
+    to itself and says so. ``docs/migration-rules.md`` rule 4: leaving a column
+    out is a decision, never a default.
+    """
+    if not inherited or not getattr(cfg, "mappings", None):
+        return False
+    from services.copy_fast_path import note_copy_decline
+    from services.multi_stream_plan import adopt_inherited_mappings
+
+    from .adapters_introspect import _introspect_table_schema
+
+    table = str(getattr(cfg.source, "table", "") or getattr(cfg.source, "collection", "") or "")
+    try:
+        columns = list(_introspect_table_schema(cfg.src_read_type, cfg.src_cfg, table, []) or {})
+    except Exception:  # noqa: BLE001 - an unreadable catalog means "not proven", so no copy
+        columns = []
+    if not columns:
+        note_copy_decline(
+            "the column map belongs to another table and this table's columns could not be "
+            "listed before the copy"
+        )
+        return True
+    _resolved, note = adopt_inherited_mappings(cfg.mappings, columns)
+    if not note:
+        return False
+    note_copy_decline(
+        "the column map belongs to another table and does not name this table's columns; "
+        "the row path writes each column under its own name"
+    )
+    return True
+
+
 def runner_for_stream_steps(
     steps: list[dict] | None,
     *,

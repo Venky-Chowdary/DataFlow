@@ -219,3 +219,25 @@ def test_dismiss_explain_and_summary(ent, world):
     assert row[0] == "unexplained_large"  # 2 of 100 rows is over the 1% "small" line
     assert body["runs"][1]["verdict"] == "no_difference_found"  # a clean sample is not proof
     assert viewer.get("/api/v1/parity/summary", params={"limit": 0}).status_code == 422
+
+
+def test_verdicts_for_list_rows_match_the_report_and_respect_workspaces(ent, world):
+    """The Jobs grid shows the Trust Report's word: one batch read for a page of ids."""
+    viewer, job, foreign = world["viewer"], world["job"], world["foreign"]
+    clean = _job(world["ws"], "clean run", reconciliation={
+        "passed": True, "source_rows": 10, "target_rows": 10,
+        "sample_compare": {"rows_compared": 10, "mismatches": []},
+    })
+    running = _job(world["ws"], "still running", status="running")
+    res = viewer.get("/api/v1/parity/verdicts", params={"ids": f"{job},{clean},{foreign},{running},nope,{job}"})
+    assert res.status_code == 200, res.text
+    verdicts = res.json()["verdicts"]
+    # Another workspace's job, an unknown id and a live run are left out, never guessed.
+    assert set(verdicts) == {job, clean}
+    report = viewer.get(f"/api/v1/jobs/{job}/parity-report").json()
+    assert verdicts[job]["verdict"] == report["verdict"] == "unexplained"
+    assert verdicts[job]["unexplained"] == report["parity"]["unexplained"] == 2
+    assert verdicts[clean]["verdict"] == "no_difference_found"  # a clean sample is not proof
+    assert viewer.get("/api/v1/parity/verdicts", params={"ids": ""}).json() == {"verdicts": {}}
+    too_many = ",".join(f"j{i}" for i in range(101))
+    assert viewer.get("/api/v1/parity/verdicts", params={"ids": too_many}).status_code == 422

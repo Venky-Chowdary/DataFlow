@@ -876,10 +876,16 @@ async def sync_transfer_job(job_id: str, request: Request):
         raise safe_http_exception(e, event="connectors.sync_transfer_job.failed", public_message="Couldn't stage the sync.", status_code=500)
 
 
+from services.resume_decision import SchemaDecision  # noqa: E402 - route body models
+
+
 class RerunRequest(BaseModel):
     """Optional body of a rerun or retry: what the operator accepts for this run."""
 
     force: bool = False
+    #: The operator's decision on a source column the job stopped on (see
+    #: ``services.resume_decision``): applied to the new job, recorded, audited.
+    schema_decision: SchemaDecision | None = None
     #: ``{approved_by, reason, execution_policy, on_cast_failure?, columns?}`` -
     #: the same acceptance ``plan_transfer`` takes. Signs a continue-policy Risk
     #: Contract on the replayed mappings so rows that do not cast are
@@ -964,6 +970,17 @@ def retry_transfer_job(
     quarantined and the valid rows load (QA r12 D2) — the way out of a
     cast-failure block for a job that failed.
     """
+    if body is not None and body.schema_decision is not None:
+        # Retry means "the same job as before": a decision it ignored would read
+        # as applied. The decision goes with /resume (or /rerun).
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "retry runs the job as it was and takes no schema_decision. Send the "
+                f"decision with POST /api/v1/connectors/jobs/{job_id}/resume, which "
+                "continues the job from its last committed batch."
+            ),
+        )
     force = bool(force or (body is not None and body.force))
     acceptance = _body_acceptance(body)
     try:
@@ -1247,8 +1264,33 @@ def rerun_transfer_job(
                 "forced": True,
                 "refusal_overridden": decision["reason"],
             }
+        rerun_decision: dict | None = None
+        decision_body = body.schema_decision if body is not None else None
+        if decision_body is not None and decision_body.has_decision():
+            from services.resume_decision import (
+                apply_schema_decision,
+                decision_record,
+                decision_refusal,
+                omit_refusal,
+            )
+
+            refusal = decision_refusal(getattr(request.state, "user", None), decision_body)
+            refusal = refusal or omit_refusal(job, decision_body)
+            if refusal:
+                raise HTTPException(status_code=refusal[0], detail=refusal[1])
+            apply_schema_decision(xfer_req, decision_body, actor=actor or "anonymous")
+            rerun_decision = decision_record(decision_body, actor=actor or "anonymous", action="rerun")
         engine = get_transfer_engine()
         new_job_id = engine._create_pending_job(xfer_req)
+        if rerun_decision:
+            from services.resume_decision import audit_schema_decision
+
+            get_mongodb_service().update_job_status(
+                new_job_id, "pending", resume_decision=rerun_decision
+            )
+            audit_schema_decision(
+                rerun_decision, job_id=new_job_id, workspace_id=job.get("workspace_id") or None
+            )
         from datetime import datetime, timezone
 
         confirmation = {
@@ -1385,8 +1427,18 @@ async def _cdc_resume_attach_refusal(xfer_req: Any) -> str:
 
 
 @router.post("/jobs/{job_id}/resume")
-async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
-    """Resume a failed or paused transfer from its last durable checkpoint."""
+async def resume_transfer_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    body: SchemaDecision | None = None,
+):
+    """Resume a failed or paused transfer from its last durable checkpoint.
+
+    ``body`` is the operator's decision for a run that stopped on a source
+    column (``services.resume_decision``): a policy that adds it, or the
+    columns to leave out, with a reason. Recorded on the job and audited.
+    """
     try:
         from ..transfer.background import run_transfer_async
         from ..transfer.models import transfer_request_from_dict
@@ -1449,6 +1501,28 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
         xfer_req = xfer_req_probe
         # Resume must never inherit a stale skip_preflight flag — gates re-run.
         xfer_req.skip_preflight = False
+        resume_decision: dict | None = None
+        if body is not None and body.has_decision():
+            import copy as _copy_mod
+
+            from services.resume_decision import (
+                apply_schema_decision,
+                decision_record,
+                decision_refusal,
+                omit_refusal,
+            )
+
+            refusal = decision_refusal(getattr(request.state, "user", None), body)
+            refusal = refusal or omit_refusal(job, body)
+            if refusal:
+                raise HTTPException(status_code=refusal[0], detail=refusal[1])
+            decided_by = _actor_email(request) or "anonymous"
+            apply_schema_decision(xfer_req, body, actor=decided_by)
+            # The stored (redacted) request carries the decision to later resumes;
+            # the live request is never re-serialized (it holds connector secrets).
+            payload = _copy_mod.deepcopy(payload)
+            apply_schema_decision(payload, body, actor=decided_by)
+            resume_decision = decision_record(body, actor=decided_by, action="resume")
         # A full refresh has nothing to resume *into*: it replaces the
         # destination rather than adding to it, so the safe continuation is to
         # run it again from the top. Continuing mid-file needs an identity key to
@@ -1484,7 +1558,18 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             message=f"Resume requested for job {job_id}",
             error="",
             allow_terminal_exit=True,
+            **(
+                {"transfer_request": payload, "resume_decision": resume_decision}
+                if resume_decision
+                else {}
+            ),
         )
+        if resume_decision:
+            from services.resume_decision import audit_schema_decision
+
+            audit_schema_decision(
+                resume_decision, job_id=job_id, workspace_id=job.get("workspace_id") or None
+            )
         background_tasks.add_task(
             run_transfer_async, job_id, xfer_req, resume=not restart_full_refresh
         )
@@ -1972,6 +2057,13 @@ class QuarantineReplayRequest(BaseModel):
 
     rows: list[dict] = Field(default_factory=list, description="Edited rejected_details; empty = all quarantine rows")
     transform_overrides: dict = Field(default_factory=dict, description="Optional per-column transform overrides keyed by source column")
+    acknowledge_endpoint_change: bool = Field(
+        default=False,
+        description=(
+            "The destination connection now points at another host or database than the job "
+            "wrote to; set true to replay into the connection as it is saved now (D413)."
+        ),
+    )
 
 
 _QUARANTINE_DETAIL_KEYS = frozenset({
@@ -2530,6 +2622,27 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         )
 
     transfer_req = transfer_request_from_dict(payload)
+    transfer_req.workspace_id = str(job.get("workspace_id") or "")
+    # D413: write through the destination connector as it is saved now, never
+    # the host frozen on the parent job (retry/rerun already do, D172).
+    from ..transfer.endpoint_refresh import (
+        ReplayConnectorMissing,
+        ReplayEndpointChanged,
+        refresh_replay_destination,
+        replay_endpoint_note,
+    )
+
+    try:
+        endpoint_resolution = refresh_replay_destination(
+            job_id, payload, transfer_req, acknowledged=bool(body.acknowledge_endpoint_change)
+        )
+    except (ReplayConnectorMissing, ReplayEndpointChanged) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Replay refused: the destination connection could not be resolved: {exc}",
+        ) from exc
     mappings = list(transfer_req.mappings or [])
     if body.transform_overrides:
         from services.transform_engine import transform_override_refusal
@@ -2728,6 +2841,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     child_payload["sync_mode"] = replay_sync_mode
     child_payload["skip_preflight"] = True
     child_req = transfer_request_from_dict(child_payload)
+    child_req.destination = transfer_req.destination  # the refreshed endpoint (D413)
     from src.transfer.contract_engine import enforce_bound_contract, stamp_request_contract
 
     try:
@@ -2755,6 +2869,29 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     reversibility = execute_gate(child_req, (mappings, schema, None, records, len(records)))
     if reversibility is not None and reversibility.get("status") == "block":
         raise HTTPException(status_code=409, detail=str(reversibility.get("message") or "g24_reversibility"))
+    # The replay writes without Validate, so it is judged like any run without
+    # it: no source column leaves undecided, no column is added unapproved.
+    from ..transfer.source_column_coverage import (
+        SourceColumnsUnaccounted,
+        _stream_live_types,
+        refuse_unaccounted_without_validate,
+        refuse_unapproved_add_without_validate,
+        replay_source_columns,
+    )
+
+    source_columns = replay_source_columns(columns)
+    try:
+        refuse_unaccounted_without_validate(child_req, source_columns, mappings)
+        if dest.kind == "database" and dest.table:
+            refuse_unapproved_add_without_validate(
+                child_req, source_columns, mappings,
+                _stream_live_types(
+                    resolve_driver_type(str(dest_cfg.get("type") or dest.format or "")).lower(),
+                    dest_cfg, str(dest.table),
+                ),
+            )
+    except SourceColumnsUnaccounted as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     child_job_id = engine._create_pending_job(child_req)
     from services.reversibility_enforce import rekey
 
@@ -2766,6 +2903,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         phase="writing",
         message=f"Quarantine replay of job {job_id}",
         operation="quarantine_replay",
+        endpoint_refresh=endpoint_resolution,
     )
 
     try:
@@ -3029,6 +3167,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             "dest_dlq_promoted": promote_meta,
             "reconciliation": recon,
             "stale_refused": stale_refused,
+            "endpoint_refresh": endpoint_resolution,
             "quarantine_closure": {
                 "verdict": compact.get("verdict"),
                 "open_count": compact.get("open_count"),
@@ -3098,7 +3237,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             raise HTTPException(status_code=409, detail=typed_refusal) from e
         # A refused replay is a failed run: the job record's words, with a reference.
         raise run_failure_http_exception(
-            e, status_code=422, event="connectors.replay_job_quarantine.failed", side="destination", phase="write"
+            e, status_code=422, event="connectors.replay_job_quarantine.failed", side="destination", phase="write",
+            note=replay_endpoint_note(endpoint_resolution),
         ) from e
 
 

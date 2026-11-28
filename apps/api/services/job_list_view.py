@@ -214,6 +214,28 @@ def _stream_names_for_list(job: dict[str, Any]) -> list[str]:
     return names
 
 
+def parity_stamp(job: dict[str, Any] | None) -> str:
+    """The parity state's version and stored-summary time: changes whenever the verdict can.
+
+    Verification after the write (Parity at Scale) ends without touching
+    ``updated_at`` or the parity state, so its effective state and finish time
+    are part of the stamp, as in ``parity_report.summary_stamp``: an open Jobs
+    grid re-reads the verdict instead of keeping "Verification running".
+    A job never verified after the write keeps exactly the stamp it had.
+    """
+    from services.parity_scale.verification import effective_block
+
+    state = (job or {}).get("parity")
+    stamp = ""
+    if isinstance(state, dict) and state:
+        summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
+        stamp = f"{int(state.get('version') or 0)}:{summary.get('at') or ''}"
+    block = effective_block(job)
+    if block:
+        stamp = f"{stamp}|{block.get('state') or ''}:{block.get('finished_at') or ''}"
+    return stamp
+
+
 def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
     """Return a compact copy for list views — never ship quarantine samples here."""
     if not job:
@@ -238,6 +260,11 @@ def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
     verification = verification_summary_for_list(job)
     if verification:
         out["verification_summary"] = verification
+    stamp = parity_stamp(job)
+    if stamp:
+        # Parity Studio decisions and re-reads do not touch updated_at: the
+        # grid re-reads a row's verdict when this changes (review UI2 #2).
+        out["parity_stamp"] = stamp
     # The detail card relabels a last-table digest on a multi-table run; the
     # grid needs the same flag to apply the same rule.
     summary = job.get("destination_summary")

@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from services.brand_env import getenv_brand
 from services.code_crosswalk import declared_crosswalk
@@ -427,9 +427,30 @@ def _fifo_copy_into_mysql(
             restore_mysql_bulk_load_session(dst_cur)
         if blocked:
             raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
+        # D302: the caller commits right after this returns. A cancel that
+        # landed while the LOAD sat behind a destination lock (the producer
+        # blocked on the pipe, polling nothing) is the run's outcome, not a
+        # load to commit.
+        from services.cancel_check import poll_cancel
+
+        poll_cancel()
+
+    src_conn = getattr(src_cur, "connection", None)
+
+    def _stop_source_copy() -> None:
+        # PQcancel is thread-safe: a COPY waiting inside libpq for the next
+        # source rows returns (and leaves libpq) instead of holding the pump.
+        # Never at the same moment as the D302 watch's close (one lock).
+        if src_conn is not None:
+            from services.source_read_cancel import cancel_connection
+
+            cancel_connection(src_conn)
 
     stream_between_cursors(
-        prefix="df_pg_mysql_", producer=_produce, consumer=_consume
+        prefix="df_pg_mysql_",
+        producer=_produce,
+        consumer=_consume,
+        abort_producer=_stop_source_copy,
     )
 
 
@@ -458,8 +479,18 @@ def _run_shard(
 ) -> None:
     from connectors.mysql_load_data import mysql_load_data_session_ready
 
+    from services.source_read_cancel import (
+        as_cancel,
+        close_connection,
+        settle_watch,
+        start_watch,
+    )
+
     src = _pg_connect(source_cfg)
     dst = _mysql_connect(dest_cfg)
+    # D302: a cancel ends this shard's snapshot session even while its LOAD
+    # is stalled on the destination and nothing on this thread can poll.
+    watch = start_watch(src)
     try:
         src.autocommit = False
         with src.cursor() as src_cur, dst.cursor() as dst_cur:
@@ -477,19 +508,27 @@ def _run_shard(
                 table_q=table_q,
                 columns=columns,
             )
+            # No abort may start once the destination commits (D302).
+            settle_watch(watch)
             dst.commit()
-            src.commit()
-    except Exception:
+            # The rows have landed; ending the read-only snapshot cannot undo
+            # them, so a failure here is not this shard's outcome.
+            _end_source_read(src)
+    except Exception as exc:
         try:
             dst.rollback()
         except Exception:
             logger.debug("shard mysql rollback skipped", exc_info=True)
+        err = as_cancel(watch, exc)
+        if err is not exc:
+            raise err from exc
         raise
     finally:
-        try:
-            src.close()
-        except Exception:
-            logger.debug("shard pg close skipped", exc_info=True)
+        if watch is not None:
+            watch.stop()
+        # Through the libpq gate: after a destination failure the pump may
+        # still be inside PQgetCopyData on this session.
+        close_connection(src)
         try:
             dst.close()
         except Exception:
@@ -508,7 +547,15 @@ def _launch_copy_shards(
     table_q: str,
     target_cols: list[str],
     max_parallel: int = 1,
+    before_commit: Callable[[], None] | None = None,
 ) -> None:
+    """Run the COPY shards; the one-COPY path commits ``dest_conn`` itself.
+
+    ``before_commit`` runs right before that commit (the coordinator settles
+    its D302 cancel watch there). Shard waves each settle their own.
+    """
+    from services.cancel_check import poll_cancel
+
     if not copy_sqls:
         return
     if len(copy_sqls) == 1:
@@ -519,11 +566,16 @@ def _launch_copy_shards(
             table_q=table_q,
             columns=target_cols,
         )
+        if before_commit is not None:
+            before_commit()
         dest_conn.commit()
         return
     parallel = max(1, min(int(max_parallel or len(copy_sqls)), _MAX_WORKERS))
     errors: list[BaseException] = []
     for offset in range(0, len(copy_sqls), parallel):
+        # A cancel between waves starts no further shard (each would open a
+        # session, import the snapshot and begin a LOAD only to be cancelled).
+        poll_cancel()
         batch = copy_sqls[offset:offset + parallel]
         threads: list[threading.Thread] = []
         for sql in batch:
@@ -547,6 +599,44 @@ def _launch_copy_shards(
             t.join()
         if errors:
             raise errors[0]
+
+
+def _drop_run_table(dest_conn: Any, table_q: str, *, staged: bool) -> bool:
+    """Drop a table this run created (a stage or a new destination) after a failure.
+
+    A DROP that fails leaves a table nothing else will remove (a stage's name
+    is random per run): say so at warning and record its name on the job, so
+    it can be cleaned up. Returns whether it was dropped.
+    """
+    from services.cancel_check import note_on_job
+
+    try:
+        with dest_conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {table_q}")  # nosec B608
+        dest_conn.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001 - the run's own failure is the outcome
+        name = table_q.strip("`").replace("``", "`")
+        kind = "staging table" if staged else "destination table created by this run"
+        logger.warning("could not drop the %s %s after the copy failed: %s", kind, name, exc)
+        note_on_job(
+            {"orphaned_tables_note": (
+                f"The {kind} {name} could not be dropped after this run stopped; "
+                "it is left in the destination database and can be dropped by hand."
+            )},
+            append={"orphaned_tables": name},
+        )
+        return False
+
+
+def _end_source_read(conn: Any) -> None:
+    """Commit the read-only source snapshot after the rows landed; never raises."""
+    if conn is None or getattr(conn, "closed", 0):
+        return  # a D302 cancel already ended it on the server
+    try:
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 - the write is committed already
+        logger.warning("ending the source snapshot after the load failed: %s", exc)
 
 
 def copy_postgres_to_mysql(
@@ -585,8 +675,28 @@ def copy_postgres_to_mysql(
     source_ref = _table_ref(source_schema, source_table)
     table_q = _mysql_ident(dest_table)
 
+    from services.cancel_check import poll_cancel
+    from services.source_read_cancel import (
+        as_cancel,
+        close_connection,
+        settle_watch,
+        start_watch,
+        stop_watch,
+    )
+
     source_conn = _pg_connect(source_cfg)
     dest_conn = _mysql_connect(dest_cfg)
+    # D302: the run's snapshot session holds AccessShareLock on the source and
+    # pins its xmin until the read is over. A cancel must end it within the
+    # 5 s budget even while a LOAD is stalled on the destination (the FIFO
+    # producer is then blocked on the pipe and polls nothing).
+    watch = start_watch(source_conn)
+    #: The watch whose abort means "this run was cancelled". Cleared once the
+    #: rows have landed: a later error is not a cancel, and a later cancel is
+    #: the engine's "cancel landed after the write" with the exact count.
+    cancel_watch = watch
+    swap_at_end = False
+    swapped = False
     created_here = False
     existed_before = False
     reset_empty_dest_on_failure = False
@@ -805,8 +915,28 @@ def copy_postgres_to_mysql(
                 table_q=table_q,
                 target_cols=target_cols,
                 max_parallel=workers,
+                # One COPY: settle right before its destination commit.
+                before_commit=lambda: settle_watch(watch),
             )
+            # Every shard has committed (or the one COPY has, after settling):
+            # the read is over. Stop the watch without raising (a cancel that
+            # ended only the coordinator's idle snapshot after the shards
+            # landed is a cancel after the write) and end the snapshot now,
+            # before the destination-side proofs.
+            stop_watch(watch)
+            cancel_watch = None
+            _end_source_read(source_conn)
 
+            def _stage_cancel_point() -> None:
+                # Overwrite: the rows are still only in the run's private
+                # stage; the live table is untouched until the publish below.
+                # A cancel here drops the stage (except branch) and nothing
+                # lands. Without a stage the rows are live already: a cancel
+                # from here on is the engine's "landed before the cancel".
+                if swap_at_end:
+                    poll_cancel()
+
+            _stage_cancel_point()
             dst_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
             dest_count = int(dst_cur.fetchone()[0])
             if dest_count != source_count:
@@ -818,6 +948,7 @@ def copy_postgres_to_mysql(
                 dest_ident = _mysql_ident(pk_map[1])
                 dest_conn.commit()
                 for part in partitions:
+                    _stage_cancel_point()
                     dest_part = _mysql_range_count(
                         dst_cur, table_q, dest_ident, part
                     )
@@ -831,14 +962,18 @@ def copy_postgres_to_mysql(
             if swap_at_end:
                 from services.dest_overwrite_swap import mysql_swap_staged_dest
 
+                # Last point a cancel keeps the live table as it was. The
+                # publish is one transaction (DELETE + INSERT ... SELECT, then
+                # COMMIT): once it starts it lands whole or rolls back whole.
+                _stage_cancel_point()
                 mysql_swap_staged_dest(
                     dst_cur,
                     dest_q=swap_dest_q,
                     staging_q=table_q,
                     trash_q=_mysql_ident(swap_trash_table),
                 )
+                swapped = True
             dest_conn.commit()
-            source_conn.commit()
             proof = f"dest_count:{dest_count}"
             partition_proof = [
                 {
@@ -880,16 +1015,18 @@ def copy_postgres_to_mysql(
                 },
                 proof_scope=proof_scope,
             )
-    except Exception:
-        if preserve_dest_on_failure:
+    except Exception as exc:
+        err = as_cancel(cancel_watch, exc)
+        # A staged overwrite's table is run-scoped (random name) and never
+        # resumed: keeping it "for resume" only orphaned a df_ow_* copy of the
+        # whole load beside the untouched destination.
+        staged = swap_at_end and not swapped
+        if preserve_dest_on_failure and not staged:
+            if err is not exc:
+                raise err from exc
             raise
         if created_here:
-            try:
-                with dest_conn.cursor() as cur:
-                    cur.execute(f"DROP TABLE IF EXISTS {table_q}")  # nosec B608
-                dest_conn.commit()
-            except Exception:
-                logger.debug("dest drop after copy failure skipped", exc_info=True)
+            _drop_run_table(dest_conn, table_q, staged=staged)
         elif existed_before and reset_empty_dest_on_failure:
             try:
                 with dest_conn.cursor() as cur:
@@ -897,12 +1034,13 @@ def copy_postgres_to_mysql(
                 dest_conn.commit()
             except Exception:
                 logger.debug("dest truncate after copy failure skipped", exc_info=True)
+        if err is not exc:
+            raise err from exc
         raise
     finally:
-        try:
-            source_conn.close()
-        except Exception:
-            logger.debug("pg source close skipped", exc_info=True)
+        if watch is not None:
+            watch.stop()
+        close_connection(source_conn)
         try:
             dest_conn.close()
         except Exception:

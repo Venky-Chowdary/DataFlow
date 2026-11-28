@@ -6,6 +6,8 @@ Real engine path, Validate on, from a live SQL Server source:
   at Validate; create-new lands ``tinyint unsigned`` and keeps 255.
 * ``datetime2(7)`` values that use the 7th digit into an existing PostgreSQL
   ``TIMESTAMP(6)`` are refused at Validate (PostgreSQL keeps microseconds).
+* ``datetimeoffset`` lands in a created PostgreSQL ``timestamptz`` as the same
+  instant, and an existing wall-clock ``TIMESTAMP(6)`` refuses it (finding 8).
 
 Skips without a reachable SQL Server (``DATAFLOW_SQLSERVER_*`` /
 ``DATAFLOW_TEST_MSSQL_PASSWORD``, as the other SQL Server live modules).
@@ -136,6 +138,29 @@ def test_live_sqlserver_datetime2_seventh_digit_into_pg_micros_is_refused(isolat
         "id INT PRIMARY KEY, at DATETIME2(7)",
         "(1, '2024-01-01 10:00:00.1234567'), (2, '2024-01-01 10:00:01.0000001')",
     )
+    pg_sql(f'CREATE TABLE public."{table}" (id INT PRIMARY KEY, at TIMESTAMP(6))')
+    result = run_transfer(isolated, _endpoint(table), pg_endpoint(table))
+    assert refused_at_validate(result, "at"), result.error
+    assert pg_sql(f'SELECT count(*) FROM public."{table}"', fetch=True)[0][0] == 0
+
+
+# Accuracy review finding 8: a datetimeoffset instant keeps its instant where it
+# lands (the offset label is disclosed, D136) and is refused by a wall clock.
+_DTO_ROWS = "(1, '2024-01-02 03:04:05.123 +05:30'), (2, '2024-07-01 23:30:00.000 -04:00')"
+_DTO_EPOCHS = [1704144845.123, 1719891000.0]
+
+
+def test_live_sqlserver_datetimeoffset_create_new_in_pg_keeps_the_instant(isolated, mssql_table):  # noqa: F811
+    table = mssql_table("id INT PRIMARY KEY, at DATETIMEOFFSET(3)", _DTO_ROWS)
+    result = run_transfer(isolated, _endpoint(table), pg_endpoint(table))
+    assert result.success, result.error
+    got = pg_sql(f'SELECT extract(epoch FROM at), pg_typeof(at)::text FROM public."{table}" ORDER BY id', fetch=True)
+    assert [round(float(e), 3) for e, _ in got] == _DTO_EPOCHS
+    assert {t for _, t in got} == {"timestamp with time zone"}
+
+
+def test_live_sqlserver_datetimeoffset_into_pg_wall_clock_is_refused(isolated, mssql_table):  # noqa: F811
+    table = mssql_table("id INT PRIMARY KEY, at DATETIMEOFFSET(3)", _DTO_ROWS)
     pg_sql(f'CREATE TABLE public."{table}" (id INT PRIMARY KEY, at TIMESTAMP(6))')
     result = run_transfer(isolated, _endpoint(table), pg_endpoint(table))
     assert refused_at_validate(result, "at"), result.error

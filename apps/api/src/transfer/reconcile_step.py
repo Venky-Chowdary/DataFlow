@@ -263,6 +263,9 @@ def stamp_run_proof_context(dest_summary: dict[str, Any] | None, request: Any) -
     """
     if not isinstance(dest_summary, dict) or request is None:
         return
+    from services.dedupe_postwrite import stamp_dedupe_request
+
+    stamp_dedupe_request(dest_summary, request)  # D402: Gate-8 grades the dedupe ask
     filt = getattr(request, "source_filter", None)
     if filt:
         dest_summary["source_filter"] = filt
@@ -342,6 +345,18 @@ def _proof_source_batches(
 
     if is_reader_source(src_type, src_cfg):
         yield from iter_api_source_batches(
+            source_endpoint=source_endpoint,
+            src_type=src_type,
+            src_cfg=src_cfg,
+            read_cols=read_cols,
+        )
+        return
+    from .proof_source_reader import iter_writer_wire_batches, rereads_through_writer
+
+    if rereads_through_writer(src_type):
+        # D331: Oracle is re-read by the stream's own reader, not a raw SELECT
+        # (zone-bearing timestamps, JSON, catalog spellings).
+        yield from iter_writer_wire_batches(
             source_endpoint=source_endpoint,
             src_type=src_type,
             src_cfg=src_cfg,
@@ -1607,12 +1622,15 @@ def _transform_applied_proof_impl(
         sync_collapses_in_file_duplicates(sync_mode)
         or str(dest_summary.get("in_file_dedupe") or "").replace("-", "_") == "keep_last"
     ):
+        _keep_last = str(dest_summary.get("in_file_dedupe") or "").replace("-", "_") == "keep_last"
         _collapse_keys = [
             str(c)
             for c in (
-                scope_pk
+                (_keep_last and dest_summary.get("dedupe_key_columns"))
+                or scope_pk
                 or dest_summary.get("primary_key_columns")
                 or dest_summary.get("conflict_columns")
+                or dest_summary.get("dedupe_key_columns")
                 or []
             )
             if c
@@ -1736,12 +1754,18 @@ def _transform_applied_proof_impl(
             src_cfg=src_cfg,
             read_cols=read_cols + _extra,
         ):
+            from .proof_source_reader import decode_wire_rows, is_wire_page
+
+            _wire = is_wire_page(batch)
             if _proof_filter:
                 # D331: the write applied this filter. Rows it excluded are
                 # not "changed in source during run".
                 from services.row_filter import apply_row_filter
 
                 batch = apply_row_filter(list(batch), _proof_filter)
+            if _wire:
+                # Filtered on the wire text, as the write's page was.
+                batch = decode_wire_rows(list(batch), _src_ddl)
             if _proof_window is not None:
                 batch = [
                     {k: v for k, v in r.items() if k not in _extra}
@@ -1824,11 +1848,14 @@ def _transform_applied_proof_impl(
             # here, by asking the destination, not by guessing (D391).
             from services.collation_equality import collapse_destination_equal_keys
 
-            _spill_dropped += collapse_destination_equal_keys(
-                pin_store.db,
-                dialect=dest_db_type,
-                endpoint=endpoint,
-                columns=_collapse_keys,
+            # dedupe_key_equality=exact kept both spellings on the write (D402).
+            _spill_dropped += 0 if dest_summary.get("dedupe_key_equality") == "exact" else (
+                collapse_destination_equal_keys(
+                    pin_store.db,
+                    dialect=dest_db_type,
+                    endpoint=endpoint,
+                    columns=_collapse_keys,
+                )
             )
             _collapsed_duplicates = _spill_dropped
             for (payload,) in pin_store.db.execute(
@@ -2263,16 +2290,19 @@ def _transform_applied_proof_impl(
                             qc0 = _oracle_projection(
                                 c0, endpoint, dst_cfg0, sel_cols0
                             )[0]
+                        _q0 = f"SELECT {qc0} FROM {dest_ref0}"  # nosec B608
+                        _fix0 = None
+                        if dest_db_type == "oracle":
+                            # D331: zone-bearing columns as instants, not as
+                            # the driver's naive wall clock.
+                            from .proof_source_reader import oracle_zone_safe_rows
+
+                            _q0, _fix0 = oracle_zone_safe_rows(c0, _q0, sel_cols0)
+                        _rows0 = iter_select_row_dicts(c0, sa.text(_q0), sel_cols0)
+                        if _fix0 is not None:
+                            _rows0 = ([_fix0(r) for r in b] for b in _rows0)
                         actual_checksum = canonical_checksum_from_iter(
-                            _scoped_gen(
-                                iter_select_row_dicts(
-                                    c0,
-                                    sa.text(
-                                        f"SELECT {qc0} FROM {dest_ref0}"  # nosec B608
-                                    ),
-                                    sel_cols0,
-                                )
-                            ),
+                            _scoped_gen(_rows0),
                             digest_cols,
                             dest_db_type=dest_db_type,
                             dest_types=dest_types,
@@ -2637,9 +2667,17 @@ def _transform_applied_proof_impl(
                                 else ""
                             )
                         )
+                    _fixd = None
+                    if dest_db_type == "oracle":
+                        from .proof_source_reader import oracle_zone_safe_rows
+
+                        _qd, _fixd = oracle_zone_safe_rows(dconn, str(stmt), sel_cols)
+                        stmt = sa.text(_qd)
                     for batch in iter_select_row_dicts(
                         dconn, stmt, sel_cols
                     ):
+                        if _fixd is not None:
+                            batch = [_fixd(r) for r in batch]
                         for r in batch:
                             if not _dest_in_this_run(r):
                                 continue
@@ -4335,14 +4373,21 @@ def _maybe_attach_verification_ladder(
         )
 
         _ident_keys = list(pk_cols) or ([_t_window.pk] if _t_window.pk else [])
-        out = fail_on_window_duplicates(out, measure_window_duplicates(
+        _window_dups = measure_window_duplicates(
             source_rows=source_rows, target_rows=target_rows,
             match_cols=(
                 list(dict.fromkeys([_t_window.cursor, *_ident_keys]))
                 if _ident_keys else list(target_cols)
             ),
             dest_db_type=dest_type, dest_types=dest_types,
-        ))
+        )
+        from .stream_boundary_keyed import accepted_window_duplicates
+
+        # D335: only the route's audited "accept possible boundary duplicates"
+        # turns them into a disclosed finding; otherwise they fail the run.
+        out = accepted_window_duplicates(out, _window_dups, dest_summary) or fail_on_window_duplicates(
+            out, _window_dups
+        )
     if window is not None and source_reread and keyed and (pk_cols or pk_column):
         # D188 — rows the cursor did not select are not this run's verdict,
         # but a disagreement there is reported, never silently dropped.
@@ -6460,6 +6505,27 @@ def _run_dedupe_gate_checks(
     return checks
 
 
+def _apply_infile_dedupe_gate(
+    stamped: dict[str, Any], ctx: dict[str, Any], dest_summary: dict[str, Any]
+) -> None:
+    """D402: a requested dedupe must leave one row per key on the destination."""
+    from services.dedupe_postwrite import apply_infile_dedupe_check, infile_dedupe_check
+    from services.sync_cursor import is_overwrite_sync
+
+    sync_mode = str(dest_summary.get("sync_mode") or dest_summary.get("effective_sync_mode") or "")
+    before = dest_summary.get(PRECOUNT_KEY)
+    check = infile_dedupe_check(
+        dest_summary,
+        db_type=str(ctx.get("engine") or ""),
+        cfg=ctx.get("cfg") or {},
+        schema=str(ctx.get("schema") or ""),
+        table_name=str(ctx.get("table_name") or ""),
+        whole_table=is_overwrite_sync(sync_mode) or (isinstance(before, int) and before == 0),
+        sql_dialect=_unique_check_dialect(str(ctx.get("engine") or "")),
+    )
+    apply_infile_dedupe_check(stamped, check)
+
+
 def _dedupe_winner_ordering_check(
     entry: dict[str, Any],
     step_no: Any,
@@ -6922,6 +6988,7 @@ def _run_reconciliation_impl(
     keyset_stamp_ctx: dict[str, Any] = {}
     scd2_stamp_ctx: dict[str, Any] = {}
     dedupe_stamp_ctx: dict[str, Any] = {}
+    infile_dedupe_ctx: dict[str, Any] = {}  # D402: a requested dedupe_key / keep_last
     # G21/G22 — filled after source/dest engines resolve. Early file-export
     # returns still see mappings so a declared control total cannot skip silently.
     n5_ctx: dict[str, Any] = {
@@ -7162,6 +7229,8 @@ def _run_reconciliation_impl(
                     f"Dedupe winners unverified: check error {exc}"
                     + (f" — {_prior}" if _prior else "")
                 )
+        if infile_dedupe_ctx:
+            _apply_infile_dedupe_gate(stamped, infile_dedupe_ctx, dest_summary)
         # Property 5 — attach L1–L5 ladder when both populations are available.
         try:
             stamped = _maybe_attach_verification_ladder(
@@ -7386,6 +7455,10 @@ def _run_reconciliation_impl(
         stored_object = export_object_proof(dest_summary, payload)
         if stored_object is not None:
             payload["export_object"] = stored_object
+        from services.dedupe_postwrite import apply_infile_dedupe_check, artifact_dedupe_check
+
+        # D402: the requested dedupe is checked on the file read back too.
+        apply_infile_dedupe_check(payload, artifact_dedupe_check(dest_summary, fmt=str(endpoint.format or "")))
         return _finalize(payload)
 
     from .connector_capabilities import resolve_driver_type
@@ -7434,6 +7507,8 @@ def _run_reconciliation_impl(
             ),
         )
 
+    if isinstance(dest_summary, dict) and dest_summary.get("dedupe_key_targets"):
+        infile_dedupe_ctx.update(cfg=cfg, schema=schema, table_name=table_name, engine=db_type)
     if isinstance(dest_summary, dict) and dest_summary.get("shape_dedupe"):
         dedupe_stamp_ctx.update(
             cfg=cfg,
@@ -9767,6 +9842,20 @@ def run_reconciliation(
         mappings=mappings, dest_summary=dest_summary,
         records=records if isinstance(records, list) else None,
         rows_written=int(rows_written or 0), validation_mode=validation_mode,
+    )
+    from services.oracle_empty_not_null import explain_empty_as_null
+
+    recon = explain_empty_as_null(
+        recon, endpoint=endpoint, mappings=mappings, dest_summary=dest_summary,
+        records=records if isinstance(records, list) else None,
+        rows_written=int(rows_written or 0), validation_mode=validation_mode,
+    )
+    # D335: the watermark row appended twice fails, whatever the counts say.
+    from .stream_boundary_keyed import apply_boundary_duplicate_gate
+
+    recon = apply_boundary_duplicate_gate(
+        recon, dest_summary=dest_summary, endpoint=endpoint, mappings=mappings,
+        validation_mode=str(validation_mode or "strict"),
     )
     if isinstance(dest_summary, dict) and dest_summary.get("shape_recipe_hash"):
         # G-1: on a shaped run both digests derive from the same stream — a

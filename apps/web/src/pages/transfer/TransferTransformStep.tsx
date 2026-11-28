@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { StepBackButton, StepFooterReason, StepPrimaryButton } from "../../components/transfer/StudioStepFooter";
 import { nullWireLabel } from "../../lib/nullWire";
 import { DtIcon } from "../../components/DtIcon";
 import { TransformColumnCatalog } from "../../components/transfer/TransformColumnCatalog";
@@ -487,7 +488,28 @@ export function TransferTransformStep({
     : sourceColumnsBeside(columnsBefore, resultColumns, steps);
   const resultRefused = Boolean(shownPreviewError || preview?.refusal);
 
+  const footer = (
+    <div className={canvasEnabled ? "df2-xform-actions" : "df2-card-footer df2-wizard-footer df2-step-footer"}>
+      <StepBackButton label={canvasEnabled ? "Back to Destination" : "Back"} narrowLabel={canvasEnabled ? "Back" : undefined} onClick={onBack} />
+      <div className="df2-btn-row">
+        {!continueState.enabled && continueState.reason ? (
+          <StepFooterReason>{continueState.reason}</StepFooterReason>
+        ) : null}
+        {!canvasEnabled && pane === "prepare" && hasEnabledRecipe ? (
+          <StepPrimaryButton arrow={false} onClick={() => setPane("result")}>
+            Review result
+          </StepPrimaryButton>
+        ) : (
+          <StepPrimaryButton disabled={!continueState.enabled} onClick={onContinue}>
+            {continueState.label}
+          </StepPrimaryButton>
+        )}
+      </div>
+    </div>
+  );
+
   return (
+    <>
     <section className={canvasEnabled ? "df2-xform df2-studio-next" : "df2-xform"} aria-labelledby="xform-title">
       <StudioFlagBanner
         error={studioFlagsError}
@@ -507,8 +529,8 @@ export function TransferTransformStep({
           </div>
           <div className="df2-xform-head-side">
             {preview?.recipe.recipe_hash ? (
-              <span className="df2-xform-identity" title="Pinned at approval and re-checked before Execute">
-                <DtIcon name="shield" size={14} />
+              <span className="df2-xform-identity" title="Pinned at approval and re-checked before Run">
+                <DtIcon name="lock" size={14} />
                 Transform ID {preview.recipe.recipe_hash}
               </span>
             ) : (
@@ -990,7 +1012,7 @@ export function TransferTransformStep({
             <div className="df2-xform-grids">
               <div className="df2-xform-gridpane">
                 <h4>Source, unchanged</h4>
-                <div className="df2-xform-scroll">
+                <div className="df2-xform-scroll" tabIndex={0} role="region" aria-label="Source sample rows">
                   <table className="df2-table df2-table-compact">
                     <thead>
                       <tr>{sourceResultColumns.map((column) => <th key={column}>{column}</th>)}</tr>
@@ -1018,7 +1040,7 @@ export function TransferTransformStep({
                           : "Nothing transformed yet. The source rows are on the left."}
                   </p>
                 ) : (
-                  <div className="df2-xform-scroll">
+                  <div className="df2-xform-scroll" tabIndex={0} role="region" aria-label="Transformed sample rows">
                     <table className="df2-table df2-table-compact">
                       <thead>
                         <tr>{resultColumns.map((column) => <th key={column}>{column}</th>)}</tr>
@@ -1151,30 +1173,10 @@ export function TransferTransformStep({
 
       </div>
 
-      <footer className="df2-xform-actions">
-        <button type="button" className="df2-btn df2-btn-ghost" onClick={onBack}>
-          {canvasEnabled ? "Back to Connect" : "Back to Destination"}
-        </button>
-        {!canvasEnabled && pane === "prepare" && hasEnabledRecipe ? (
-          <button
-            type="button"
-            className="df2-btn df2-btn-primary"
-            onClick={() => setPane("result")}
-          >
-            Review result
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="df2-btn df2-btn-primary"
-            disabled={!continueState.enabled}
-            title={continueState.reason}
-            onClick={onContinue}
-          >
-            {continueState.label}
-          </button>
-        )}
-      </footer>
+      {canvasEnabled ? footer : null}
     </section>
+    {/* Classic studio: the same page footer as every other step, not a bar inside the card. */}
+    {canvasEnabled ? null : footer}
+    </>
   );
 }

@@ -52,6 +52,8 @@ from services.type_system import (
     geography_contract_would_collapse,
     identity_domain_would_invent,
     char_count_into_oracle_bytes_would_truncate,
+    char_count_into_redshift_bytes_would_truncate,
+    mysql_small_blob_would_truncate,
     integer_decimal_digits_would_narrow,
     integer_width_would_narrow,
     interval_family_would_collapse,
@@ -160,13 +162,23 @@ def is_precision_collapse_coercion(
     """
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     target_type = _ts.weaviate_gate_type(target_type, dest_db)
-    from services.source_engine_semantics import create_new_source_type, engine_semantic_loss
+    from services.source_engine_semantics import (
+        create_new_source_type,
+        engine_semantic_loss,
+        instant_kept_label_lost,
+    )
 
     # C3: what the token means on the engine that declared it (unsigned
     # tinyint, Oracle DATE with time, MySQL TIMESTAMP instant, unbounded
     # numeric) — the bare token alone graded these pairs lossless.
     if engine_semantic_loss(source_type, target_type, dest_db=dest_db, population=population):
         return True
+    if instant_kept_label_lost(source_type, target_type, dest_db=dest_db):
+        # Finding 8: instant kept, offset label disclosed; fractional digits a
+        # value actually uses are still judged (D372).
+        from services.decision_kernel.type_invent import temporal_precision_would_narrow as _narrows
+
+        return bool(_narrows(source_type, target_type, dest_db=dest_db, population=population))
     source_type = create_new_source_type(source_type, dest_db)
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
@@ -619,8 +631,9 @@ def assess_create_new_type_risk(
                         if outside
                         else ". "
                     )
-                    + "Use DATETIME(6) with a UTC-normalize contract for the full "
-                    "1000..9999 range, or accept that out-of-range rows quarantine."
+                    + "Use DATETIME(6) for the full 1000..9999 range (the instant is "
+                    "stored as UTC digits in a zone-less column, disclosed at "
+                    "Validate), or accept that out-of-range rows quarantine."
                 ),
             })
     if uuid_would_collapse(src, tgt, dest_db=db):
@@ -864,13 +877,23 @@ def is_lossy_coercion(
             )
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     target_type = _ts.weaviate_gate_type(target_type, dest_db)
-    from services.source_engine_semantics import create_new_source_type, engine_semantic_loss
+    from services.source_engine_semantics import (
+        create_new_source_type,
+        engine_semantic_loss,
+        instant_kept_label_lost,
+    )
 
     # C3: what the token means on the engine that declared it (unsigned
     # tinyint, Oracle DATE with time, MySQL TIMESTAMP instant, unbounded
     # numeric) — the bare token alone graded these pairs lossless.
     if engine_semantic_loss(source_type, target_type, dest_db=dest_db, population=population):
         return True
+    if instant_kept_label_lost(source_type, target_type, dest_db=dest_db):
+        # Finding 8: instant kept, offset label disclosed; fractional digits a
+        # value actually uses are still judged (D372).
+        from services.decision_kernel.type_invent import temporal_precision_would_narrow as _narrows
+
+        return bool(_narrows(source_type, target_type, dest_db=dest_db, population=population))
     source_type = create_new_source_type(source_type, dest_db)
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
@@ -962,6 +985,15 @@ def is_lossy_coercion(
             return True
         if char_count_into_oracle_bytes_would_truncate(
             source_type, target_type, dest_db=dest_db
+        ):
+            return True
+        # Accuracy review 8: byte-counted Redshift VARCHAR, MySQL BLOB caps, utf8mb3.
+        if (
+            char_count_into_redshift_bytes_would_truncate(source_type, target_type, dest_db=dest_db)
+            or mysql_small_blob_would_truncate(source_type, target_type, dest_db=dest_db)
+            or mysql_utf8mb3_drops_supplementary(
+                source_type, target_type, dest_db=dest_db, population=population
+            )
         ):
             return True
         if oracle_long_numeric_invent(source_type, target_type):
@@ -1175,6 +1207,15 @@ def is_lossy_coercion(
         source_type, target_type, dest_db=dest_db
     ):
         return True
+    # Accuracy review 8: byte-counted Redshift VARCHAR, MySQL BLOB caps, utf8mb3.
+    if (
+        char_count_into_redshift_bytes_would_truncate(source_type, target_type, dest_db=dest_db)
+        or mysql_small_blob_would_truncate(source_type, target_type, dest_db=dest_db)
+        or mysql_utf8mb3_drops_supplementary(
+            source_type, target_type, dest_db=dest_db, population=population
+        )
+    ):
+        return True
     if integer_decimal_digits_would_narrow(source_type, target_type):
         return True
     if oracle_long_numeric_invent(source_type, target_type):
@@ -1340,4 +1381,31 @@ def is_lossy_coercion(
         dest_table_exists=dest_table_exists,
     ):
         return False
+    return True
+
+
+def mysql_utf8mb3_drops_supplementary(
+    source_type: str, target_type: str, *, dest_db: str = "", population: Any = None
+) -> bool:
+    """True when a Unicode string lands on a MySQL ``utf8mb3`` (``utf8``) column.
+
+    utf8mb3 holds the Basic Multilingual Plane only, at most 3 bytes per
+    character; a supplementary character (most emoji, some CJK) cannot be
+    stored (accuracy review 8). Measured values without one are clean.
+    """
+    import re as _re
+
+    if _normalize_dest_db(dest_db) not in {"mysql", "mariadb"}:
+        return False
+    tgt = " ".join((target_type or "").upper().split())
+    if not _re.search(r"(CHARACTER\s+SET|CHARSET)\s+(UTF8MB3|UTF8)\b", tgt):
+        return False
+    if normalize_logical_type(source_type) not in {"string", "text"}:
+        return False
+    if _re.search(r"UTF8MB3|UTF8\b", " ".join((source_type or "").upper().split())):
+        return False
+    if population is not None:
+        values = [v for v in population if isinstance(v, str)]
+        if values and not any(_re.search("[\U00010000-\U0010FFFF]", v) for v in values):
+            return False
     return True

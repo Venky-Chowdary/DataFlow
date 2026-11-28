@@ -1,0 +1,48 @@
+{
+  "about": [
+    "Floors for the CI throughput smoke (benchmarks/throughput_smoke.py, ci.yml job throughput-smoke,",
+    "report-only: not in the Required PR gate until it has 5 consecutive green runs).",
+    "The PR job runs pg-pg-pr (PG->PG binary COPY incl. the jsonb carry, 20k rows, load method checked), pg-pg-row and pg-mysql; the dispatch workflow's check_floors step checks every other floor (pg-pg, mysql-pg) on the full matrix.",
+    "Each entry runs benchmarks/db_throughput.py and fails below min_rows_per_second. rows/s is over",
+    "the whole engine call, Gate-8 included; at or below 250k rows the in-memory verification ladder",
+    "runs too, so it is lower than a 1M run on the same route.",
+    "Floors are set against a machine whose calibrate() takes reference_calibration_seconds (the",
+    "local 4-vCPU box, 2026-11-21: 0.39 s). On a slower runner the smoke scales a floor down by",
+    "reference / measured, never up and never below MIN_SCALE (0.75) of it: two hosted-runner jobs on",
+    "the same code ran 2x apart (runs 44923502709, 44936017037).",
+    "The code before the per-column fast paths ran 236-271 rows/s on the row path locally (100k rows,",
+    "70cb4669c). Every row-path floor at 0.75 scale stays above 290 rows/s, so losing the fast paths",
+    "trips the gate on any runner. Local clean rates after: pg-pg row path 524, pg-mysql (MariaDB) 446",
+    "(MySQL 8 in CI: 469-953), mysql-pg 550, pg-pg copy 1768. Raise a floor only with CI artifacts."
+  ],
+  "routes": {
+    "pg-pg-pr": {
+      "route": "pg-pg",
+      "row_path": false,
+      "rows": 20000,
+      "min_rows_per_second": 600,
+      "expect_load_method": "copy_binary"
+    },
+    "pg-pg": {
+      "route": "pg-pg",
+      "row_path": false,
+      "min_rows_per_second": 1600
+    },
+    "pg-pg-row": {
+      "route": "pg-pg",
+      "row_path": true,
+      "min_rows_per_second": 400
+    },
+    "pg-mysql": {
+      "route": "pg-mysql",
+      "row_path": false,
+      "min_rows_per_second": 420
+    },
+    "mysql-pg": {
+      "route": "mysql-pg",
+      "row_path": false,
+      "min_rows_per_second": 420
+    }
+  },
+  "reference_calibration_seconds": 0.39
+}

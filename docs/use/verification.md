@@ -51,6 +51,104 @@ truncation, nulls), what the writer must do, the quarantine and rollback
 posture, and who approved it, when and why. The default policy when a risk is
 not approved is to fail the job, never to continue silently.
 
+Only the server signs a contract: the signature is keyed with the
+deployment's signing key, so a contract written or edited by a client (for
+example one naming someone else as the approver) is refused wherever it is
+read: Validate, Execute, a schedule run and the proof pack. With a signed-in
+user, the contract names that user as the approver, whatever the request
+says. Each signing writes an audit event (who, workspace, column, table,
+kind, reason and the signature; no data values). Contracts approved before
+this release no longer count and must be re-approved: each one is listed in
+the start log, at `GET /api/v1/ops/risk-contract-upgrade-report` and as a
+`risk_contract_reapprove` warning in Validate (see
+[backup and upgrade](../operate/backup-and-upgrade.md)).
+
+**Oracle and empty strings.** Oracle stores `''` as NULL, so an empty string
+cannot go into a `NOT NULL` column (`ORA-01400`). When the destination is
+Oracle, Validate counts the empty strings in each source text column that will
+be `NOT NULL` there, the same way in Studio, over the API, in Pilot and at
+Execute. A SQL source counts them itself; otherwise Validate reads the rows the
+run will read (with its filter, incremental window and transform). If there
+are none, nothing is shown. If there are some, the run is blocked and the gate
+names the column and the count. If Validate could not count them exactly (only
+a preview could be read, the scan stopped, the time ran out, or the source or
+its catalog could not be read), the column is blocked too, and the gate says
+why empty strings could not be ruled out.
+
+A column whose type cannot hold `''` is ruled out from the source catalog,
+without reading a row, however large the table: numbers, dates and times,
+booleans and uuids; on PostgreSQL also an enum whose labels do not include
+`''`, `json`/`jsonb` (read as JSON text), arrays and `inet`/`cidr`/`macaddr`;
+on MySQL also `JSON`. A type that can hold `''` is always checked: text and
+char types, an enum with a `''` label, `tsvector`, `xml`, a MySQL `ENUM` or
+`SET`, MariaDB's `JSON` (a text column), and every SQLite column (SQLite's
+declared types do not restrict what is stored).
+
+Validate's check has 60 seconds in total. The columns you asked to check now
+go first, then the columns the preview already shows empty, then the rest,
+each with an equal share of the time left (what one column does not use goes
+to the next), so one slow column does not use up the others' time. A column
+the time does not reach is blocked with the reason and the actions below.
+
+Every block lists what you can do:
+
+- **Map `default:<value>`** on the column: empty and blank values are written
+  as `<value>`, everything else is unchanged; Validate then needs no read. A
+  mapping applies one transform, so this is not offered on a column that
+  already maps another transform (it would stop that transform). Change the
+  transform in Map first.
+- **Check this column now** (`risk_acceptance: {"option":
+  "oracle_empty_check_now", "columns": [...]}`): a longer read, within a total
+  of 5 minutes for the check, the asked columns first. Datawrap issues the
+  request itself, signed and bound to the column pair, the destination
+  (connector, schema and table), the workspace and your signed-in user; it
+  lasts at most an hour from when it was issued. A request written by hand
+  (or edited) in the API body is ignored. A column can be checked this way
+  once every 10 minutes per destination table, unless the last check ran out
+  of time; until then the gate says when it can be asked again. Not offered when the source catalog cannot be read: fix the
+  connection. On BigQuery, Snowflake, Databricks, ClickHouse and Trino this
+  is the only way Validate reads the column, because the warehouse bills the
+  scan. There, the result is reused for 24 hours so a schedule does not pay
+  for the scan again, and the gate says so (status "warn"): the column was
+  checked at `<time>`, the result is being reused until `<time>`, and how to
+  check again now.
+- **Replace the empty values in the source**, then validate again.
+
+In Studio these are listed under "Oracle empty strings" on the Validate
+screen. Map `default:<value>` asks for the value; Create NULL-able asks for
+a reason and is signed by the server in your name; Check now and Check again
+are issued by the server; Fix the connection opens Connectors. Each then runs
+Validate again. Replacing the source's values is something only you can do,
+so it is listed as text, not as a button. Over MCP, Pilot and the API, send
+the same `risk_acceptance`.
+
+A found empty string is not forgotten: when a later, shorter check stops
+before the row where an earlier check found it (within 24 hours, same
+source, scope and mapping), the column stays blocked with that finding, the
+gate says when it was checked, and Check again reads it afresh.
+
+Execute checks again unless it is confirming the Validate you approved (same
+workspace, destination, source and mapping, within an hour). An empty string
+that reaches the source after the last check is refused by Oracle at write
+time: that batch fails, and nothing is written as a different value.
+
+And, per table:
+
+- **New table:** one option, "Create `<col>` as NULL-able; empty strings land
+  as NULL". Approving it signs a risk contract (over MCP:
+  `risk_acceptance: {"option": "oracle_empty_as_null", "columns": [...],
+  "approved_by": ..., "reason": ...}`). Only that column loses `NOT NULL`. After
+  the write, Gate-8 lists the rows this run wrote under `explained_changes`
+  with the contract's id, and the proof pack lists the contract. When the
+  run's rows cannot be named (an append without a key list), Gate-8 reports
+  "NULL cells in this column: N (table-wide)" and does not call them
+  explained. A contract applies only to the column pair, the workspace, and the
+  destination connector, schema and table it was signed for.
+- **Existing table:** Datawrap never alters the column; use one of the
+  actions above, then validate again.
+- **Key column** (the run's key, or the destination's or source's primary
+  key): cannot be made NULL-able; use one of the actions above.
+
 When a route's mapping confidence is below the mode's floor, review the
 mapping in the Map step and run Validate again. Nothing is written until that
 gate passes.
@@ -58,7 +156,58 @@ gate passes.
 ### Dropping fields on purpose
 
 A source column must be mapped or declared omitted; otherwise the run is
-refused. The field reduction ledger goes further and records why each dropped
+refused. That holds when the destination table already exists and lacks the
+column, in every sync mode: the column is added when the schema policy approves
+it (propagate columns, or backfill new fields) or the drift is acknowledged for
+the run, and otherwise the run stops before the first write and names the
+column. Under manual review the run never adds a column on its own to a table
+that existed before the run, including a field a document source first shows
+partway through the run: the run stops before that batch. A table the run
+created is the run's own: a field first seen later is added to it and reported
+as "added during the run" in the job summary and the Trust Report. A field you
+declared omitted is never written, even if it first appears late.
+
+In a job that moves several tables, each table is checked with the map it
+writes with, at Validate and before it is written, and the reports name each
+left-out column as `table.column`. A quarantine replay is checked the same way.
+
+### Resuming with a decision
+
+When a run stops on a field, the message ends with: "Nothing of that batch was
+written; the batches before it are committed. Resume the job with schema_policy
+set to propagate_columns (or backfill_new_fields true) to add the field, or with
+the field in omit_columns to leave it out, and a reason; the resume continues
+from that batch."
+
+That is `POST /api/v1/connectors/jobs/{job_id}/resume` with a body such as
+`{"schema_policy": "propagate_columns", "reason": "doc is a new product field"}`
+or `{"omit_columns": ["doc"], "reason": "not needed downstream"}`. It needs the
+job.manage permission (the one that approves destination changes). Who decided,
+the reason and the decision are recorded on the job (`resume_decision`) and in
+the audit log. `/rerun` takes the same decision as `schema_decision`.
+`omit_columns` may name only the columns the stop named (the job's
+`error_details.unaccounted_sources`); any other column is refused with 422,
+because leaving out a column the job already writes would write the remaining
+rows without its values. `/retry` runs the job as it was and refuses a
+`schema_decision` with 422. A field met mid-run is added without a decision
+only to a table this run created; a table whose existence could not be read
+before the run counts as existing, so the run stops. In a multi-table job,
+every SCD2, mirror and CDC table is judged with its own column map before the
+first table is written.
+A field flattened out of a document (for example `nested_city` from `nested`)
+counts as carried when its parent object is written whole, and the reports say
+"carried inside nested"; if the parent is transformed or not written, the field
+needs its own decision. A run started without Validate
+(quarantine replay, the SDK) gets the same check at Execute. In a job that moves
+several tables, a table with more columns than the first is written with its
+own columns.
+
+A run that leaves a column out says so. Gate-8 compares the columns the run
+wrote, so its message, the trust score's completeness note and the Trust
+Report's confidence statement name each source column that was not migrated
+and why (declared omitted, or left out under an acknowledged schema drift).
+
+The field reduction ledger goes further and records why each dropped
 field was dropped:
 
 - every source field gets one disposition: carried, folded into a target, or
@@ -116,11 +265,206 @@ strongest form is a five-layer ladder:
   digest covers rows this job never wrote. That difference is classified as a
   matter of scope, not reported as corruption.
 
+### Verification after the write (experimental)
+
+Behind `DATAWRAP_PARITY_SCALE=1`, a completed job whose table Gate-8 could
+not compare in full (above the ladder limit) is verified after the write by
+comparing every row inside both databases (see
+[Parity at Scale](../reference/parity-canonical-encoding.md)).
+
+- It runs only when the run read the whole table: a run that read an
+  incremental window, a query or procedure, a limited number of rows, or
+  rows its filter or recipe dropped or diverted is not compared as a whole
+  table, and the report says why. Gate-8's own record then decides.
+- It is its own state. While it runs the Trust Report reads
+  **Verification running**; the job's write status is not changed, and
+  sign-off and the "proven" verdict wait until it finishes. A verification
+  whose worker stopped (a restart, a lost replica) does not stay "running":
+  it reads as stopped, is resumed from its checkpoint when the app starts or
+  on its next sweep, and **Re-verify** takes it over.
+- The comparison inside the database runs on PostgreSQL 14 or later (it
+  needs exact `numeric` results from `extract(epoch …)`). On an older
+  server the table reads **Not verified at full scale**, with the server's
+  version, and Gate-8's own result stands.
+- **Proven** needs each side read from one snapshot for the whole comparison:
+  PostgreSQL (one repeatable-read transaction) and MySQL / MariaDB on InnoDB
+  (a consistent-snapshot transaction). Otherwise (SQL Server today, a
+  resumed comparison, another storage engine) a clean result reads
+  **no difference found**: the tables matched at scan time, but writes during
+  the scan were not ruled out. An engine pair not certified for every column
+  type reads the same way. Only a proven result becomes a full population
+  proof in the signed proof pack, and only where Gate-8 itself passed with
+  no fidelity veto.
+- **What a held snapshot costs.** The setting "Consistent snapshot during
+  verification" keeps one read-only transaction open on each database for
+  the whole comparison, for at most "Longest snapshot hold". The
+  deployment-wide setting (on, 30 minutes) is a platform admin's, under
+  Settings, General, and it is a ceiling: off there is off for every
+  workspace and schedule. Where it is on, each workspace can turn it off or
+  on for its own runs and set a shorter hold (Settings, workspace enterprise
+  settings), and a schedule can do the same. The hold used is the shortest
+  one set. On MySQL / MariaDB the scan's login must be able to see other
+  sessions (the PROCESS privilege — SUPER alone is not enough — or on
+  MySQL 8 a readable `performance_schema` with the metadata-lock
+  instrument on). This is probed from the watching connection before the
+  snapshot is held; if it cannot be proven, nothing is pinned and the
+  result says why. While it is open:
+  - PostgreSQL cannot vacuum rows deleted or updated after the snapshot (the
+    xmin horizon is held back), so tables with heavy writes grow until it
+    ends;
+  - MySQL / MariaDB InnoDB keeps undo history for the snapshot, so the undo
+    log grows on a busy server;
+  - on a PostgreSQL hot standby, replication can cancel a long snapshot
+    (a recovery conflict), so a standby is never pinned;
+  - the snapshot holds a lock on the table it has read: PostgreSQL an
+    `AccessShareLock`, MySQL / MariaDB a shared metadata lock. A `TRUNCATE`,
+    a table swap or rename, or DDL needs an exclusive lock and would wait
+    for the snapshot (and everything queued behind it would wait too). So a
+    second connection watches for any session waiting on those locks
+    (`pg_blocking_pids`; MySQL `performance_schema.metadata_locks`, or on
+    MariaDB the process list's "Waiting for table metadata lock"), about
+    once a second, and the comparison lets its snapshot go as soon as one
+    waits: the waiting statement proceeds within about a second, the
+    comparison continues statement by statement, and the result reads
+    **no difference found** with "released the snapshot so session … could
+    proceed". Where no second connection can watch, nothing is pinned.
+  Past the longest hold the comparison lets the snapshot go and continues
+  statement by statement; a server whose `idle_in_transaction_session_timeout`
+  (or `transaction_timeout`) is shorter than the hold is not pinned at all.
+  Either way the result reads **no difference found**, with the reason. The
+  Trust Report shows, per table, whether each side was read from one snapshot
+  and for how long. The two snapshots (source and destination) are taken a
+  few milliseconds apart; the report states the gap.
+- What Gate-8 explained stays explained: quarantined rows, rows skipped by
+  the duplicate policy and rows that were in the destination before an
+  append are not turned into differences. A missing row is explained by
+  quarantine only when its key is one the run recorded as quarantined; a
+  missing row whose key the run did not record stays unexplained (the held
+  row may be one the destination still has). Only missing rows beyond the
+  keys the report keeps are matched to held rows by count, and the report
+  says so.
+- A text key is read in key ranges only when it orders the same way on
+  both databases: a binary collation on both sides (PostgreSQL `C`,
+  `POSIX`, `ucs_basic`, `pg_c_utf8`; MySQL `binary` or `utf8mb4_0900_bin`;
+  MariaDB `utf8mb4_nopad_bin`), read from each catalog. Otherwise the table
+  is compared by hash buckets, and its streamed columns (transformed,
+  crosswalked, floats across engines, JSON) are read in one pass. On MySQL /
+  MariaDB that one read is a single statement limited to the stream timeout
+  (30 minutes), so a table too large to stream within it is reported as not
+  fully compared, with that reason; the Trust Report's coverage says how the
+  pass was read.
+- Rows whose key is NULL fall in no key range: they are compared as whole
+  rows (content), reported as "rows without key", and never attributed to a
+  key. Before any match, each side's units must add up to its row count;
+  if they do not, the table is not fully compared and the report says why.
+- A table with no key is compared as content: the check reads
+  **Content match (no key)**, and a difference cannot be attributed to a key.
+- A verification that found differences makes the report **unexplained** and
+  names the rows.
+- On a schedule, the watermark moves only after verification passed (and
+  only forward), and the next run waits while it runs (set
+  `wait_for_verification` to false on the schedule to not wait).
+
+The Trust Report's difference explorer shows, per verified table, each
+column's differing rows (Columns), the missing, extra, duplicate and changed
+keys (Keys), and the differing values read again from both sides (Values).
+Protected columns never show a value, and their values are never stored with
+the verification. **Re-verify this table** compares every row again.
+**Copy repair SQL** shows statements that make the destination match the
+source for the named keys, with the run's transforms applied; it leaves out
+quarantined rows, rows outside the run and protected columns, and says so.
+Each UPDATE and DELETE carries the destination row's values as read when
+the statements were generated, so a row changed since is left alone; an
+extra row is deleted only if the source still does not hold its key when
+the statements are generated. A changed column of a type with no exact
+equality (floats, JSON, XML, geometric, time-zone timestamps) is not set
+by an UPDATE, since a newer value could not be detected: it is listed for
+review by hand with its keys. MySQL / MariaDB string literals that hold a
+quote or backslash are written in hex, so they mean the same with or
+without `NO_BACKSLASH_ESCAPES`. Datawrap never runs them.
+
+Tested end to end on PostgreSQL to PostgreSQL. Other engine pairs use the same
+comparison but are not yet tested end to end in this mode.
+
 ### What a passing checksum does not prove
 
 - It does not prove referential integrity between tables.
 - It does not prove the source was right.
 - It does not prove anything about rows written to the source after the read.
+- It does not prove the mapping means the right thing. `first_name → last_name`
+  copies perfectly and verifies perfectly. The Mapping Witness below checks that.
+
+## Mapping Witness (before the write)
+
+On the Map step, Datawrap checks each mapped pair against a bounded sample of
+the data (at most 500 rows) and flags pairs to review:
+
+- **Destination already holds the rows** (an existing table, read by key): a
+  pair whose values sit in another column is flagged as a likely swap or wrong
+  target. A pair that matches only after ×100 is flagged as a unit mismatch.
+  Dates that match only when read in the order the run does not use are
+  flagged as a format mismatch. The read names its columns and joins on the
+  destination's key; a warehouse (BigQuery, Snowflake, …) is read only when you
+  choose Check mapping.
+- **Before load** (new table, or no key to join on): the values are checked
+  against what the destination column promises. Examples: user names headed
+  for an `email` column, fractional amounts headed for a `*_cents` column,
+  surnames headed for `first_name` while given names go to `last_name`.
+
+A flag is evidence with a reason; the witness never changes a mapping, and it
+prefers silence to a wrong flag. "Witnessed" needs agreement beyond chance and
+no other column that matches better. A column with one distinct value proves
+nothing ("Consistent"). A pair the mapping transforms (mask, hash, an
+expression) is "Not comparable". A destination column that was not read (not
+in the table yet, a name the sampler cannot address as written, or past the
+columns one check reads) is "Not read". A pair it cannot judge says "No
+evidence", not "passed". Results carry column names and counts, never values.
+
+When a job is submitted, the evidence for exactly the mapping and destination
+it runs is frozen onto the job. The Trust Report and the AI decisions ledger
+read only that copy.
+
+A job takes evidence only from the Map session it was submitted from, for its
+own source and destination, at most a day old; the Trust Report says who ran
+the check and when. A flag counts as kept only when someone chose Keep this
+mapping on it; continuing past it is recorded as not reviewed. A Keep stays
+with its flag when the same inputs are checked again, and only then: a flag
+that points at another column, gives another reason or other counts, or comes
+from an edited source (same file name and row count, other contents) is a new
+flag and shows again. A file or object is named by its whole path, letter case
+included; a table or query by its text, where spacing and keyword case fold
+outside quotes and a name's case folds only on engines that fold unquoted names
+(PostgreSQL, Redshift, Oracle, Snowflake, SQL Server, SQLite). Map approvals and
+changed flags count only for the source they were given on: switching the
+file or table in one session starts them over. The session is only a key:
+the people named are the ones who checked, approved and ran.
+
+Evidence of a session still open is never pruned to make room for other
+checks; older evidence goes first. If a workspace's hard limit ever removes
+it, the job says "Evidence expired", not that no check matched. Editing the
+pairs in an open session replaces that session's earlier check of the same
+source and destination, unless a job was already submitted with it. A check
+that ran past its time limit is not recorded; if it was recorded just before
+the limit, you get its result rather than a time-out.
+
+Measured on a synthetic benchmark written for the witness (120 rows per table,
+at least 30 distinct values per column, the destination holding the same rows
+with trailing spaces, other letter case, other number spellings, other time
+zones and a few stale rows): no false flags on the correct mappings, and 20 of
+20 injected swaps flagged on both sides. These are the CI floors.
+
+The held-out mapping benchmark (206 matchable columns, 23 tables) gives no
+usable witness figures: 203 of its 231 columns carry a single sample value,
+and the destination there is an exact copy, so a pair can only come out
+"consistent". Its false-flag count (0) and swap recall (19 of 399) are
+reported, not claimed. Command:
+`python apps/api/scripts/witness_holdout_eval.py <benchmark>`.
+
+Until that held-out file (`tests/fixtures/mapping_holdout_v1.json`) is on the
+branch, CI runs the held-out gate with a synthetic stand-in
+(`tests/fixtures/witness/holdout_minimal_synthetic.json`) and the job summary
+says "witness held-out: synthetic fixture — real held-out set not yet on this
+branch". Once the real file is present the script uses it on its own.
 
 ## Coverage: which comparison ran
 
@@ -130,6 +474,8 @@ Each table in a result carries the kind of check that ran.
 |---|---|---|
 | `full_checksum` | Every row compared by checksum | Proof for the rows compared |
 | `key_diff` | Every row compared by key | Proof for the rows compared |
+| `segment_diff` | Every row compared inside both databases, by key (verification after the write) | Proof for the rows compared, on a certified engine pair |
+| `multiset_digest` | Every row compared as content, for a table with no key ("Content match (no key)") | Proof the contents match; a difference cannot be attributed to a key |
 | `sampled` | Values compared on a sample of rows | An estimate with a stated bound, when the sample was a random draw. Nothing, about rows outside it, when it was not. |
 | `readback` | Mirror or SCD2: a digest of every live destination row, re-read after the write, compared with the digest of the rows the run read from the source | Values of every live row were compared, but the source side is the run's own read, not an independent re-read, and a digest names no row. Not proof. |
 | `count_only` | Only row counts compared | Says nothing about values |
@@ -197,6 +543,18 @@ Two engine facts that often cause explained differences:
   doubles. PostgreSQL `jsonb` and MariaDB `JSON` keep the digits. Validate
   refuses a number the destination cannot store with the same value, so the
   failure appears before the write, not after.
+
+- **Oracle zone columns.** Instants are written as UTC digits on a session
+  pinned to UTC. The `WITH TIME ZONE` column then holds `+00:00`, not the
+  source's offset; only a server-side Oracle-to-Oracle copy keeps the offset.
+  Validate reports this as a loss it accepts on your behalf, not as a
+  difference. Rows written by a release before the pin may hold shifted
+  instants. Validate names such a table in one line, and a full re-run with
+  overwrite corrects it; see
+  [Backup and upgrade](../operate/backup-and-upgrade.md).
+- **MySQL and MariaDB `DATETIME`.** An instant is stored as UTC digits in a
+  column with no zone. Validate says so for that column; it is not a
+  difference.
 
 ## Evidence you can export
 

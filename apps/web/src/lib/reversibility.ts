@@ -129,7 +129,7 @@ export function columnPillPresentation(col: Pick<ColumnInvertibility, "invertibi
   // The gate's rule: an enforced column passes unless a value was already seen to change, even when its
   // sample held no value to check (not_checked) - every row is checked as it is written (review 4).
   if (status !== "does_not_fit" && col.check?.enforcement === "while_writing") return { label: "Enforced while writing", tone: "ok" };
-  if (status !== "does_not_fit" && col.check?.enforcement === "at_execute") return { label: "Enforced at Execute", tone: "ok" };
+  if (status !== "does_not_fit" && col.check?.enforcement === "at_execute") return { label: "Enforced at Run", tone: "ok" };
   if (status !== "does_not_fit" && col.check?.enforcement === "unavailable") return { label: "Cannot be enforced", tone: "warn" };
   if (status === "fits") return { label: "Fits sample only", tone: "warn" };
   if (status === "does_not_fit") return { label: "Does not fit", tone: "danger" };
@@ -233,7 +233,7 @@ export function checkText(check: ColumnCheck | null | undefined): string {
     return `Fits the sample (${plural(check.rows_checked, "observed row")}); enforced while writing: every row is checked and the run stops on the first value that would change.`;
   }
   if (check.status === "fits" && check.enforcement === "at_execute") {
-    return `Checked on the sample (${plural(check.rows_checked, "observed row")}); enforced on every row at Execute.`;
+    return `Checked on the sample (${plural(check.rows_checked, "observed row")}); enforced on every row at Run.`;
   }
   if (check.status === "fits" && check.enforcement === "unavailable") {
     return `Fits the sample (${plural(check.rows_checked, "observed row")}), but it cannot be enforced while writing on a mapping this stream inherits: declare the stream's own mappings.`;
@@ -263,17 +263,17 @@ export function dataCheckedText(data: ReversibilityReport["data_checked"] | null
     return `Conditional columns were checked against all ${plural(population, "row")} of the table (${where} holds every row).`;
   }
   const of = typeof population === "number" && population > 0 ? ` of ${population.toLocaleString("en-US")}` : "";
-  return `Conditional columns were checked against ${plural(rows, "observed row")}${of} from ${where}. A sample never proves the full table: under Require reversibility a conditional column is checked on the sample here and enforced on every row while Execute writes.`;
+  return `Conditional columns were checked against ${plural(rows, "observed row")}${of} from ${where}. A sample never proves the full table: under Require reversibility a conditional column is checked on the sample here and enforced on every row while Run writes.`;
 }
 
-/** The gate line beside the switch: what Execute will do. */
+/** The gate line beside the switch: what Run will do. */
 export function gatePresentation(report: Pick<ReversibilityReport, "gate" | "require_reversibility">): { label: string; tone: ParityTone; detail: string } {
   const status = report.gate?.status;
   if (!report.require_reversibility || status === "skip") {
-    return { label: "Not required", tone: "muted", detail: "Turn on Require reversibility to block Execute until every table is reversible." };
+    return { label: "Not required", tone: "muted", detail: "Turn on Require reversibility to block Run until every table is reversible." };
   }
   if (status === "block") {
-    return { label: "Blocks Execute", tone: "danger", detail: report.gate.message || "The gate blocks this transfer until every table is reversible." };
+    return { label: "Blocks Run", tone: "danger", detail: report.gate.message || "The gate blocks this transfer until every table is reversible." };
   }
   if (status === "pass") {
     return { label: "Gate passes", tone: "ok", detail: report.gate?.message || "Every table is reversible, so the gate passes." };

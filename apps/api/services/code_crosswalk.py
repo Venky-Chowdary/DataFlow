@@ -113,7 +113,9 @@ def apply_code_crosswalk(
     is not a code. An unmapped non-empty value returns an error — never the
     original code. That is the write-path fail-closed counterpart of G20.
     """
-    if mapping is None:
+    if mapping is None or mapping.get("code_crosswalk") is None:
+        # Undeclared (``declared_crosswalk`` is None for it either way); this
+        # runs once per cell, so it skips that call's omit check.
         return value, None
     table = declared_crosswalk(mapping)
     if table is None:

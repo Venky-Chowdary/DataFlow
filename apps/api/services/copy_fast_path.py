@@ -47,6 +47,8 @@ import logging
 import os
 import re
 import tempfile
+import threading
+import time
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
@@ -743,8 +745,14 @@ def stream_between_cursors(
     producer: Callable[[str], None],
     consumer: Callable[[str], None],
     join_timeout: float = 120.0,
+    abort_producer: Callable[[], None] | None = None,
+    failure_wait: float = 15.0,
 ) -> str:
     """Move a COPY payload from ``producer`` to ``consumer`` through a path.
+
+    When the consumer fails, ``abort_producer`` (e.g. the source session's
+    thread-safe ``cancel``) stops a producer still waiting on its source, and
+    the whole wait for the producer is bounded by ``failure_wait`` seconds.
 
     The two engines never speak to each other: one writes a TSV/binary stream,
     the other reads it, and the only thing they share is a filesystem path.
@@ -787,20 +795,58 @@ def stream_between_cursors(
     # (ContextVars): it must run in the job's context (D168).
     pump = thread_in_context(_pump, name=f"{prefix}fifo")
     pump.start()
+    consumer_failed = False
     try:
         consumer(path)
     except BaseException:
-        # Opening a FIFO blocks until the other end appears: a producer that
-        # never got there would hold this join forever, so the failing path
-        # waits briefly and lets the real exception out.
-        pump.join(timeout=30)
+        consumer_failed = True
+        # The producer may be waiting on its source (a silent scan: inside
+        # the driver, polling nothing) — stop it there first.
+        if abort_producer is not None:
+            try:
+                abort_producer()
+            except Exception:  # noqa: BLE001 - the consumer's error is the outcome
+                logger.warning("stopping the COPY producer failed", exc_info=True)
+        # Opening a FIFO for writing blocks until a reader opens it. A consumer
+        # that failed before opening it (a cancel caught before the LOAD, a
+        # refused session) left the producer parked in open() for good: the
+        # joins ran out (30 s + 120 s) and the thread leaked. Open the read end
+        # ourselves and drop it: the producer's open() returns and its next
+        # write fails on the closed pipe, so it stops at once.
+        _release_fifo_writer(path, pump, budget=failure_wait)
         raise
     finally:
-        pump.join(timeout=join_timeout)
+        # A failed handoff waits only what _release_fifo_writer already spent.
+        pump.join(timeout=0 if consumer_failed else join_timeout)
+        if pump.is_alive():
+            logger.warning("COPY producer %s still running after the handoff ended", pump.name)
         _discard_stream_path(path, tmp)
     if failure:
         raise failure[0]
     return "fifo"
+
+
+def _release_fifo_writer(path: str, pump: threading.Thread, budget: float = 30.0) -> None:
+    """Let ``pump``, a writer on the FIFO at ``path`` with no reader, stop.
+
+    Opens the read end (non-blocking) and closes it again, repeatedly, while
+    the writer lives: a writer parked in ``open()`` returns, and its next
+    write fails with a broken pipe. Repeated because the writer may reach
+    ``open()`` only after a first release.
+    """
+    deadline = time.monotonic() + budget
+    while pump.is_alive() and time.monotonic() < deadline:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            logger.debug("copy stream reader release skipped", exc_info=True)
+            pump.join(timeout=max(0.0, deadline - time.monotonic()))
+            return
+        try:
+            pump.join(timeout=0.05)
+        finally:
+            os.close(fd)
+        pump.join(timeout=0.05)
 
 
 def _discard_stream_path(path: str, directory: str) -> None:
@@ -1428,6 +1474,119 @@ def pg_pg_copy_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+_PG_INT_RANK = {"smallint": 1, "integer": 2, "bigint": 3}
+_PG_VARCHAR_RE = re.compile(r"^character varying(?:\((\d+)\))?$")
+_PG_NUMERIC_RE = re.compile(r"^numeric(?:\((\d+),(\d+)\))?$")
+_PG_TEMPORAL_RE = re.compile(
+    r"^(timestamp|time)(?:\((\d)\))? (with|without) time zone$"
+)
+
+
+def pg_assignment_safe(source_type: str, live_type: str) -> bool:
+    """True when ``INSERT INTO live SELECT <source_type value>`` stores the same value.
+
+    Identical types, and only the widenings whose assignment cast cannot change
+    a value: int2 -> int4 -> int8; varchar(n) -> varchar(m >= n) / varchar /
+    text; numeric(p,s) -> numeric(p' >= p, s) / numeric; timestamp(p) /
+    time(p) -> the same with p' >= p (same zone kind). Everything else — json,
+    jsonb, arrays, domains, enums, char(n), text -> varchar, any scale change —
+    must match exactly (``format_type`` spelling).
+    """
+    src = str(source_type or "").strip().lower()
+    live = str(live_type or "").strip().lower()
+    if src == live:
+        return True
+    if src in _PG_INT_RANK and live in _PG_INT_RANK:
+        return _PG_INT_RANK[live] >= _PG_INT_RANK[src]
+    s_vc, l_vc = _PG_VARCHAR_RE.match(src), _PG_VARCHAR_RE.match(live)
+    if s_vc and (live == "text" or l_vc):
+        if live == "text" or l_vc.group(1) is None:
+            return True
+        return s_vc.group(1) is not None and int(l_vc.group(1)) >= int(s_vc.group(1))
+    s_num, l_num = _PG_NUMERIC_RE.match(src), _PG_NUMERIC_RE.match(live)
+    if s_num and l_num and s_num.group(1) is not None:
+        if l_num.group(1) is None:
+            return True
+        return int(l_num.group(2)) == int(s_num.group(2)) and int(l_num.group(1)) >= int(
+            s_num.group(1)
+        )
+    s_t, l_t = _PG_TEMPORAL_RE.match(src), _PG_TEMPORAL_RE.match(live)
+    if s_t and l_t and s_t.group(1) == l_t.group(1) and s_t.group(3) == l_t.group(3):
+        return int(l_t.group(2) or 6) >= int(s_t.group(2) or 6)
+    return False
+
+
+_PG_LOCK_SQL = {
+    "ROW EXCLUSIVE": "LOCK TABLE {}.{} IN ROW EXCLUSIVE MODE",
+    "ACCESS EXCLUSIVE": "LOCK TABLE {}.{} IN ACCESS EXCLUSIVE MODE",
+}
+
+
+def pg_lock_ordinary_table(
+    cur: Any, dest_schema: str, dest_table: str, mode: str = "ROW EXCLUSIVE"
+) -> None:
+    """``LOCK TABLE ... IN <mode> MODE`` (default ROW EXCLUSIVE) on an ordinary or
+    partitioned table. Both modes conflict with ``ALTER TABLE``.
+
+    Any other relation (foreign table, view, materialized view) cannot be
+    locked that way — and is not a target this copy path proves — so the
+    route declines to the row path instead of failing the job.
+    """
+    from psycopg2 import sql
+
+    from connectors.sql_identifiers import pg_regclass_literal
+
+    cur.execute(
+        "SELECT relkind FROM pg_class WHERE oid = to_regclass(%s)",
+        (pg_regclass_literal(dest_schema or "public", dest_table),),
+    )
+    row = cur.fetchone()
+    kind = str(row[0]) if row else ""
+    if kind not in {"r", "p"}:
+        raise FastPathUnavailable(
+            f"destination relation kind {kind or 'missing'!r} is not an ordinary table; "
+            "the row path writes it"
+        )
+    cur.execute(
+        sql.SQL(_PG_LOCK_SQL[mode]).format(
+            sql.Identifier(dest_schema or "public"), sql.Identifier(dest_table)
+        )
+    )
+
+
+def pg_lock_and_check_live_types(
+    cur: Any, dest_schema: str, dest_table: str, column_types: dict[str, str]
+) -> None:
+    """Inside the merge transaction: lock the destination, then decline on type drift.
+
+    The route's pre-flight probe runs on another connection; an ALTER (or a
+    concurrent create) between it and the merge would change what the merge's
+    INSERT ... SELECT casts into. ``ROW EXCLUSIVE`` (what the INSERT takes
+    anyway) is taken first so no ALTER can land between this check and the
+    merge. Column names match exactly — ``"Doc"`` and ``"doc"`` are two columns.
+    The merge is an INSERT ... SELECT from a staging table of the source's types,
+    so a live column only has to accept them unchanged (``pg_assignment_safe``).
+    """
+    from connectors.sql_identifiers import pg_regclass_literal
+
+    pg_lock_ordinary_table(cur, dest_schema, dest_table)
+    cur.execute(
+        "SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute "
+        "WHERE attrelid = to_regclass(%s) AND attnum > 0 AND NOT attisdropped",
+        (pg_regclass_literal(dest_schema or "public", dest_table),),
+    )
+    live = {str(name): str(typ) for name, typ in cur.fetchall()}
+    differs = [
+        col for col, typ in column_types.items()
+        if live.get(col) is None or (typ and not pg_assignment_safe(typ, live[col]))
+    ]
+    if differs:
+        raise FastPathUnavailable(
+            f"live destination column(s) {', '.join(differs)} are absent or typed "
+            "differently from the source at merge time; the row path casts per cell"
+        )
+
+
 def _pair_source_types(pairs: Any, types: dict[str, str]) -> dict[str, str]:
     """Target column -> the source's declared type, matched by case."""
     return {
@@ -1554,6 +1713,10 @@ def copy_between_postgres(
                 )
                 create = dst_cur.fetchone()[0] is None
                 if not create:
+                    # Under the same lock as the merge paths: no ALTER can land
+                    # between this check and the COPY (a foreign table or view
+                    # declines to the row path).
+                    pg_lock_ordinary_table(dst_cur, dest_schema, dest_table)
                     pg_decline_live_type_drift(
                         dst_cur,
                         f"{_quote(dest_schema or 'public')}.{_quote(dest_table)}",

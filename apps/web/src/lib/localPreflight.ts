@@ -59,13 +59,28 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
       details: scope ? { evidence_scope: scope } : undefined,
     });
   };
-  const skip = (id: string, message: string, scope?: Record<string, unknown>) => {
+  /**
+   * Every local skip says why in a structured field (re-review B), the same
+   * fields the API's gates carry: the check does not apply, needs the API
+   * (could not run in the browser), or runs after the transfer.
+   */
+  const skip = (
+    id: string,
+    message: string,
+    why: "not_applicable" | "needs_api" | "after_run",
+    scope?: Record<string, unknown>,
+  ) => {
+    const reason = why === "not_applicable"
+      ? { applicable: false }
+      : why === "needs_api"
+        ? { unmeasured: true, reason: "needs_api" }
+        : { rule_id: `${id}.post_write` };
     gates.push({
       id,
       status: "skip",
       message,
       duration_ms: 0,
-      details: scope ? { evidence_scope: scope } : undefined,
+      details: { ...reason, ...(scope ? { evidence_scope: scope } : {}) },
     });
   };
   const block = (id: string, message: string, scope?: Record<string, unknown>) => {
@@ -93,7 +108,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   }
 
   if (isFileExport) {
-    skip("g2_destination", "File export — no remote destination connection required.", {
+    skip("g2_destination", "File export — no remote destination connection required.", "not_applicable", {
       kind: "destination_connectivity", coverage: "n/a", note: "File export — no remote destination",
     });
   } else {
@@ -179,7 +194,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     // A local pass would invent the digest or the cast. The server owns this sample.
     skip(
       "g5_dry_run",
-      "Hash, IBAN, time, boolean, and the other server-only casts are computed by POST /shape/preview. This browser does not preview them.",
+      "Hash, IBAN, time, boolean, and the other server-only casts are computed by POST /shape/preview. This browser does not preview them.", "needs_api",
       { kind: "dry_run", coverage: "server", note: "POST /shape/preview" },
     );
   } else {
@@ -211,7 +226,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   }
 
   if (isFileExport) {
-    skip("g6_target_ddl", "No DDL for file export.", {
+    skip("g6_target_ddl", "No DDL for file export.", "not_applicable", {
       kind: "target_ddl", coverage: "n/a", note: "File export — no DDL",
     });
   } else {
@@ -225,7 +240,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   });
 
   if (isFileExport) {
-    skip("g8_reconciliation", "Reconciliation runs after API-backed transfer.", {
+    skip("g8_reconciliation", "Reconciliation runs after API-backed transfer.", "after_run", {
       kind: "reconciliation", coverage: "pending", note: "Post-write Gate-8 requires API transfer",
     });
   } else {
@@ -234,7 +249,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     });
   }
 
-  skip("g9_data_integrity", "Browser-local export — uniqueness/null integrity requires API sample probe.", {
+  skip("g9_data_integrity", "Browser-local export — uniqueness/null integrity requires API sample probe.", "needs_api", {
     kind: "data_integrity", coverage: "n/a",
     note: "Not a full-table integrity probe — do not treat as gate-pass evidence",
   });
@@ -247,42 +262,42 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
       kind: "sync_contract", coverage: "n/a",
     });
   } else {
-    skip("g9_sync_contract", "Full refresh file export — sync contract not applicable.", {
+    skip("g9_sync_contract", "Full refresh file export — sync contract not applicable.", "not_applicable", {
       kind: "sync_contract", coverage: "n/a",
     });
   }
-  skip("g13_source_coverage", "Browser-only — source coverage requires API dest-exists shape.", {
+  skip("g13_source_coverage", "Browser-only — source coverage requires API dest-exists shape.", "needs_api", {
     kind: "source_coverage", coverage: "n/a",
   });
-  skip("g14_destination_requirements", "Browser-only — dest NOT NULL coverage requires API introspect.", {
+  skip("g14_destination_requirements", "Browser-only — dest NOT NULL coverage requires API introspect.", "needs_api", {
     kind: "destination_requirements", coverage: "n/a",
   });
-  skip("constraint_fk", "Browser-only — FK coverage requires API catalog metadata.", {
+  skip("constraint_fk", "Browser-only — FK coverage requires API catalog metadata.", "needs_api", {
     kind: "foreign_key", coverage: "n/a",
   });
-  skip("g10_schema_policy", "Browser-only — schema policy gate skipped; requires API.", {
+  skip("g10_schema_policy", "Browser-only — schema policy gate skipped; requires API.", "needs_api", {
     kind: "schema_policy", coverage: "n/a",
   });
-  skip("g11_validation_posture", "Browser-only — validation posture skipped; requires API.", {
+  skip("g11_validation_posture", "Browser-only — validation posture skipped; requires API.", "needs_api", {
     kind: "validation_posture", coverage: "n/a",
   });
-  skip("g15_dest_exists_shape", "Browser-only — dest-exists shape requires API table introspect.", {
+  skip("g15_dest_exists_shape", "Browser-only — dest-exists shape requires API table introspect.", "needs_api", {
     kind: "dest_exists_shape", coverage: "n/a",
     note: "Writes stay name-addressed on the API path — not a local invent",
   });
-  skip("g18_cdc_snapshot_mode", "Browser-only — CDC snapshot_mode=never requires API watermark.", {
+  skip("g18_cdc_snapshot_mode", "Browser-only — CDC snapshot_mode=never requires API watermark.", "needs_api", {
     kind: "cdc_snapshot_mode", coverage: "n/a",
     note: "Execute uses the same should_run_snapshot kernel — at-least-once upsert",
   });
-  skip("g20_code_crosswalk", "Browser-only — population code-crosswalk coverage requires API Validate.", {
+  skip("g20_code_crosswalk", "Browser-only — population code-crosswalk coverage requires API Validate.", "needs_api", {
     kind: "code_crosswalk", coverage: "n/a",
     note: "A covered sample is not population proof. Unmapped codes fail closed on the API path.",
   });
-  skip("g21_control_totals", "Browser-only — population control totals are a post-write Gate-8 SUM, not a sample SUM.", {
+  skip("g21_control_totals", "Browser-only — population control totals are a post-write Gate-8 SUM, not a sample SUM.", "after_run", {
     kind: "control_totals", coverage: "n/a",
     note: "Independent source/dest SUM runs after Execute",
   });
-  skip("g22_dest_referential_integrity", "Browser-only — destination RI is a post-write Gate-8 anti-join, not a sample orphan probe.", {
+  skip("g22_dest_referential_integrity", "Browser-only — destination RI is a post-write Gate-8 anti-join, not a sample orphan probe.", "after_run", {
     kind: "dest_referential_integrity", coverage: "n/a",
     note: "Dest enforced FK or anti-join scan runs after Execute",
   });

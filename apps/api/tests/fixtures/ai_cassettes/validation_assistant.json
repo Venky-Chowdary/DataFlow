@@ -1,0 +1,60 @@
+{
+  "cases": {
+    "empty": {
+      "prompt_sha256": [
+        "ffbd4492195a2dfa712e194bd49b283bd61d98c7f7ab07fa8893e7ea0a7b1357"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "invented_column": {
+      "prompt_sha256": [
+        "ffbd4492195a2dfa712e194bd49b283bd61d98c7f7ab07fa8893e7ea0a7b1357"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "Map `customer_uuid` to `customer_id` and widen `email_address`.",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "narrated": {
+      "prompt_sha256": [
+        "ffbd4492195a2dfa712e194bd49b283bd61d98c7f7ab07fa8893e7ea0a7b1357"
+      ],
+      "responses": [
+        {
+          "content": [
+            {
+              "text": "Validation stopped for two reasons. Map `cust_id` to `customer_id`, which the destination requires. Then widen `email`: 3 sampled values are longer than VARCHAR(40).",
+              "type": "text"
+            }
+          ],
+          "stop_reason": "end_turn"
+        }
+      ]
+    }
+  },
+  "provenance": {
+    "at": "2026-11-21",
+    "how": "seeded",
+    "model": "hand-written reference and adversarial answers",
+    "note": "Replace with a live recording: run_ai_benchmarks.py --mode live --record DIR",
+    "provider": "anthropic"
+  },
+  "suite": "validation_assistant"
+}

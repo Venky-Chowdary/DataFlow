@@ -17,6 +17,7 @@ _RECORD_BATCH_FORMATS = frozenset({
     "sftp",
     "csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "xlsx", "file",
 })
+_RECORD_BATCH_DRIVERS = frozenset({"s3", "gcs", "adls", "sftp"})
 
 
 def source_is_record_batch(kind: str | None, db_type: str | None = "") -> bool:
@@ -28,7 +29,26 @@ def source_is_record_batch(kind: str | None, db_type: str | None = "") -> bool:
     """
     if (kind or "").strip().lower() == "file":
         return True
-    return (db_type or "").strip().lower() in _RECORD_BATCH_FORMATS
+    fmt = (db_type or "").strip().lower()
+    if fmt in _RECORD_BATCH_FORMATS:
+        return True
+    return bool(object_store_driver(fmt))
+
+
+def object_store_driver(db_type: str | None) -> str:
+    """``s3``/``gcs``/``adls``/``sftp`` when ``db_type`` reads as one, else "".
+
+    A catalog alias (wasabi, cloudflare_r2, backblaze_b2, ...) reads through
+    the same object reader as its driver. Judging it as a table dropped a
+    declared dedupe_key on that connector (D402).
+    """
+    fmt = (db_type or "").strip().lower()
+    if not fmt:
+        return ""
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    driver = resolve_driver_type(fmt)
+    return driver if driver in _RECORD_BATCH_DRIVERS else ""
 
 
 def file_overwrite_keep_last(
@@ -87,6 +107,13 @@ def dedupe_key_unhonoured_reason(
         # No spoken mode: the key becomes the upsert identity. That write
         # merges, so the duplicate is not inserted beside itself.
         return ""
+    if source_is_record_batch(source_kind, source_format):
+        return (
+            f"dedupe_key {key!r} cannot be honoured by {mode or 'this mode'}: an "
+            "append keeps every copy of a key, so both copies would be written. "
+            "Use full_refresh_overwrite (keeps the last row of each key and says "
+            "so on the plan) or upsert (one row per key), or remove dedupe_key."
+        )
     return (
         f"dedupe_key {key!r} cannot be honoured on this source. "
         "A file or object overwrite keeps the last row of that key and says "

@@ -127,6 +127,64 @@ def oracle_comparable_expr(
     return quoted
 
 
+_ORACLE_TS_BIND_FORMAT: Final = "YYYY-MM-DD HH24:MI:SS.FF9"
+_ORACLE_TSTZ_BIND_FORMAT: Final = "YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM"
+
+
+def oracle_temporal_key_sql(conn: Any, table: str, owner: str | None, column: str) -> str:
+    """``TO_TIMESTAMP[_TZ](:{bind}, fmt)`` for a temporal key column, else ``""`` (D335).
+
+    A text bind against an Oracle DATE/TIMESTAMP is converted with the session
+    format; the ISO ``T`` of a stored watermark is ORA-01861. The conversion is
+    explicit here and the bound text is normalised by :func:`oracle_temporal_key_text`.
+    """
+    import sqlalchemy as sa
+
+    try:
+        row = conn.execute(
+            sa.text(
+                "SELECT data_type FROM all_tab_columns "
+                "WHERE UPPER(table_name) = :t AND UPPER(column_name) = :c "
+                "AND (:s IS NULL OR UPPER(owner) = :s)"
+            ),
+            {
+                "t": str(table or "").upper(),
+                "c": str(column or "").upper(),
+                "s": str(owner).upper() if owner else None,
+            },
+        ).first()
+    except Exception:  # noqa: BLE001 - an unread catalog keeps the plain bind
+        return ""
+    data_type = str((row or [""])[0] or "").upper()
+    if "TIME ZONE" in data_type:
+        return "TO_TIMESTAMP_TZ({bind}, '" + _ORACLE_TSTZ_BIND_FORMAT + "')"
+    if data_type == "DATE" or data_type.startswith("TIMESTAMP"):
+        return "TO_TIMESTAMP({bind}, '" + _ORACLE_TS_BIND_FORMAT + "')"
+    return ""
+
+
+def oracle_temporal_key_text(value: Any, *, zoned: bool) -> Any:
+    """ISO timestamp text in the spelling the explicit conversion parses."""
+    import re
+
+    m = re.match(
+        r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?\s*(Z|[+-]\d{2}:?\d{2})?$",
+        str(value or "").strip(),
+    )
+    if not m:
+        return value
+    day, clock, frac, offset = m.groups()
+    text = f"{day} {clock}.{(frac or '0')[:9]}"
+    if not zoned:
+        # An NTZ column holds the civil digits; the writer strips an offset.
+        return text
+    if not offset or offset == "Z":
+        offset = "+00:00"
+    elif ":" not in offset:
+        offset = f"{offset[:3]}:{offset[3:]}"
+    return f"{text} {offset}"
+
+
 def oracle_probe_description(conn: Any, table_ref: str) -> Any:
     """Driver column description of ``table_ref`` (zero-row probe)."""
     import sqlalchemy as sa
@@ -360,6 +418,15 @@ def read_oracle_target_sample(
             params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
             params["lim"] = lim
             placeholders = ",".join(f":k{i}" for i in range(len(keys)))
+            temporal = oracle_temporal_key_sql(conn, read_table, read_owner, sort_key_stored)
+            if temporal:
+                zoned = "TO_TIMESTAMP_TZ" in temporal
+                params.update(
+                    {f"k{i}": oracle_temporal_key_text(k, zoned=zoned) for i, k in enumerate(keys)}
+                )
+                placeholders = ",".join(
+                    temporal.format(bind=f":k{i}") for i in range(len(keys))
+                )
             sql = (
                 f"SELECT {ora_col_sql} FROM {table_ref} "  # nosec B608
                 f"WHERE {key_expr} IN ({placeholders}) "

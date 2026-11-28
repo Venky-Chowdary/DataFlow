@@ -848,6 +848,10 @@ def probe_source_duplicate_keys_result(
         from src.transfer.engine_family import family_or_kind
 
         db_type = family_or_kind(db_type)
+        if db_type not in PROBED_SOURCE_TYPES:
+            from services.preflight_source_kind import object_store_driver
+
+            db_type = object_store_driver(db_type) or db_type  # D402: wasabi reads as s3
         if not cfg:
             return SourceDuplicateProbeResult(
                 status="skipped_no_source",

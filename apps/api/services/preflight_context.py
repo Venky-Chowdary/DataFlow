@@ -475,6 +475,7 @@ class FilePreflightContext(PreflightContext):
                 getattr(self.plan, "stream_contracts", None) or []
             ),
             in_file_dedupe=str(getattr(self.plan, "in_file_dedupe", "") or ""),
+            dedupe_key_equality=str(getattr(self.plan, "dedupe_key_equality", "") or ""),
             duplicate_policy=str(getattr(self.plan, "duplicate_policy", "") or ""),
             stream_name=str(getattr(self.plan.source, "name", "") or ""),
             proven_width_narrowings=self.proven_width_narrowings,

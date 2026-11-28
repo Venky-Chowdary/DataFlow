@@ -48,9 +48,12 @@ def test_physical_stamp_clears_stale_lossy_verdict_for_sqlserver():
 
 
 def test_physical_stamp_keeps_offset_on_oracle_and_postgres():
-    for dest, physical in (
-        ("oracle", "TIMESTAMP WITH TIME ZONE"),
-        ("postgresql", "TIMESTAMPTZ"),
+    # Oracle's zone column is stamped, but python-oracledb binds the clock digits
+    # without the offset, so a non-Oracle offset source needs a Risk Contract
+    # there (accuracy review finding 8); PostgreSQL keeps the instant.
+    for dest, physical, preserved in (
+        ("oracle", "TIMESTAMP WITH TIME ZONE", False),
+        ("postgresql", "TIMESTAMPTZ", True),
     ):
         row = _apply_create_new_risk_stamps(
             [_identity_mapping("TIMESTAMP_TZ", "TIMESTAMP_TZ")],
@@ -58,8 +61,8 @@ def test_physical_stamp_keeps_offset_on_oracle_and_postgres():
             dest_table_exists=False,
         )[0]
         assert row["target_type"] == physical, dest
-        assert row["fidelity"] == "preserve", dest
-        assert row["requires_risk_contract"] is False, dest
+        assert (row["fidelity"] == "preserve") is preserved, dest
+        assert row["requires_risk_contract"] is (not preserved), dest
 
 
 def test_real_narrowing_still_blocks_after_physical_stamp():

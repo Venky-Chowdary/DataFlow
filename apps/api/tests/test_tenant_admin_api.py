@@ -602,3 +602,32 @@ def test_notification_listing_is_scoped_to_the_callers_workspace(admin, stores, 
     platform = admin.get("/api/v1/workspace/notifications")
     assert platform.status_code == 200, platform.text
     assert [c["label"] for c in platform.json()["channels"]] == ["global-channel"]
+
+
+def test_a_workspace_admin_sets_this_workspaces_verification_snapshot(admin):
+    """Review 3, item 6: "Consistent snapshot during verification" was one deployment-wide
+    document; it is now also this workspace's own setting, and it decides its runs."""
+    from services.parity_scale.verification import snapshot_policy
+
+    ws_id = _workspace(admin, "Gamma")
+    other_ws = _workspace(admin, "Delta")
+    lead = _signed_in(admin, email="gamma-lead@example.com", workspace_id=ws_id, workspace_role="admin")
+    created = lead.post("/api/v1/workspace/tenant", json={"workspace_id": ws_id, "name": "Gamma"})
+    assert created.status_code == 200, created.text
+    amended = lead.patch(f"/api/v1/workspace/tenant/{created.json()['id']}",
+                         json={"verification_snapshot": False, "verification_snapshot_max_minutes": 10})
+    assert amended.status_code == 200, amended.text
+    assert amended.json()["verification_snapshot"] is False
+    assert amended.json()["verification_snapshot_max_minutes"] == 10
+    assert snapshot_policy({"workspace_id": ws_id}) == {"enabled": False, "max_hold_s": 600.0,
+                                                        "source": "workspace"}
+    # Another workspace keeps the deployment's setting.
+    assert snapshot_policy({"workspace_id": other_ws}) == {"enabled": True, "max_hold_s": 1800.0,
+                                                           "source": "deployment"}
+    cleared = lead.patch(f"/api/v1/workspace/tenant/{created.json()['id']}",
+                         json={"verification_snapshot": None, "verification_snapshot_max_minutes": None})
+    assert cleared.status_code == 200, cleared.text
+    assert snapshot_policy({"workspace_id": ws_id})["source"] == "deployment"
+    # The deployment-wide default and cap stay a platform admin's.
+    refused = lead.patch("/api/v1/workspace/settings", json={"verification_snapshot": False})
+    assert refused.status_code == 403, refused.text

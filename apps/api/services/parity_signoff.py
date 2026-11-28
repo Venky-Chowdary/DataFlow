@@ -36,12 +36,20 @@ from services.parity_state import (
 VERIFY_ROUTE = "POST /api/v1/transfer/proof-pack/verify"
 
 
-def content_sha256(report: dict[str, Any]) -> str:
+#: Attested content versions. v1: verdict, counts, tables, differences, fix outcomes.
+#: v2 adds the AI decisions ledger's decision rows (``ai_decisions_attested_sha256``).
+#: Every new approval attests the current version; an approval keeps the version it
+#: attested, so approvals given before v2 stay valid for exactly what they attested.
+CONTENT_VERSION = 2
+
+
+def content_sha256(report: dict[str, Any], version: int = CONTENT_VERSION) -> str:
     """The digest of what a signer attests: verdict, counts, tables, differences, fix outcomes.
 
     Volatile presentation (timestamps, version, wording, the explanation, sign-off
     itself) is left out, so re-reading an unchanged report keeps approvals valid;
-    the explanation is therefore not sealed in the signed pack either.
+    the explanation is therefore not sealed in the signed pack either. Version 2
+    also binds the AI decisions ledger (its decision rows, not model wording).
     """
     body = {
         "job_id": report.get("job_id"),
@@ -59,15 +67,67 @@ def content_sha256(report: dict[str, Any]) -> str:
         ),
         "fixes": sorted([str(f.get("id")), str(f.get("status"))] for f in report.get("fixes") or []),
     }
+    if int(version) >= 2:
+        body["ai_decisions"] = report.get("ai_decisions_attested_sha256")
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def valid_approvals(state: dict[str, Any], digest: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """(approvals of this exact content, approvals of content that changed since)."""
+def content_digests(report: dict[str, Any]) -> dict[int, str]:
+    """The report's digest under every attested-content version."""
+    return {v: content_sha256(report, v) for v in range(1, CONTENT_VERSION + 1)}
+
+
+def valid_approvals(
+    state: dict[str, Any], digest: str | dict[int, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(approvals of this exact content, approvals of content that changed since).
+
+    ``digest`` is one digest, or the report's digests per content version
+    (:func:`content_digests`): an approval is checked against the version it
+    attested (absent = version 1).
+    """
     approvals = [a for a in state.get("approvals") or [] if isinstance(a, dict)]
-    valid = [a for a in approvals if a.get("content_sha256") == digest]
+
+    def attests(a: dict[str, Any]) -> bool:
+        claimed = a.get("content_sha256")
+        if not claimed:
+            return False
+        if isinstance(digest, dict):
+            try:
+                version = int(a.get("content_version") or 1)
+            except (TypeError, ValueError):
+                return False
+            expected = digest.get(version)  # an unknown version attests nothing
+            return bool(expected) and claimed == expected
+        return claimed == digest
+
+    valid = [a for a in approvals if attests(a)]
     return valid, [a for a in approvals if a not in valid]
+
+
+def one_content_version(valid: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(approvals that count, approvals superseded): a report seals under one content version.
+
+    Only legacy data can mix versions; then the newest version counts and the
+    earlier signers sign again (their approval did not attest the AI ledger).
+    """
+    versions = {int(a.get("content_version") or 1) for a in valid}
+    if len(versions) <= 1:
+        return valid, []
+    newest = max(versions)
+    keep = [a for a in valid if int(a.get("content_version") or 1) == newest]
+    return keep, [a for a in valid if a not in keep]
+
+
+def signing_version(valid: list[dict[str, Any]]) -> int:
+    """The content version a new approval attests: the one the valid approvals share, else the current.
+
+    A report approved before v2 existed keeps collecting v1 approvals, so its
+    set is never mixed; a mixed set (legacy data) does not seal.
+    """
+    versions = {int(a.get("content_version") or 1) for a in valid}
+    return versions.pop() if len(versions) == 1 else CONTENT_VERSION
 
 
 def sign_off(
@@ -106,7 +166,7 @@ def sign_off(
         raise ParityConflict("This report is already signed.")
     if signoff["status"] == "blocked":
         raise ParityConflict(str(signoff["blocked_reason"] or "Sign-off is blocked."))
-    digest = content_sha256(report)
+    digests = content_digests(report)
     authority = authority_note(role, signer_role)
 
     def approve(job_now: dict[str, Any], state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -116,7 +176,10 @@ def sign_off(
     def _approve(state: dict[str, Any]) -> dict[str, Any] | None:
         if state.get("signed"):
             raise ParityConflict("This report is already signed.")
-        approvals, invalidated = valid_approvals(state, digest)
+        approvals, invalidated = valid_approvals(state, digests)
+        approvals, superseded = one_content_version(approvals)
+        invalidated = invalidated + superseded
+        version = signing_version(approvals)
         if any(a.get("role") == role for a in approvals):
             raise ParityConflict(f"The {role} role has already signed.")
         if actor and any(a.get("user") == actor for a in approvals):
@@ -124,12 +187,15 @@ def sign_off(
         approvals.append({
             "role": role, "user": actor or "anonymous", "at": now_iso(), "note": note,
             "signer_role": signer_role, "authority": authority,
-            "version": int(report["version"]), "content_sha256": digest,
+            "version": int(report["version"]), "content_sha256": digests[version],
+            "content_version": version,
         })
         # Approvals of earlier content stay on the record; they no longer count.
         state["approvals"] = invalidated + approvals
         if not {a["role"] for a in approvals} >= set(roles):
             return None
+        if len({int(a.get("content_version") or 1) for a in approvals}) != 1:
+            return None  # approvals of different content versions never seal one report
         signed_at = now_iso()
         final = public_report(report)
         # The seal holds what the approvals attest (content_sha256): the explanation is
@@ -155,7 +221,7 @@ def sign_off(
     _updated, state, (after, pack) = update_state(job_id, approve, expected_version=int(report["version"]))
     audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
           details={"role": role, "note": note, "verdict": report["verdict"], "signer_role": signer_role,
-                   "version": int(report["version"]), "content_sha256": digest})
+                   "version": int(report["version"]), "content_digests": {str(k): v for k, v in digests.items()}})
     if pack:
         audit("job.parity.signed_off", job=job, job_id=job_id, actor=actor,
               details={"signed": True, "content_sha256": pack["content_sha256"], "roles": sorted(roles)})
@@ -247,6 +313,10 @@ def render_markdown(report: dict[str, Any], pack: dict[str, Any] | None) -> str:
         for r in body["rounds"]:
             lines.append(f"- Round {r['n']} ({r['at']}): unexplained {r['unexplained_before']} → "
                          f"{r['unexplained_after']} after fix {r['fix_id']}")
+    if pack and isinstance(pack.get("ai_decisions"), dict):
+        from services.ai_decision_ledger import markdown_lines
+
+        lines += markdown_lines(pack["ai_decisions"])
     signoff = body["signoff"]
     lines += ["", "## Approvals", ""]
     if signoff["approvals"]:

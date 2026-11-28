@@ -50,10 +50,10 @@ function approvedPreflight(): PreflightResult {
 }
 
 describe("validateStudioPrimary", () => {
-  it("Run preflight is the only primary before a verdict", () => {
+  it("Run Validate is the only primary before a verdict", () => {
     const primary = resolveValidateStudioPrimary({ preflight: null });
     assert.equal(primary.kind, "run_preflight");
-    assert.equal(primary.label, "Run preflight");
+    assert.equal(primary.label, "Run Validate");
     assert.equal(primary.enabled, true);
     assert.equal(primary.executeLabel, null);
     assert.equal(studioPrimaryIsSingular(primary), true);
@@ -80,7 +80,8 @@ describe("validateStudioPrimary", () => {
     assert.equal(primary.family, "map_open");
     assert.equal(primary.label, "Open Map to fix target DDL");
     assert.equal(primary.enabled, true);
-    assert.equal(primary.executeLabel, "Execute (blocked)");
+    // One label in every state; the rail says why it is disabled beside it.
+    assert.equal(primary.executeLabel, "Run transfer");
     assert.equal(primary.executeIsPrimary, false);
     assert.equal(primary.executeEnabled, false);
     assert.equal(studioPrimaryIsSingular(primary), true);
@@ -92,7 +93,7 @@ describe("validateStudioPrimary", () => {
   it("Execute unlocks only on passed + approve, not review-grade", () => {
     const ready = resolveValidateStudioPrimary({ preflight: approvedPreflight() });
     assert.equal(ready.kind, "execute");
-    assert.equal(ready.label, "Execute");
+    assert.equal(ready.label, "Run transfer");
     assert.equal(ready.enabled, true);
     assert.equal(ready.executeIsPrimary, true);
     assert.equal(studioPrimaryIsSingular(ready), true);
@@ -103,7 +104,7 @@ describe("validateStudioPrimary", () => {
         proof_bundle: { transfer_decision: { decision: "review" } },
       } as unknown as PreflightResult,
     });
-    assert.equal(review.label, "Execute (review)");
+    assert.equal(review.label, "Run transfer");
     assert.equal(review.enabled, false);
     assert.equal(review.executeIsPrimary, true);
     assert.equal(studioPrimaryIsSingular(review), true);

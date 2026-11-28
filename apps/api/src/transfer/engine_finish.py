@@ -82,6 +82,13 @@ def _stamp_read_scope(mongo: Any, job_id: str, fields: dict) -> None:
         fields[READ_SCOPE_KEY] = scope
 
 
+def _boundary_duplicates_accepted(summary: Any) -> bool:
+    from .stream_boundary_keyed import BOUNDARY_TIE_KEY
+
+    tie = summary.get(BOUNDARY_TIE_KEY) if isinstance(summary, dict) else None
+    return isinstance(tie, dict) and bool(tie.get("accepted"))
+
+
 def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -> Any:
     """Write the success terminal status, or record the commit on a cancelled job.
 
@@ -109,6 +116,10 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
     from services.reversibility_enforce import record_on_success
 
     record_before_success_status()
+    # Gate-8 compared the columns this run wrote: name the ones it left out.
+    from services.column_coverage_report import stamp_column_coverage
+
+    stamp_column_coverage(mongo, job_id, fields)
     # A reversible run: which conditional columns were checked on every row. One checked on fewer rows
     # than were written is never reported as enforced: the job fails with that reason (review 4, H-1).
     shortfall = record_on_success(job_id, fields)
@@ -118,6 +129,9 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
     if shortfall:
         status = "failed"
         fields.update(error=shortfall, message=shortfall, phase="failed")
+    elif status == "completed" and _boundary_duplicates_accepted(fields.get("destination_summary")):
+        # D335: a route that accepted possible boundary duplicates never reads green.
+        status = "completed_with_warnings"
     written = mongo.update_job_status(job_id, status, **fields)
     if written is not False:
         return written
@@ -270,18 +284,35 @@ OVERWRITE_RESTORED_NOTE = (
 )
 
 
-def _settle_backup_after_error(destination: EndpointConfig, exc: BaseException) -> bool:
+def _settle_backup_after_error(
+    destination: EndpointConfig, exc: BaseException, *, request: Any = None
+) -> bool:
     """Settle the pre-run backup after a run ended on ``exc``.
 
     D134 — a cancel is not a failed batch (D102): the committed prefix stays,
     the job reports it, and the checkpoint and route watermark already point
     past it. Restoring the pre-run backup removed those rows behind the
     resume, which then skipped them as landed and still verified.
+
+    An overwrite never resumes past a checkpoint (it restarts from the first
+    row), so a cancelled overwrite puts its pre-run rows back instead of
+    leaving the destination empty (:mod:`src.transfer.cancel_restore`).
     """
     from src.transfer.engine import (  # lazy: honours monkeypatches on the original module
         TransferCancelled,
         _settle_overwrite_backup,
     )
+    if isinstance(exc, TransferCancelled):
+        from .cancel_restore import restorable_on_cancel, restore_on_cancel
+
+        held = restorable_on_cancel(destination, request)
+        if held:
+            ok = restore_on_cancel(destination, exc, held, request)
+            from .overwrite_outcome import carry_onto_exception
+
+            # A backup restore / drop that failed during the cancel reaches the job too.
+            carry_onto_exception(destination, exc)
+            return ok
     restore = not isinstance(exc, TransferCancelled)
     restored = _settle_overwrite_backup(destination, restore=restore)
     from .overwrite_outcome import carry_onto_exception

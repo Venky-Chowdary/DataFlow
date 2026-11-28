@@ -57,6 +57,7 @@ import {
   ValidateFindings,
 } from "../../components/marketing/StoryPanels";
 import { SYNC_MODE_COUNT_WORD } from "../../lib/syncModesPhrase";
+import { emulatorScopeNote } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { PRIMARY_CTA_LABEL, SALES_CTA_LABEL } from "../../components/marketing/MarketingChrome";
 import { JobsWithTrust, McpScene, PilotScene, QueryScene, SchedulesScene, SyncScene, TransferScene, WarehouseScene } from "../../components/marketing/StoryScenes";
@@ -703,6 +704,9 @@ export function MigrationsSolutionPage(p: PageProps) {
   );
 }
 
+/** Snowflake and BigQuery are proven against emulators: the warehouse page says so (P0-4). */
+const WAREHOUSE_EMULATOR_NOTE = emulatorScopeNote();
+
 export function WarehouseSolutionPage(p: PageProps) {
   const act = actions(p, { label: "See Schedules", onClick: () => p.onNavigate("product-pipelines") });
   return (
@@ -759,6 +763,7 @@ export function WarehouseSolutionPage(p: PageProps) {
             { claim: "Iceberg connects to a REST catalog or a filesystem warehouse", where: "Connectors, Apache Iceberg" },
             { claim: "Upserts use MERGE, or a keyed delete and insert, with no index created", where: "Docs, Sync modes: upsert" },
             { claim: "Rows only in the destination are left alone by an upsert", where: "Docs, Sync modes: upsert" },
+            ...(WAREHOUSE_EMULATOR_NOTE ? [{ claim: WAREHOUSE_EMULATOR_NOTE, where: "Proof, CI evidence" }] : []),
           ]}
         />
       </TableSection>
