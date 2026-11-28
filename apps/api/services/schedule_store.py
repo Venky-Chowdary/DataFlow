@@ -676,6 +676,28 @@ def _refuse_history_route_recipe(payload: Mapping[str, Any], sync_mode: str) -> 
     refusal = schedule_recipe_refusal(payload.get("shape_recipe"), sync_mode)
     if refusal:
         raise ValueError(refusal)
+    _refuse_plan_blocker({**payload, "sync_mode": sync_mode})
+
+
+#: Fields a plan blocker is judged on; editing one re-asks the question (D422).
+_PLAN_ROUTE_KEYS = frozenset({
+    "mappings", "stream_contracts", "cursor_column", "source_connector_id", "source_table",
+})
+
+def _refuse_plan_blocker(payload: Mapping[str, Any]) -> None:
+    """Save-time twin of Execute's up-front plan blockers (D422, R8)."""
+    from services.plan_execute_blockers import schedule_plan_refusal
+    from services.schedule_mapping_contract import PLAN_BLOCKED_CODE, SchedulePlanBlocked
+
+    refusal = schedule_plan_refusal(payload)
+    if refusal:
+        blocker = str(getattr(refusal, "gate_id", "") or "")
+        raise SchedulePlanBlocked(
+            422, PLAN_BLOCKED_CODE,
+            f"This schedule was not saved: every run would be refused on plan blocker "
+            f"{blocker}. {refusal}",
+            extra={"blocker_id": blocker, "blocker_message": str(refusal)},
+        )
 
 
 def canonicalize_cadence(interval: str, cron: str) -> tuple[str, str]:
@@ -2349,7 +2371,8 @@ def _update_schedule_locked(
         if (enabling or contract_changed) and (contract_id or require_signed):
             assert_signed_contract(contract_id, require_signed=require_signed)
         recipe_edited = bool({"shape_recipe", *binding_keys} & set(data))
-        if enabling or recipe_edited or sync_mode != str(s.sync_mode or ""):
+        route_edited = bool(_PLAN_ROUTE_KEYS & set(data))  # D422: what the plan judged
+        if enabling or recipe_edited or route_edited or sync_mode != str(s.sync_mode or ""):
             _refuse_history_route_recipe(merged, sync_mode)
         if recipe_edited and "approved_shape_recipe_hash" not in data:
             from services.multi_stream_plan import enabled_recipe_steps

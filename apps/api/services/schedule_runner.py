@@ -1998,6 +1998,16 @@ def _dispatch_transfer(
         )
         if recipe_refusal:
             raise ValueError(f"Schedule cannot run — {recipe_refusal}")
+        # D422: any other plan blocker Execute would refuse this request on (a
+        # Kafka column cursor, Map rows waiting on an unread destination) parks
+        # the schedule as "needs decision" before a job exists — same function.
+        from services.plan_execute_blockers import execute_plan_refusal
+
+        blocker = execute_plan_refusal(request)
+        if blocker:
+            raise ValueError(
+                f"Schedule cannot run — plan blocker {getattr(blocker, 'gate_id', '')}: {blocker}"
+            )
         # D276: a saved local-disk destination on the hosted cloud (SQLite, a
         # DuckDB file, a local Iceberg warehouse/catalog) is refused at this run's
         # preflight, before a job exists, instead of failing mid-write. Judged on

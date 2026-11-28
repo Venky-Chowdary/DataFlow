@@ -1980,13 +1980,12 @@ def run_file_preflight(
 
     # D243: execute refuses a pre-load recipe on a route that merges against
     # stored history. Preflight must refuse the same recipe, not pass it green.
-    from services.source_filter_gate import route_request_gate  # + source_filter (audit H2)
+    from services.source_filter_gate import route_request_gates  # + filter (H2), unread dest (D431)
 
-    shape_route_gate = route_request_gate(shape_recipe, sync_mode, source_filter)
-    if shape_route_gate:
-        blockers.append({k: shape_route_gate[k] for k in ("id", "message")}
-                        | {"details": dict(shape_route_gate["details"])})
-    shape_route_blocked = shape_route_gate is not None
+    route_gates = route_request_gates(shape_recipe, sync_mode, source_filter, stream_contracts, mappings)
+    blockers.extend({k: g[k] for k in ("id", "message")} | {"details": dict(g["details"])}
+                    for g in route_gates)
+    shape_route_blocked = bool(route_gates)
 
     # Bounded destination carriers (DECIMAL(p,s) / VARCHAR(n) / sized INTEGER)
     # are decidable before the write. Screening a preview and letting the writer
@@ -2183,7 +2182,7 @@ def run_file_preflight(
         + ([require_pk_gate] if require_pk_gate else [])
         + ([overwrite_governance_gate] if overwrite_governance_gate else [])
         + ([pii_hash_gate] if pii_hash_gate else [])
-        + ([shape_route_gate] if shape_route_gate else []) + ([oracle_empty_gate] if oracle_empty_gate else [])
+        + route_gates + ([oracle_empty_gate] if oracle_empty_gate else [])
     )
     extra_passed = sum(1 for g in extra_gates if g.get("status") != "block")
     total_gates = result.total_gates + len(extra_gates)

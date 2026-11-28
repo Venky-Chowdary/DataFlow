@@ -198,16 +198,19 @@ def history_shape_refusal(sync_mode: str) -> str:
 
 
 
-def history_shape_route_gate(shape_recipe: Any, sync_mode: str) -> dict[str, Any] | None:
+def history_shape_route_gate(
+    shape_recipe: Any, sync_mode: str, stream_contracts: Any = None
+) -> dict[str, Any] | None:
     """Preflight gate for a pre-load recipe on a history-merging route (D243).
 
     Same refusal text execute raises, so preflight cannot pass what execute refuses.
     """
-    from services.history_route_recipe import history_recipe_refusal
+    from services.plan_execute_blockers import recipe_route_refusal
 
     # scd2 used to be skipped whole, so a column pipeline with no scd2 contract
-    # step passed here and failed the first run (D361). Execute's own question.
-    refusal = history_recipe_refusal(shape_recipe, sync_mode)
+    # step passed here and failed the first run (D361). Execute asks this same
+    # function before any write, on every runner (D417).
+    refusal = recipe_route_refusal(shape_recipe, sync_mode, stream_contracts)
     if not refusal:
         return None
     return {

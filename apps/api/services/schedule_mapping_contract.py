@@ -67,6 +67,14 @@ class ScheduleMappingsRefused(ApiError, ValueError):
     """Stored mappings every run would refuse (HTTP 422). A ``ValueError`` too,
     so GitOps apply and chat Confirm keep turning store refusals into theirs."""
 
+#: A schedule every run would refuse on a plan blocker (D422).
+PLAN_BLOCKED_CODE = "SCHEDULE_PLAN_BLOCKED"
+
+
+class SchedulePlanBlocked(ApiError, ValueError):
+    """A plan blocker every run would meet (HTTP 422); a ``ValueError`` for GitOps / chat."""
+
+
 #: The two ways out, named in every refusal (QA C10).
 MAPPING_OVERRIDE_ROUTE = (
     "Re-map these columns in Transfer Studio and Schedule from the Studio "

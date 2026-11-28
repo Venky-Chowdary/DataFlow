@@ -875,6 +875,9 @@ class UniversalTransferEngine:
         ident_err = compile_and_record_recipe(request, job_id, _job_store())
         ident_err = ident_err or start_refusal(request) or request_refusal(request)
         if ident_err:
+            from services.plan_execute_blockers import refusal_details
+
+            blocker = refusal_details(ident_err)  # the plan blocker id it repeats (D417)
             try:
                 from services.mongodb_service import get_mongodb_service
 
@@ -882,15 +885,17 @@ class UniversalTransferEngine:
                     job_id,
                     "failed",
                     phase="validate",
-                    error=ident_err,
-                    message=ident_err,
+                    error=str(ident_err),
+                    message=str(ident_err),
+                    **({"error_details": blocker} if blocker else {}),
                 )
             except Exception:
                 logger.exception("Could not record destination-name refusal on %s", job_id)
             return TransferResult(
                 success=False,
                 job_id=job_id,
-                error=ident_err,
+                error=str(ident_err),
+                error_details=blocker,
                 operation=request.operation,
             )
         if request.source.kind == "file":

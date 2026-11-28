@@ -100,14 +100,29 @@ def source_filter_gate(source_filter: Any, sync_mode: str | None) -> dict[str, A
 
 
 def route_request_gate(
-    shape_recipe: Any, sync_mode: str | None, source_filter: Any = None
+    shape_recipe: Any, sync_mode: str | None, source_filter: Any = None,
+    stream_contracts: Iterable[Any] | None = None,
 ) -> dict[str, Any] | None:
     """The route gate preflight shows: a refused filter, else a refused recipe."""
     from services.multi_stream_plan import history_shape_route_gate
 
     return source_filter_gate(source_filter, sync_mode) or history_shape_route_gate(
-        shape_recipe, sync_mode or ""
+        shape_recipe, sync_mode or "", stream_contracts
     )
+
+
+def route_request_gates(
+    shape_recipe: Any, sync_mode: str | None, source_filter: Any = None,
+    stream_contracts: Iterable[Any] | None = None, mappings: Iterable[Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Every up-front plan blocker Execute re-checks in :func:`request_refusal` (R8)."""
+    from services.plan_execute_blockers import dest_schema_unread_gate
+
+    gates = [
+        route_request_gate(shape_recipe, sync_mode, source_filter, stream_contracts),
+        dest_schema_unread_gate(mappings),
+    ]
+    return [g for g in gates if g]
 
 
 def request_refusal(request: Any) -> str:
@@ -115,12 +130,15 @@ def request_refusal(request: Any) -> str:
 
     One ordered list of the up-front refusals: a local-disk destination this
     deployment does not allow (D276), an unsafe destination identifier, a
-    mapped target name the destination would rename or cut (G11), and a source
-    filter that cannot be honoured.
+    mapped target name the destination would rename or cut (G11), a source
+    filter that cannot be honoured, and the plan blockers of
+    :mod:`services.plan_execute_blockers` (a recipe on a history route, a
+    Kafka column cursor, Map rows waiting on an unread destination schema).
     """
     from connectors.destination_naming import target_names_refusal
     from connectors.sql_identifiers import unsafe_destination_identifier_reason
     from services.local_file_policy import local_destination_refusal
+    from services.plan_execute_blockers import execute_plan_refusal
     from services.target_name_legacy import (
         AdoptionUnverified,
         adopt_for_request,
@@ -168,6 +186,8 @@ def request_refusal(request: Any) -> str:
             getattr(request, "sync_mode", None),
             getattr(request, "stream_contracts", None),
         )
+        # The plan's g_shape_route / g9 Kafka cursor / g_dest_schema_unread (D417, D431, D422).
+        or execute_plan_refusal(request)
         or ""
     )
     if not refusal and not selected_streams(request):
