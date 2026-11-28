@@ -112,6 +112,18 @@ def refuse_unaccounted_without_validate(
     )
 
 
+#: Keys a quarantined row carries that are not source columns: the marker of a
+#: finding that refused the whole row (``"column": "*"``) and the ``_df_lsn``
+#: the CDC writer stamped on the image. A replay of those rows judged them as
+#: undecided source columns and refused every CDC/CHECK replay (train 2 CI).
+_REPLAY_NON_SOURCE_KEYS = frozenset({"*", "_df_lsn"})
+
+
+def replay_source_columns(columns: list[str] | None) -> list[str]:
+    """The source columns of quarantined rows, without the row marker and the LSN stamp."""
+    return [c for c in columns or [] if str(c).strip().lower() not in _REPLAY_NON_SOURCE_KEYS]
+
+
 def _live_has(target: str, live: set[str]) -> bool:
     """Whether the destination already holds ``target``, under any spelling it stores."""
     from connectors.sql_identifiers import sanitized_spellings
