@@ -46,3 +46,45 @@ def test_existing_oracle_owner_is_not_refused(monkeypatch):
     from services.dest_namespace import missing_destination_namespace
 
     assert missing_destination_namespace(_cfg("SYS")) == ""
+
+
+def _preflight(schema: str):
+    from services.preflight_service import run_file_preflight
+
+    return run_file_preflight(
+        columns=["id"], column_types={"id": "INTEGER"}, row_count=1,
+        mappings=[{"source": "id", "target": "ID", "confidence": 0.99, "target_type": "NUMBER(10)",
+                   "assignment_strategy": "create_compatible_new", "create_new": True}],
+        destination_connected=True, sample_rows=[{"id": 1}], destination_db_type="oracle",
+        destination_table_exists=False, destination_can_create=True, destination_can_write=True,
+        destination_config=_cfg(schema), skip_population_fit=True, sync_mode="full_refresh_append",
+    )
+
+
+def _blocker_ids(pf) -> list[str]:
+    return [str(b.get("id")) for b in pf.get("blockers") or []]
+
+
+def test_studio_validate_refuses_a_missing_owner_and_passes_an_existing_one(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12")
+    assert "g_dest_schema_missing" in _blocker_ids(_preflight("NOSUCHSCHEMA431"))
+    assert "g_dest_schema_missing" not in _blocker_ids(_preflight("SYS"))
+
+
+def test_execute_refuses_a_missing_owner_before_any_ddl(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12")
+    from services.plan_execute_blockers import execute_plan_refusal
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    def request(schema: str) -> TransferRequest:
+        dest = EndpointConfig(kind="database", format="oracle", host=ORA["host"], port=ORA["port"],
+                              database=ORA["database"], username=ORA["username"],
+                              password=ORA["password"], schema=schema, table="D431_T",
+                              extra={"service_name": ORA["service_name"]})
+        return TransferRequest(source=EndpointConfig(kind="file", format="csv"),
+                               destination=dest, sync_mode="full_refresh_append")
+
+    refusal = execute_plan_refusal(request("NOSUCHSCHEMA431"))
+    assert refusal and refusal.gate_id == "g_dest_schema_missing"
+    assert "NOSUCHSCHEMA431" in refusal and "ORA-" not in refusal
+    assert execute_plan_refusal(request("SYS")) == ""

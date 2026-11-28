@@ -114,13 +114,18 @@ def route_request_gate(
 def route_request_gates(
     shape_recipe: Any, sync_mode: str | None, source_filter: Any = None,
     stream_contracts: Iterable[Any] | None = None, mappings: Iterable[Any] | None = None,
+    destination_config: Mapping[str, Any] | None = None,
+    destination_table_exists: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Every up-front plan blocker Execute re-checks in :func:`request_refusal` (R8)."""
+    from services.dest_namespace import dest_namespace_gate
     from services.plan_execute_blockers import dest_schema_unread_gate
 
     gates = [
         route_request_gate(shape_recipe, sync_mode, source_filter, stream_contracts),
         dest_schema_unread_gate(mappings),
+        # D431 AC-3: a configured schema the server does not have (Oracle owner).
+        dest_namespace_gate(destination_config, destination_table_exists),
     ]
     return [g for g in gates if g]
 

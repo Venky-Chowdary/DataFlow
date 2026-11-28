@@ -1982,7 +1982,8 @@ def run_file_preflight(
     # stored history. Preflight must refuse the same recipe, not pass it green.
     from services.source_filter_gate import route_request_gates  # + filter (H2), unread dest (D431)
 
-    route_gates = route_request_gates(shape_recipe, sync_mode, source_filter, stream_contracts, mappings)
+    route_gates = route_request_gates(shape_recipe, sync_mode, source_filter, stream_contracts, mappings,
+                                      destination_config, destination_table_exists)
     blockers.extend({k: g[k] for k in ("id", "message")} | {"details": dict(g["details"])}
                     for g in route_gates)
     shape_route_blocked = bool(route_gates)

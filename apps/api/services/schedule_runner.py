@@ -2005,9 +2005,10 @@ def _dispatch_transfer(
 
         blocker = execute_plan_refusal(request)
         if blocker:
-            raise ValueError(
-                f"Schedule cannot run — plan blocker {getattr(blocker, 'gate_id', '')}: {blocker}"
-            )
+            refused = ValueError(f"Schedule cannot run — {blocker}")
+            # The blocker id is the run record's reason_code, not prose.
+            refused.gate_id = str(getattr(blocker, "gate_id", "") or "")  # type: ignore[attr-defined]
+            raise refused
         # D276: a saved local-disk destination on the hosted cloud (SQLite, a
         # DuckDB file, a local Iceberg warehouse/catalog) is refused at this run's
         # preflight, before a job exists, instead of failing mid-write. Judged on
@@ -2030,7 +2031,8 @@ def _dispatch_transfer(
         authorized_drift = _guard_source_schema_drift(sched, request)
     except ValueError as exc:
         emit_event(logger, "schedule.run.fire", outcome="held", reason_code="preflight_refused", schedule_id=schedule_id, attempt=attempt + 1, error=exc)
-        _park_on_decision(schedule_id, exc, attempt=attempt)
+        _park_on_decision(schedule_id, exc, attempt=attempt,
+                          reason_code=getattr(exc, "gate_id", "") or "preflight_refused")
         return None
     from services.full_pass_rerun import apply_schedule_full_pass, full_pass_decision
 

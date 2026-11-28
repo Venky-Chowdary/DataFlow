@@ -112,3 +112,21 @@ def test_plan_transfer_accepts_incremental_deduped_and_echoes_the_canonical_name
     assert out["sync_mode_canonical"] == "incremental_deduped"
     assert out["data_rules"]["cursor_column"] == "updated_at"
     assert out["sync_mode_requested"] == "incremental_deduped"
+
+
+def test_studio_picker_uses_the_canonical_names_the_planner_accepts():
+    """AC-3: the web picker's ids are the published canonical names, each planned."""
+    import re
+    from pathlib import Path
+
+    from services.destination_sync_modes import SYNC_MODE_IDS
+    from src.ai.copilot.transfer_tools import normalize_sync_mode
+
+    ts = (Path(__file__).resolve().parents[2] / "web" / "src" / "lib" / "transferConstants.ts")
+    text = ts.read_text(encoding="utf-8")
+    union = re.search(r"export type SyncModeId =([^;]+);", text)
+    assert union, "SyncModeId union not found"
+    picker = re.findall(r'"([a-z0-9_]+)"', union.group(1))
+    assert tuple(picker) == SYNC_MODE_IDS
+    for mode in picker:
+        normalize_sync_mode(mode, strict=True)

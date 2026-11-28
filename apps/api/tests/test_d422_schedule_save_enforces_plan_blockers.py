@@ -84,7 +84,9 @@ def _blocked(resp, blocker: str) -> dict:
     err = resp.json()["error"]
     assert err["code"] == "SCHEDULE_PLAN_BLOCKED", err
     assert err["blocker_id"] == blocker, err
-    assert blocker in err["message"]
+    # The id is data for clients; the sentence an operator reads carries none.
+    assert blocker not in err["message"], err["message"]
+    assert err["blocker_message"] in err["message"]
     return err
 
 
@@ -168,9 +170,12 @@ def test_schedule_saved_before_the_check_parks_before_a_job_then_runs(tmp_path, 
     with pytest.raises(ScheduleStartError) as refused:
         schedule_runner._run_schedule(sid, manual=True)
     message = str(refused.value)
-    assert message.startswith("Schedule cannot run — plan blocker g_dest_schema_unread:")
+    assert message.startswith("Schedule cannot run — The destination schema could not be read")
+    assert "g_dest_schema_unread" not in message
     parked = store.get_schedule(sid)
     assert parked.last_status == "needs_approval"
+    # The blocker id is the run record's structured reason, not prose.
+    assert parked.run_history[-1]["reason_code"] == "g_dest_schema_unread", parked.run_history[-1]
     assert not parked.last_job_id, "the refusal must come before a job exists"
 
     fixed = client.patch(f"/schedules/{sid}", json={"mappings": _assigned()})
@@ -179,3 +184,58 @@ def test_schedule_saved_before_the_check_parks_before_a_job_then_runs(tmp_path, 
     assert doc.get("status") == "completed", doc.get("error")
     with sqlite3.connect(dst_db) as c:
         assert c.execute('SELECT COUNT(*) FROM "legacy1"').fetchone()[0] == 5
+
+
+def test_studio_form_cadence_edit_resending_route_keys_still_saves(tmp_path, monkeypatch):
+    """Review finding 3: ScheduleForm resends source_table and cursor_column with
+    every edit. Unchanged values are not a route edit, so a legacy row's
+    cadence change is not re-planned; a real route change still is."""
+    src, dst, _ = _world(tmp_path, monkeypatch)
+    from services import schedule_store as store
+
+    client = _client()
+    created = client.post("/schedules/", json=_body(src, dst, "form1", cursor_column="id"))
+    assert created.status_code == 201, created.text
+    sid = created.json()["id"]
+    rows = store._load_all()
+    for i, s in enumerate(rows):  # a row saved before the D422 check
+        if s.id == sid:
+            rows[i] = store.PipelineSchedule.from_dict({**s.to_dict(), "mappings": _pending()})
+    store._save_all(rows)
+    form_patch = {"interval": "hourly", "source_table": "d422_src", "cursor_column": "id",
+                  "source_connector_id": src.id}
+    resp = client.patch(f"/schedules/{sid}", json=form_patch)
+    assert resp.status_code == 200, resp.text
+    assert store.get_schedule(sid).interval == "hourly"
+    _blocked(client.patch(f"/schedules/{sid}", json={**form_patch, "cursor_column": "city"}),
+             "g_dest_schema_unread")
+
+
+@pytest.mark.parametrize("top,stream,refused", [
+    ("incremental_append", "full_refresh_append", False),
+    ("full_refresh_append", "incremental_append", True),
+    ("incremental_append", "", True),
+])
+def test_kafka_cursor_plan_and_execute_judge_the_same_stream_mode(top, stream, refused):
+    """Review finding 2: the plan's g9 used the request's mode, Execute each
+    stream's own. Both now resolve the effective mode one way."""
+    from types import SimpleNamespace
+
+    from services.plan_execute_blockers import execute_plan_refusal
+    from services.preflight_cursor_gate import build_sync_contract_gate
+    from services.sync_cursor import normalize_sync_mode
+
+    contract = {"name": "r61_kfa", "cursor_field": "updated_at", "selected": True,
+                **({"sync_mode": stream} if stream else {})}
+    gate = build_sync_contract_gate(
+        [dict(contract)], sync=normalize_sync_mode(top), validation="strict",
+        dest="postgresql", src="kafka", kind="database", source_columns=["id", "updated_at"],
+        pass_status="pass", block_status="block", source_table="r61_kfa",
+    )
+    plan_refuses = any("Kafka cannot page" in i for i in (gate.get("details") or {}).get("issues") or [])
+    request = SimpleNamespace(source=SimpleNamespace(format="kafka"), sync_mode=top,
+                              stream_contracts=[dict(contract)], shape_recipe=None,
+                              mappings=[], destination=None)
+    execute_refuses = bool(execute_plan_refusal(request))
+    assert plan_refuses is refused, gate
+    assert execute_refuses is refused

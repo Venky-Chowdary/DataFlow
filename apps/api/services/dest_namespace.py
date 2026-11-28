@@ -41,11 +41,28 @@ def _configured_namespace(db_type: str, cfg: Mapping[str, Any]) -> str:
     return schema.strip('"')
 
 
+#: The namespace probe's own budget: one catalog row, never the run's deadline.
+NAMESPACE_PROBE_SECONDS = 10.0
+MISSING_NAMESPACE_GATE_ID = "g_dest_schema_missing"
+
+
+def _ask_namespace(cfg: Mapping[str, Any], sql: str, name: str) -> bool:
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import _engine
+
+    with _engine(dict(cfg)).connect() as conn:
+        return conn.execute(sa.text(sql), {"name": name}).first() is not None
+
+
 def missing_destination_namespace(cfg: Mapping[str, Any] | None) -> str:
     """The configured schema the destination server does not have, or ``""``.
 
-    ``""`` also when the question cannot be asked (the catalog read fails): an
+    ``""`` also when the question cannot be asked (the catalog read fails or
+    does not answer within :data:`NAMESPACE_PROBE_SECONDS`): an unconfirmed
+    namespace is never "missing", so an existing schema is never blocked; an
     unreachable destination is the destination gate's finding, not this one.
+    One probe per namespace per read-only plan (the plan's catalog scope).
     """
     if not isinstance(cfg, Mapping):
         return ""
@@ -58,24 +75,69 @@ def missing_destination_namespace(cfg: Mapping[str, Any] | None) -> str:
     name = _configured_namespace(db_type, cfg)
     if not name:
         return ""
-    try:
-        import sqlalchemy as sa
+    from services.introspect_memo import memoized_plan_read
 
-        from connectors.generic_sql import _engine
+    key = ("dest_namespace", db_type, str(cfg.get("host") or ""), str(cfg.get("port") or ""),
+           str(cfg.get("database") or ""), name)
+    found = memoized_plan_read(key, lambda: _probe_namespace(cfg, sql, name))
+    return name if found is False else ""
 
-        with _engine(dict(cfg)).connect() as conn:
-            found = conn.execute(sa.text(sql), {"name": name}).first()
-    except Exception as exc:  # noqa: BLE001 - unasked, never "missing"
-        logger.info("destination namespace probe unavailable: %s", type(exc).__name__)
-        return ""
-    return "" if found else name
+
+def _probe_namespace(cfg: Mapping[str, Any], sql: str, name: str) -> bool | None:
+    """True / False from the catalog; ``None`` when it did not answer in budget."""
+    from src.ai.copilot.tool_deadline import bounded_step, deadline_scope
+
+    with deadline_scope(NAMESPACE_PROBE_SECONDS):
+        step = bounded_step(
+            f"checking that destination schema {name} exists",
+            lambda: _ask_namespace(cfg, sql, name),
+            seconds=NAMESPACE_PROBE_SECONDS,
+        )
+    if step.timed_out or step.error is not None:
+        if step.error is not None:
+            logger.info("destination namespace probe unavailable: %s", type(step.error).__name__)
+        return None
+    return bool(step.value)
 
 
 def missing_namespace_refusal(connector_label: str, schema: str) -> str:
-    """The plan's refusal text: the schema by name, and the remedies."""
+    """The refusal text every surface shows: the schema by name, and the remedies."""
     return (
         f"Destination schema {schema} does not exist on {connector_label}, so the "
-        "table cannot be created there; nothing was staged. Create the schema (on "
-        "Oracle, the user) or point the connector at an existing schema, then plan "
-        "the transfer again."
+        "table cannot be created there; nothing was created or written. Create the "
+        "schema (on Oracle, the user) or point the connector at an existing schema, "
+        "then plan the transfer again."
     )
+
+
+def namespace_refusal(cfg: Mapping[str, Any] | None, label: str = "") -> str:
+    """:func:`missing_namespace_refusal` for this destination config, or ``""``."""
+    missing = missing_destination_namespace(cfg)
+    if not missing:
+        return ""
+    return missing_namespace_refusal(_label(cfg, label), missing)
+
+
+def _label(cfg: Mapping[str, Any] | None, label: str = "") -> str:
+    return label or str((cfg or {}).get("host") or "") or "the destination"
+
+
+def dest_namespace_gate(
+    cfg: Mapping[str, Any] | None, table_exists: bool | None = None
+) -> dict[str, Any] | None:
+    """Preflight gate (Studio Validate, plan, Execute's preflight) for a missing schema.
+
+    A table that was read proves its schema exists: no probe then.
+    """
+    if table_exists is True:
+        return None
+    missing = missing_destination_namespace(cfg)
+    if not missing:
+        return None
+    return {
+        "id": MISSING_NAMESPACE_GATE_ID,
+        "status": "block",
+        "message": missing_namespace_refusal(_label(cfg), missing),
+        "duration_ms": 0,
+        "details": {"kind": "destination_schema_missing", "schema": missing},
+    }

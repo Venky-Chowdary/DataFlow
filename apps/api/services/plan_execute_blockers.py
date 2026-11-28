@@ -18,6 +18,9 @@ Execute's up-front request check (``source_filter_gate.request_refusal``):
   database error or "No column mappings".
 * ``g9_sync_contract`` (D404/D422): a Kafka incremental read paged on a payload
   column. The plan refused it; a schedule saved anyway failed every run.
+* ``g_dest_schema_missing`` (D431 AC-3, :mod:`services.dest_namespace`): the
+  configured Oracle owner / SQL Server schema does not exist, so the run
+  failed with a raw ORA-01918 after a green plan.
 
 Schedules ask the same function when they are saved and before each run
 (:func:`schedule_plan_refusal`, D422), so a schedule every run would refuse is
@@ -135,13 +138,19 @@ def recipe_route_refusal(
 def kafka_cursor_refusal(
     source_format: Any, sync_mode: str | None, stream_contracts: Iterable[Any] | None
 ) -> str:
-    """The plan's g9 refusal of a Kafka column cursor (D404), or ``""``."""
+    """The g9 refusal of a Kafka column cursor (D404), or ``""``.
+
+    The plan's g9 gate and Execute both call this, so each selected stream is
+    judged on the mode its run uses: the stream's own mode when it declares one,
+    else the request's (``resolve_effective_sync_mode``, as the engine resolves
+    it). A full-refresh stream under an incremental request is not paged.
+    """
     from services.copy_kafka_common import kafka_family_name
 
     if kafka_family_name(str(source_format or "")) != "kafka":
         return ""
     from services.preflight_cursor_gate import MODES_REQUIRING_CURSOR
-    from services.sync_cursor import contract_cursor_field, normalize_sync_mode
+    from services.sync_cursor import contract_cursor_field, resolve_effective_sync_mode
     from src.transfer.engine_kafka import kafka_unpageable_cursor
 
     selected = [
@@ -149,7 +158,7 @@ def kafka_cursor_refusal(
         if _as_dict(c) and _as_dict(c).get("selected", True)
     ]
     for c in selected:
-        mode = normalize_sync_mode(str(c.get("sync_mode") or sync_mode or ""), default="")
+        mode = resolve_effective_sync_mode(sync_mode, str(c.get("sync_mode") or ""))
         if mode not in MODES_REQUIRING_CURSOR:
             continue
         refusal = kafka_unpageable_cursor(source_format, contract_cursor_field(c))
@@ -197,7 +206,32 @@ def execute_plan_refusal(request: Any) -> str:
         unread = dest_schema_unread_refusal(rows)
         if unread:
             return BlockerRefusal(unread, DEST_SCHEMA_UNREAD_GATE_ID)
+    missing = _destination_namespace_refusal(getattr(request, "destination", None))
+    if missing:
+        from services.dest_namespace import MISSING_NAMESPACE_GATE_ID
+
+        return BlockerRefusal(missing, MISSING_NAMESPACE_GATE_ID)
     return ""
+
+
+def _destination_namespace_refusal(destination: Any) -> str:
+    """D431 AC-3 at Execute: the schema the run would create its table in is missing.
+
+    The same probe Validate's gate runs, before any DDL: an existing table cannot
+    live in a missing schema, so this is a refusal whatever the table's state.
+    """
+    if destination is None or str(getattr(destination, "kind", "") or "database") != "database":
+        return ""
+    from services.dest_namespace import namespace_refusal
+
+    try:
+        from src.transfer.adapters import resolve_connector_config
+
+        cfg = resolve_connector_config(destination)
+    except Exception:  # noqa: BLE001 - unresolvable here is the connector gate's finding
+        return ""
+    label = str(getattr(destination, "host", "") or "") or "the destination"
+    return namespace_refusal(cfg, label)
 
 
 def refusal_details(refusal: Any) -> dict[str, Any]:

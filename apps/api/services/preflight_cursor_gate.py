@@ -748,13 +748,12 @@ def build_sync_contract_gate(
         )
     if unknown_pk:
         issues.append(f"Primary key not in source schema: {', '.join(unknown_pk[:5])}")
-    if sync in MODES_REQUIRING_CURSOR:
-        from src.transfer.engine_kafka import kafka_unpageable_cursor
+    from services.plan_execute_blockers import kafka_cursor_refusal
 
-        for contract in contracts:
-            refusal = kafka_unpageable_cursor(source_name, contract_cursor_field(contract))
-            if refusal and refusal not in issues:
-                issues.append(refusal)
+    # One rule with Execute: each selected stream on its own effective mode.
+    kafka_refusal = kafka_cursor_refusal(source_name, sync, contracts)
+    if kafka_refusal and kafka_refusal not in issues:
+        issues.append(kafka_refusal)
 
     from services.type_system import destination_is_file_export as _file_export
 

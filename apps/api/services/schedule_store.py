@@ -694,8 +694,8 @@ def _refuse_plan_blocker(payload: Mapping[str, Any]) -> None:
         blocker = str(getattr(refusal, "gate_id", "") or "")
         raise SchedulePlanBlocked(
             422, PLAN_BLOCKED_CODE,
-            f"This schedule was not saved: every run would be refused on plan blocker "
-            f"{blocker}. {refusal}",
+            f"This schedule was not saved, because every run would be refused for this "
+            f"reason. {refusal}",
             extra={"blocker_id": blocker, "blocker_message": str(refusal)},
         )
 
@@ -2371,7 +2371,11 @@ def _update_schedule_locked(
         if (enabling or contract_changed) and (contract_id or require_signed):
             assert_signed_contract(contract_id, require_signed=require_signed)
         recipe_edited = bool({"shape_recipe", *binding_keys} & set(data))
-        route_edited = bool(_PLAN_ROUTE_KEYS & set(data))  # D422: what the plan judged
+        # D422: what the plan judged changed in value (the Studio form resends
+        # source_table and cursor_column with every cadence edit).
+        route_edited = any(
+            key in data and data[key] != getattr(s, key, None) for key in _PLAN_ROUTE_KEYS
+        )
         if enabling or recipe_edited or route_edited or sync_mode != str(s.sync_mode or ""):
             _refuse_history_route_recipe(merged, sync_mode)
         if recipe_edited and "approved_shape_recipe_hash" not in data:
