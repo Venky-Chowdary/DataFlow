@@ -83,6 +83,8 @@ describe("Witness flag on a Map row", () => {
   before(() => {
     dom = new JSDOM("<!doctype html><html><body><div id=root></div></body></html>", { pretendToBeVisual: true });
     Object.assign(globalThis, { window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
+    // Node 20 (CI) has no global navigator; react-dom/client reads it on load.
+    Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
   });
   after(() => dom.window.close());
 

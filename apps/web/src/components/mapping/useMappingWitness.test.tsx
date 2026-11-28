@@ -23,6 +23,8 @@ describe("useMappingWitness", () => {
       window: dom.window, document: dom.window.document, localStorage: dom.window.localStorage,
       sessionStorage: dom.window.sessionStorage, IS_REACT_ACT_ENVIRONMENT: true,
     });
+    // Node 20 (CI) has no global navigator; react-dom/client reads it on load.
+    Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
     globalThis.fetch = (async (_input: RequestInfo | URL, init: RequestInit = {}) => {
       calls.push({ trigger: JSON.parse(String(init.body || "{}")).trigger });
       return respond();
