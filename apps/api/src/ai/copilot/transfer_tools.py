@@ -2737,6 +2737,13 @@ def _run_preflight(
                     # sentence names the column; the sample reason names the value.
                     "issues": _preflight_issue_lines(b.get("details") or {}),
                 },
+                # The options the gate offers (e.g. g3o's signed "Create note as
+                # NULL-able"), so the operator can name one in risk_acceptance.
+                "suggested_actions": list(
+                    b.get("suggested_actions")
+                    or (b.get("details") or {}).get("suggested_actions")
+                    or []
+                ),
             }
             for b in (result.get("blockers") or [])
         ][:10],
