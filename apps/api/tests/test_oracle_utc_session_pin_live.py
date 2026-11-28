@@ -79,26 +79,32 @@ def _cfg() -> dict:
     }
 
 
-def _ready() -> bool:
+def _not_ready() -> str:
+    """Why the module skips, naming only the engine that is missing, or ``""``.
+
+    The live-skip gate attributes a skip to every engine its reason names: one
+    reason naming the PostgreSQL peer counted as an unexpected PostgreSQL skip
+    in api-tests, where Oracle is simply absent.
+    """
     if getenv_brand("ORACLE_ENABLE", "").strip().lower() not in {"1", "true", "yes", "on"}:
-        return False
+        return "Oracle live IT disabled — set DATAFLOW_ORACLE_ENABLE=1 plus DATAFLOW_ORACLE_USER/PASSWORD"
     cfg = _cfg()
     if not (cfg["username"] and cfg["password"]):
-        return False
+        return "Oracle live IT disabled — set DATAFLOW_ORACLE_USER/PASSWORD"
     try:
         with socket.create_connection((cfg["host"], cfg["port"]), timeout=3):
             pass
-        from tests.helpers.live_env import pg_up
-
-        return pg_up() and sqlalchemy_sql(cfg, "SELECT 1 FROM DUAL", fetch=True) == [(1,)]
+        if sqlalchemy_sql(cfg, "SELECT 1 FROM DUAL", fetch=True) != [(1,)]:
+            return "Oracle not answering SELECT 1 FROM DUAL"
     except Exception:  # noqa: BLE001 — not reachable: the module skips
-        return False
+        return f"Oracle not reachable at {cfg['host']}:{cfg['port']}"
+    from tests.helpers.live_env import pg_up
+
+    return "" if pg_up() else "PostgreSQL peer not reachable (DATAFLOW_PG_*)"
 
 
-pytestmark = pytest.mark.skipif(
-    not _ready(),
-    reason="Oracle live IT disabled — set DATAFLOW_ORACLE_ENABLE=1 plus DATAFLOW_ORACLE_USER/PASSWORD and a PostgreSQL peer",
-)
+_SKIP = _not_ready()
+pytestmark = pytest.mark.skipif(bool(_SKIP), reason=_SKIP or "ready")
 
 
 @pytest.fixture()
