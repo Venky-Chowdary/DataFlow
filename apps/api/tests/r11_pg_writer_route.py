@@ -25,7 +25,7 @@ PG = h.PG
 def mysql_family(kind: str) -> dict[str, Any]:
     """Connector settings for ``mysql`` (:3306) or ``mariadb`` (:3307)."""
     if kind == "mysql":
-        port, pw = 3306, os.environ.get("MYSQL_PASSWORD", "")
+        port, pw = int(os.environ.get("MYSQL_PORT", "3306")), os.environ.get("MYSQL_PASSWORD", "")
         user = os.environ.get("MYSQL_USER", "dataflow")
         db = os.environ.get("MYSQL_DATABASE", "dataflow")
         host = "127.0.0.1"

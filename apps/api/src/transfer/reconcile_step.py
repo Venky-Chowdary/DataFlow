@@ -9782,7 +9782,12 @@ def engine_copy_identity_alignment(
     summary = dest_summary if isinstance(dest_summary, dict) else {}
     mode = str(summary.get("sync_mode") or summary.get("effective_sync_mode") or "")
     before = recon.get("target_rows_before", summary.get("target_rows_before"))
-    replaced = is_overwrite_sync(mode) or (isinstance(before, int) and before == 0)
+    # A mirror's active population is the source by definition (deleted keys
+    # tombstoned or removed) unless keys absent from the source were retained.
+    mirrored = mode.strip().lower() in {"full_refresh_mirror", "mirror"} and not int(
+        summary.get("retained_missing_rows") or 0
+    )
+    replaced = is_overwrite_sync(mode) or mirrored or (isinstance(before, int) and before == 0)
     if not replaced:
         return None
     return {
@@ -9793,6 +9798,37 @@ def engine_copy_identity_alignment(
             "digest equals the source re-read"
         ),
     }
+
+
+def _stamp_unmeasured_reread_alignment(
+    recon: dict[str, Any], dest_summary: dict[str, Any] | None
+) -> None:
+    """D381: a re-read route whose write pass was not fingerprinted.
+
+    The job message said "Row fidelity verified" while the certificate refused
+    "source re-read identity/hash alignment is required": the route re-reads
+    the source on purpose and never fingerprints the write pass, so alignment
+    was unmeasured (``None``), not failed. When the run replaced the
+    destination with its write and the whole-population digests of the
+    independent re-read and the destination match, that is the alignment
+    (as on the engine-copy route). A measured mismatch is never overridden.
+    """
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    if not isinstance(recon, dict) or recon.get("passed") is not True:
+        return
+    if recon.get("identity_hash_aligned") is True or summary.get("identity_hash_aligned") is False:
+        return
+    measured = summary.get("identity_alignment")
+    if isinstance(measured, dict) and measured.get("reason") != "write_pass_not_fingerprinted":
+        return
+    # The pass that read the *source* says it re-read it (a staged merge's
+    # provenance can be its staging re-read, which proves nothing about it).
+    if summary.get("source_independently_reread") is not True or str(recon.get("checksum_scope") or ""):
+        return
+    alignment = engine_copy_identity_alignment(recon, summary)
+    if alignment:
+        recon["identity_alignment"] = alignment
+        recon["identity_hash_aligned"] = True
 
 
 def run_reconciliation(
@@ -10115,6 +10151,7 @@ def run_reconciliation(
                 _ri_msg = str(_ri_gate.get("message") or "").strip()
                 if _ri_msg and _ri_msg not in str(recon.get("message") or ""):
                     recon["message"] = f"{str(recon.get('message') or '').rstrip()} {_ri_msg}".strip()
+    _stamp_unmeasured_reread_alignment(recon, dest_summary)
     # Unshaped digest failures only: for shaped runs the transform_applied
     # proof names its own culprit keys via culprit_keys_by_kind; hashing raw
     # src vs shaped dest here would flag every transformed row. And this is a

@@ -887,6 +887,17 @@ def _stamp_merge_source_digest(
             if str((summary or {}).get("checksum") or "").strip() == checksum and isinstance(basis, dict):
                 dest_summary.setdefault("gate8_digest_types", dict(basis))
                 break
+        stage = stage_summary or {}
+        if str(stage.get("checksum") or "").strip() == checksum:
+            # D381: the evidence about the *source* (its re-read, alignment and
+            # connector releases) comes only from the pass that read it — never
+            # from the staging → target apply, whose re-read is of staging.
+            for key in ("connector_versions", "identity_alignment"):
+                if isinstance(stage.get(key), dict):
+                    dest_summary.setdefault(key, dict(stage[key]))
+            for key in ("source_independently_reread", "identity_hash_aligned"):
+                if isinstance(stage.get(key), bool):
+                    dest_summary.setdefault(key, stage[key])
         return
     apply_summary = apply_summary or {}
     if apply_summary.get("checksum") and apply_summary.get("proof_scope"):
