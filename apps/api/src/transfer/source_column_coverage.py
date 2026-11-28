@@ -113,15 +113,28 @@ def refuse_unaccounted_without_validate(
 
 
 #: Keys a quarantined row carries that are not source columns: the marker of a
-#: finding that refused the whole row (``"column": "*"``) and the ``_df_lsn``
-#: the CDC writer stamped on the image. A replay of those rows judged them as
-#: undecided source columns and refused every CDC/CHECK replay (train 2 CI).
-_REPLAY_NON_SOURCE_KEYS = frozenset({"*", "_df_lsn"})
+#: finding that refused the whole row (``"column": "*"``) and, on a CDC route
+#: only, the ``_df_lsn`` the CDC writer stamped on the image. A replay of those
+#: rows judged them as undecided source columns and refused every CDC/CHECK
+#: replay (train 2 CI). Elsewhere ``_df_lsn`` is an ordinary source column (a
+#: table a CDC pipeline filled, copied on in batch) and is judged like any other.
+_REPLAY_ROW_MARKER = "*"
+_CDC_LSN_STAMP = "_df_lsn"
 
 
-def replay_source_columns(columns: list[str] | None) -> list[str]:
-    """The source columns of quarantined rows, without the row marker and the LSN stamp."""
-    return [c for c in columns or [] if str(c).strip().lower() not in _REPLAY_NON_SOURCE_KEYS]
+def replay_source_columns(columns: list[str] | None, *, cdc: bool) -> list[str]:
+    """The source columns of quarantined rows, without the row marker (and, on CDC, the LSN stamp)."""
+    skip = {_REPLAY_ROW_MARKER, _CDC_LSN_STAMP} if cdc else {_REPLAY_ROW_MARKER}
+    return [c for c in columns or [] if str(c).strip().lower() not in skip]
+
+
+def is_cdc_route(request: object) -> bool:
+    """True when the run, or any stream it selects, applies CDC."""
+    modes = [str(getattr(request, "sync_mode", "") or "")]
+    for contract in getattr(request, "stream_contracts", None) or []:
+        if isinstance(contract, dict) and contract.get("selected", True):
+            modes.append(str(contract.get("sync_mode") or ""))
+    return any(m.strip().lower().startswith("cdc") for m in modes)
 
 
 def _live_has(target: str, live: set[str]) -> bool:

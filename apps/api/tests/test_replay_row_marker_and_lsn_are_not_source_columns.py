@@ -64,8 +64,19 @@ def test_a_whole_row_finding_replays(tmp_path: Path) -> None:
     assert _ages(dest) == {1: 30, 2: 25}
 
 
+def _as_cdc_route(job_id: str) -> None:
+    """The parent job as a CDC route stores it (the stamp is a CDC writer's)."""
+    from services.mongodb_service import get_mongodb_service
+
+    store = get_mongodb_service()
+    saved = dict(store.get_job(job_id)["transfer_request"])
+    saved["sync_mode"] = "cdc_incremental"
+    store.update_job_fields(job_id, {"transfer_request": saved})
+
+
 def test_a_cdc_image_with_its_lsn_stamp_replays(tmp_path: Path) -> None:
     client, job_id, dest, findings = _quarantined_run(tmp_path)
+    _as_cdc_route(job_id)
     with sqlite3.connect(dest) as db:  # a CDC destination keeps the LSN it applied
         db.execute("ALTER TABLE users ADD COLUMN _df_lsn TEXT")
     rows = [_whole_row(findings[0], {"id": "2", "age": "25", "_df_lsn": "0/16B3748"})]
@@ -82,4 +93,19 @@ def test_a_source_column_the_map_leaves_out_still_refuses_the_replay(tmp_path: P
     detail = replay.json()["detail"]
     assert "neither mapped nor declared omitted: nickname" in detail, detail
     assert "*" not in detail.split("omitted:", 1)[1].split("—", 1)[0], detail
+    assert _ages(dest) == {1: 30}
+
+
+def test_a_real_df_lsn_source_column_on_a_batch_route_is_still_judged(tmp_path: Path) -> None:
+    """Outside CDC, ``_df_lsn`` is a source column (a table a CDC pipeline
+    filled, copied on in batch): leaving it unmapped refuses the replay by name
+    instead of dropping it silently."""
+    client, job_id, dest, findings = _quarantined_run(tmp_path)
+    with sqlite3.connect(dest) as db:
+        db.execute("ALTER TABLE users ADD COLUMN _df_lsn TEXT")
+    rows = [_whole_row(findings[0], {"id": "2", "age": "25", "_df_lsn": "0/16B3748"})]
+    rows[0]["source_values"] = {"id": "2", "age": "25", "_df_lsn": "0/16B3748"}
+    replay = client.post(f"/api/v1/connectors/jobs/{job_id}/quarantine/replay", json={"rows": rows})
+    assert replay.status_code == 409, replay.text
+    assert "neither mapped nor declared omitted: _df_lsn" in replay.json()["detail"]
     assert _ages(dest) == {1: 30}

@@ -2875,11 +2875,12 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         SourceColumnsUnaccounted,
         _stream_live_types,
         refuse_unaccounted_without_validate,
+        is_cdc_route,
         refuse_unapproved_add_without_validate,
         replay_source_columns,
     )
 
-    source_columns = replay_source_columns(columns)
+    source_columns = replay_source_columns(columns, cdc=is_cdc_route(transfer_req))
     try:
         refuse_unaccounted_without_validate(child_req, source_columns, mappings)
         if dest.kind == "database" and dest.table:
