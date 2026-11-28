@@ -1348,6 +1348,7 @@ def run_file_preflight(
                     source_table=source_table,
                     primary_key=source_pk_cols[0],
                     primary_key_columns=source_pk_cols,
+                    source_filter=source_filter,  # D420: the rows the run reads
                 )
                 source_duplicate_findings = list(probe_result.findings or [])
                 source_duplicate_probe_status = probe_result.status
@@ -1729,6 +1730,7 @@ def run_file_preflight(
     )
     ctx.sample_unavailable_reason = sample_unavailable_reason
     ctx.source_null_key_rows = source_null_key_rows
+    ctx.source_null_key_filter = dict(source_filter or {}) or None  # D420
     ctx.source_key_collisions = source_key_collisions
     ctx.source_measured_empty = source_measured_empty
     # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL

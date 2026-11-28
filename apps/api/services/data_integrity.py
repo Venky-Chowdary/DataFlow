@@ -2324,12 +2324,16 @@ def _check_null_keys(
     *,
     sync_mode: str,
     dest_kind: str,
+    source_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """D46: population rows whose identity key is NULL, from the source probe.
 
     A keyed write matches on the key, and a NULL matches nothing: the row can
     neither update nor insert. Found only at write time, it surfaced as an
     unrelated "column not on the destination" failure after rows had landed.
+
+    ``source_filter`` is the run's filter: ``null_rows`` are the rows it keeps
+    (D420), so the message names the filter instead of advising one.
     """
     from services.primary_key import sync_requires_unique_identity
     from services.sync_cursor import normalize_sync_mode
@@ -2343,6 +2347,17 @@ def _check_null_keys(
         "write cannot match or insert a row without its key. Fill the key, "
         "filter those rows out, or upsert on a key that is never NULL."
     )
+    if source_filter:
+        from services.row_filter import filter_columns
+
+        on = ", ".join(dict.fromkeys(filter_columns(source_filter))) or "the declared columns"
+        message = (
+            f"{label}: {null_rows:,} source row(s) that the source filter on {on} keeps "
+            "have a NULL upsert key — a keyed write cannot match or insert a row "
+            "without its key. Fill the key, add "
+            f"'{' and '.join(f'{c} is not null' for c in key_columns) or 'key is not null'}' "
+            "to the filter, or upsert on a key that is never NULL."
+        )
     if not keyed:
         return {
             "check": "null_keys",
@@ -2444,6 +2459,7 @@ def run_integrity_audit(
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
     source_null_key_rows: int | None = None,
+    source_null_key_filter: dict[str, Any] | None = None,
     source_key_collisions: dict[str, Any] | None = None,
     dest_table_exists: bool | None = None,
     empty_cells_as_null: bool = False,
@@ -2696,6 +2712,7 @@ def run_integrity_audit(
                     int(source_null_key_rows),
                     sync_mode=sync_mode,
                     dest_kind=dest_kind,
+                    source_filter=source_null_key_filter,
                 )
             )
         merged_by_choice = (  # D402: keep_last under the destination's equality merges them

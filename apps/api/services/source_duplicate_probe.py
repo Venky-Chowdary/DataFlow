@@ -140,6 +140,8 @@ class SourceDuplicateProbeResult:
     #: (``None`` when this source kind was not counted). GROUP BY folds NULL
     #: keys into one group, so a single NULL never shows up as a duplicate.
     null_key_rows: int | None = None
+    #: NULL-key rows the run's source filter removed (D420); None without a filter.
+    null_key_rows_filtered_out: int | None = None
 
     @property
     def ran(self) -> bool:
@@ -211,8 +213,13 @@ def _sql_duplicates(
     limit: int = 5,
     *,
     null_counts: dict[str, int] | None = None,
+    source_filter: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Duplicate key groups; fills ``null_counts["rows"]`` when a dict is passed."""
+    """Duplicate key groups; fills ``null_counts["rows"]`` when a dict is passed.
+
+    ``source_filter`` is the run's own filter: the NULL-key count is the rows
+    the run will read (R3, D420), so a filter that removes them leaves 0.
+    """
     import sqlalchemy as sa
 
     from connectors.generic_sql import _engine
@@ -223,11 +230,18 @@ def _sql_duplicates(
     schema, table = split_qualified_table(table, (cfg.get("schema") or "").strip() or None)
     # Case-folding engines and Studio ``schema.table`` spellings must address
     # the catalog object, not ``public."public.case_a_src"``.
-    ident = resolve_object_identity(engine, table, schema, columns=pk_columns)
+    from services.row_filter import filter_columns
+
+    filter_cols = filter_columns(source_filter) if source_filter else []
+    ident = resolve_object_identity(
+        engine, table, schema, columns=list(dict.fromkeys([*pk_columns, *filter_cols]))
+    )
+    filter_stored = list(filter_cols)
     if ident.exists:
         table = sa.sql.quoted_name(ident.table, True)
         schema = sa.sql.quoted_name(ident.schema, True) if ident.schema else None
         pk_columns = [ident.columns.get(c, c) for c in pk_columns]
+        filter_stored = [ident.columns.get(c, c) for c in filter_cols]
 
     # Build a dialect-agnostic query so SQLAlchemy emits the right LIMIT/TOP/FETCH
     # syntax for SQL Server, Oracle, etc.
@@ -255,6 +269,12 @@ def _sql_duplicates(
                 .where(sa.or_(*[c.is_(None) for c in pk_cols]))
             )
             null_counts["rows"] = int(conn.execute(null_stmt).scalar() or 0)
+            if source_filter and null_counts["rows"]:
+                null_counts["rows_before_filter"] = null_counts["rows"]
+                null_counts["rows"] = _filtered_null_key_rows(
+                    conn, tbl, pk_cols, filter_cols, filter_stored, source_filter,
+                    engine=str(cfg.get("type") or ""),
+                )
 
     out: list[dict[str, Any]] = []
     n = len(pk_columns)
@@ -272,6 +292,42 @@ def _sql_duplicates(
             }
         )
     return out
+
+
+def _filtered_null_key_rows(
+    conn: Any,
+    tbl: Any,
+    pk_cols: list[Any],
+    filter_cols: list[str],
+    filter_stored: list[str],
+    source_filter: dict[str, Any],
+    *,
+    engine: str,
+) -> int:
+    """NULL-key rows the run's source filter keeps, judged as the read judges them.
+
+    The filter runs on the reader's wire cells (``row_filter``), so only the
+    NULL-key rows are read back, with the columns the filter names, and passed
+    through the same predicate.
+    """
+    import sqlalchemy as sa
+
+    from services.row_filter import iter_filtered_rows
+    from services.value_serializer import driver_cell_to_string
+
+    cols = [sa.column(sa.sql.quoted_name(str(c), True)) for c in filter_stored]
+    stmt = sa.select(*cols).select_from(tbl).where(sa.or_(*[c.is_(None) for c in pk_cols]))
+    kept = 0
+    result = conn.execute(stmt)
+    while True:
+        chunk = result.fetchmany(5000)
+        if not chunk:
+            return kept
+        records = [
+            {name: driver_cell_to_string(row[i]) for i, name in enumerate(filter_cols)}
+            for row in chunk
+        ]
+        kept += sum(1 for _ in iter_filtered_rows(records, source_filter, engine=engine))
 
 
 def _mongo_duplicates(
@@ -817,8 +873,13 @@ def probe_source_duplicate_keys_result(
     primary_key_columns: list[str] | None = None,
     workspace_id: str | None = None,
     limit: int = 5,
+    source_filter: dict[str, Any] | None = None,
 ) -> SourceDuplicateProbeResult:
-    """Run the source duplicate probe and return an honest status + findings."""
+    """Run the source duplicate probe and return an honest status + findings.
+
+    ``source_filter`` scopes the NULL-key count of a SQL source to the rows the
+    run reads (D420).
+    """
     try:
         from services.procedure_source import callable_skip_note, is_callable_source
 
@@ -1092,7 +1153,8 @@ def probe_source_duplicate_keys_result(
             scan = bounded_step(
                 f"checking key uniqueness on source table {table}",
                 lambda: _sql_duplicates(
-                    cfg, table, pk_columns, limit=limit, null_counts=null_counts
+                    cfg, table, pk_columns, limit=limit, null_counts=null_counts,
+                    source_filter=dict(source_filter or {}) or None,
                 ),
                 seconds=DUPLICATE_SCAN_STEP_SECONDS,
                 conn=cfg,
@@ -1152,6 +1214,11 @@ def probe_source_duplicate_keys_result(
             db_type=db_type,
             primary_key_columns=pk_columns,
             null_key_rows=null_counts.get("rows"),
+            null_key_rows_filtered_out=(
+                int(null_counts["rows_before_filter"]) - int(null_counts.get("rows") or 0)
+                if "rows_before_filter" in null_counts
+                else None
+            ),
         )
     except Exception as exc:
         logger.warning("Source duplicate-key probe failed: %s", exc, exc_info=exc)
