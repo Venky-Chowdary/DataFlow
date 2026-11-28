@@ -246,10 +246,15 @@ def build_cursor_value_gates(
         cursor = str(getattr(read_scope, "cursor_column", "") or "").strip()
         if not cursor or not incremental_read_narrows(sync_mode):
             return None, []
+        from src.ai.copilot.tool_deadline import scan_step
+
         strict = (validation_mode or "strict").lower() == "strict"
-        ordering = _text_cursor_blockers(
-            cursor, column_types, source_connector_id, source_config, source_table
-        )
+        # Each check names itself and its table if it holds a tool deadline (D423).
+        with scan_step(f"checking the order of cursor column {cursor} on source table "
+                       f"{source_table}", source_config):
+            ordering = _text_cursor_blockers(
+                cursor, column_types, source_connector_id, source_config, source_table
+            )
         if ordering:
             # Not a matter of validation strictness: on two orderings the read
             # skips rows however the run is graded.
@@ -264,13 +269,15 @@ def build_cursor_value_gates(
                 ordering,
             )
         nullable = (column_nullability or {}).get(cursor)
-        probe = probe_null_cursor_count(
-            source_connector_id=source_connector_id,
-            source_config=source_config,
-            source_table=source_table,
-            source_collection=str((source_config or {}).get("collection") or ""),
-            cursor_column=cursor,
-        )
+        with scan_step(f"counting NULL values in cursor column {cursor} on source table "
+                       f"{source_table}", source_config):
+            probe = probe_null_cursor_count(
+                source_connector_id=source_connector_id,
+                source_config=source_config,
+                source_table=source_table,
+                source_collection=str((source_config or {}).get("collection") or ""),
+                cursor_column=cursor,
+            )
         details: dict[str, Any] = {
             "cursor_column": cursor,
             "probe_status": probe.status,

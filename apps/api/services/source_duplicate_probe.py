@@ -1162,10 +1162,13 @@ def _enforced_key_proves_unique(
 
         engine = _engine(cfg)
         schema, name = split_qualified_table(table, (cfg.get("schema") or "").strip() or None)
-        inspector = sa.inspect(engine)
-        if not inspector.has_table(name, schema=schema):
-            return ""
-        declared = inspector.get_pk_constraint(name, schema=schema) or {}
+        # One checkout for both catalog questions: an Engine-bound inspector
+        # pings a fresh connection per call (D423, tunnelled hosts).
+        with engine.connect() as conn:
+            inspector = sa.inspect(conn)
+            if not inspector.has_table(name, schema=schema):
+                return ""
+            declared = inspector.get_pk_constraint(name, schema=schema) or {}
         key = [str(c) for c in (declared.get("constrained_columns") or [])]
     except Exception as exc:  # noqa: BLE001 - fall back to the scan
         logger.debug("enforced-key lookup failed for %s: %s", table, exc)

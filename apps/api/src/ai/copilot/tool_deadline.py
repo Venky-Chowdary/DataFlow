@@ -128,6 +128,9 @@ class _Slot:
     waiting: str = ""
     #: True for a slot :func:`waiting_on` opened on a thread that had none.
     opened_by_wait: bool = False
+    #: A query on a system this call already read (:func:`scan_step`): when it
+    #: holds the deadline, the step and its table are slow, not the host (D423).
+    scan: bool = False
 
 
 @dataclass
@@ -361,6 +364,36 @@ def note_step(
             # A more precise step is already recorded on this thread.
             return
         progress.slots[threading.get_ident()] = slot
+
+
+@contextlib.contextmanager
+def scan_step(step: str, conn: Any = None, *, role: str = "source"):
+    """Record a query step on a system this call has already read, then restore.
+
+    A preflight check that scans a table (cursor order, NULL cursor values) runs
+    inside the broader "running the preflight checks" step. When the deadline
+    passes there, the timeout names this step and its table and says the host
+    answered, instead of calling a reachable host unreachable (D423).
+    """
+    progress = _progress.get()
+    if progress is None:
+        yield
+        return
+    ident = threading.get_ident()
+    slot = _Slot(step=step, role=role, target=describe_target(conn) if conn is not None else "",
+                 scan=True)
+    with progress.lock:
+        previous = progress.slots.get(ident)
+        progress.slots[ident] = slot
+    try:
+        yield
+    finally:
+        with progress.lock:
+            if progress.slots.get(ident) is slot:
+                if previous is None:
+                    progress.slots.pop(ident, None)
+                else:
+                    progress.slots[ident] = previous
 
 
 def _host_of(target: str) -> str:
@@ -659,6 +692,15 @@ def _timeout_message(tool: str, seconds: float, progress: _Progress) -> str:
         return _parallel_timeout_message(tool, waited, slots)
     slot = slots[0] if slots else _Slot()
     step, role, target, also = slot.step, slot.role, slot.target, slot.also
+    if slot.scan:
+        where = f" ({target})" if target else ""
+        return (
+            f"{tool} did not finish within {waited}: the step '{step}' was still "
+            f"running. The {role or 'source'}{where} answered the earlier reads of this "
+            "call, so the host is reachable; that step is slow on this table (for "
+            "example a cursor column without an index). Nothing was staged. Try "
+            "again, index the cursor column, or run the sync as a full refresh."
+        )
     if slot.waiting:
         # The connection layer said which endpoint it was talking to (D187).
         waited_role, endpoint = _waited(slot)

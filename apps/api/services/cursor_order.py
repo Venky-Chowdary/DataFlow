@@ -489,7 +489,10 @@ def probe_text_cursor(
     stored = str(ident.columns[column])
     by_storage = engine.dialect.name == "sqlite"
     if not by_storage:
-        declared = next(
+        # The identity read already reflected this column's declared type; a
+        # second inspector pass cost a checkout and three catalog queries (D423).
+        reflected = ident.column_types.get(stored)
+        declared = str(reflected) if reflected is not None else next(
             (
                 str(c.get("type"))
                 for c in sa.inspect(engine).get_columns(ident.table, schema=ident.schema or None)

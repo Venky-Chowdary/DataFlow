@@ -69,3 +69,20 @@ def memoized_introspection(
     if key not in memo:
         memo[key] = read()
     return copy.deepcopy(memo[key])
+
+
+def memoized_plan_read(key: Any, read: Callable[[], Any]) -> Any:
+    """``read()`` once per ``key`` inside a plan scope; outside one, always live.
+
+    For catalog facts other than ``introspect_schema`` (an object's stored
+    spelling and column names, D423): a plan asks them once per check, and on a
+    tunnelled host every repeat costs round trips the 45 s plan budget does not
+    have. The value checks themselves are never memoised.
+    """
+    memo = _memo.get()
+    if memo is None:
+        return read()
+    full = ("plan_read", repr(key))
+    if full not in memo:
+        memo[full] = read()
+    return copy.deepcopy(memo[full])
