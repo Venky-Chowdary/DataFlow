@@ -511,6 +511,52 @@ def _stamp_job(store: Any, job_id: str, confirmed: bool, reason: str, prior: str
         logger.warning("job %s: Oracle session stamp not written", job_id, exc_info=True)
 
 
+_STAMP_FIELDS = ("fidelity", "fidelity_reason", "type_narrowing", "conversion_class", "requires_risk_contract")
+
+
+def regrade_zone_stamps(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Preflight kwargs whose Oracle zone-pair mapping stamps follow this run's session.
+
+    Map stamps each mapping's fidelity verdict (``create_new_risk_stamp``) with
+    no destination session bound, so an offset or instant source into an Oracle
+    ``TIMESTAMP WITH [LOCAL] TIME ZONE`` column always came out ``lossy_cast``
+    with ``requires_risk_contract``. G4 trusts that stamp, so a route whose
+    session read back UTC was still refused for a Risk Contract the grade no
+    longer asks for (oracle-live: test_family_b_run2_own_table_e2e[oracle-*],
+    test_r11_engine_family_alias_e2e[amazon_rds_oracle]). Those mappings are
+    re-judged here on the bound pin, both ways: confirmed or not.
+    """
+    mappings = kwargs.get("mappings")
+    if not isinstance(mappings, list):
+        return kwargs
+    from connectors.oracle_tstz import oracle_tz_kind
+    from services.mapping_proof import mapping_fidelity
+    from services.type_system import datetime_timezone_polarity
+
+    samples = [r for r in kwargs.get("sample_rows") or [] if isinstance(r, Mapping)]
+    out: list[Any] = []
+    changed = False
+    for m in mappings:
+        if (
+            isinstance(m, dict) and any(f in m for f in _STAMP_FIELDS)
+            and oracle_tz_kind(str(m.get("target_type") or "")) is not None
+            and datetime_timezone_polarity(str(m.get("source_type") or "")) in {"tz", "ltz"}
+        ):
+            source = str(m.get("source") or "")
+            verdict = mapping_fidelity(
+                m, destination_db_type=str(kwargs.get("destination_db_type") or ""),
+                dest_table_exists=kwargs.get("destination_table_exists"),
+                population=[r.get(source) for r in samples] if samples else None,
+            )
+            m = {**m, "fidelity": verdict["verdict"], "fidelity_reason": verdict["reason"],
+                 "type_narrowing": verdict.get("type_narrowing"),
+                 "conversion_class": verdict.get("conversion_class"),
+                 "requires_risk_contract": verdict.get("requires_risk_contract")}
+            changed = True
+        out.append(m)
+    return {**kwargs, "mappings": out} if changed else kwargs
+
+
 def with_oracle_session_pin(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Validate outside a run: judge Oracle instants on the destination's read-back zone.
 
@@ -524,11 +570,13 @@ def with_oracle_session_pin(fn: Callable[..., Any]) -> Callable[..., Any]:
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         dest_db = kwargs.get("destination_db_type") or ""
         cfg = kwargs.get("destination_config") if kwargs.get("destination_connected") else None
-        if not is_oracle(dest_db) or oracle_pin_bound():
+        if not is_oracle(dest_db):
             return fn(*args, **kwargs)
+        if oracle_pin_bound():
+            return fn(*args, **regrade_zone_stamps(kwargs))
         confirmed, reason, prior = probe_oracle_session(cfg) if cfg else (False, _UNCHECKED[1], "")
         with bind_oracle_utc_pin(confirmed, reason):
-            result = fn(*args, **kwargs)
+            result = fn(*args, **regrade_zone_stamps(kwargs))
         source = kwargs.get("source_config") if isinstance(kwargs.get("source_config"), Mapping) else {}
         notes = [n for n in (
             zone_change_notice(prior, zone_sensitive_route(
