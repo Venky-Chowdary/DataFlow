@@ -108,6 +108,12 @@ def sync_mode_from_phrase(spoken: str, *, default: str = "full_refresh_append") 
         return "scd2"
     if raw in {"mirror", "full_refresh_mirror"}:
         return "mirror"
+    # The published vocabulary (GET /transfer/capabilities, schedules, the
+    # store) is accepted as written: ``incremental_deduped`` is the catalog's
+    # name for incremental_upsert, ``cdc`` for cdc_incremental (D429).
+    catalog = _catalog_sync_mode(raw)
+    if catalog:
+        return catalog
     # Exact phrase first, then token-boundary contains for multi-word phrases.
     for phrase in _OVERWRITE_PHRASES:
         if text == phrase or f" {phrase} " in f" {text} ":
@@ -124,6 +130,35 @@ def sync_mode_from_phrase(spoken: str, *, default: str = "full_refresh_append") 
         if text == phrase or f" {phrase} " in f" {text} ":
             return "full_refresh_append"
     return default
+
+
+#: Catalog (``services.sync_cursor``) name -> the Pilot spelling of the same mode.
+_PILOT_SPELLING = {"incremental_deduped": "incremental_upsert", "cdc": "cdc_incremental"}
+#: Planner modes beyond :data:`SYNC_MODES` (engine-only spellings it also plans).
+_PLANNER_EXTRA_MODES = ("scd2", "mirror")
+
+
+def _catalog_sync_mode(token: str) -> str:
+    """The Pilot spelling of a published (canonical) sync-mode name, or ``""``.
+
+    Only the canonical names: an alias such as ``truncate`` must still go
+    through the whole-word phrase rules, which alone authorise an overwrite.
+    """
+    from services.sync_cursor import CANONICAL_SYNC_MODES
+
+    if token not in CANONICAL_SYNC_MODES:
+        return ""
+    pilot = _PILOT_SPELLING.get(token, token)
+    return pilot if pilot in SYNC_MODES or pilot in _PLANNER_EXTRA_MODES else ""
+
+
+def planner_sync_mode_names() -> str:
+    """Every mode the planner accepts, each with its published alias (D429)."""
+    aliases = {pilot: catalog for catalog, pilot in _PILOT_SPELLING.items()}
+    return ", ".join(
+        f"{mode} (alias {aliases[mode]})" if mode in aliases else mode
+        for mode in (*SYNC_MODES, *_PLANNER_EXTRA_MODES)
+    )
 
 
 def normalize_sync_mode(
@@ -153,10 +188,9 @@ def normalize_sync_mode(
         # phrase legitimately resolved to the default mode".
         recognized = sync_mode_from_phrase(spoken, default=None)  # type: ignore[arg-type]
         if recognized is None or _canonical(recognized, default="") not in CANONICAL_SYNC_MODES:
-            valid = ", ".join(sorted(SYNC_MODES))
             raise ValueError(
                 f"Unknown sync_mode {spoken!r} — I will not guess the load semantics. "
-                f"Valid modes: {valid}."
+                f"Valid modes: {planner_sync_mode_names()}."
             )
 
     candidate = sync_mode_from_phrase(spoken, default=default)
@@ -171,6 +205,12 @@ def normalize_sync_mode(
         )
         return default
     return candidate
+
+
+def _canonical_mode_name(mode: str) -> str:
+    from services.sync_cursor import normalize_sync_mode as _canonical
+
+    return _canonical(mode, default="")
 
 
 _CALLABLE_TABLE_RE = re.compile(r"^\s*(CALL|EXEC(?:UTE)?|SELECT)\b", re.IGNORECASE)
@@ -1797,6 +1837,8 @@ def plan_transfer(
                 else {}
             ),
             "sync_mode": mode,
+            # The published (GET /transfer/capabilities, schedule) name (D429).
+            "sync_mode_canonical": _canonical_mode_name(mode),
             "sync_mode_requested": (sync_mode or "").strip(),
             **(
                 {

@@ -633,7 +633,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "string",
                     "description": (
                         "full_refresh_append, full_refresh_overwrite, incremental_append, "
-                        "incremental_upsert, or cdc_incremental"
+                        "incremental_upsert (alias incremental_deduped), upsert, "
+                        "cdc_incremental (alias cdc), scd2, or mirror"
                     ),
                 },
                 "upsert_key": {
