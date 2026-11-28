@@ -33,10 +33,13 @@ _ORACLE = {"type": "oracle", "host": "ora.example.com", "port": 1521, "database"
 class _Catalog:
     """A fake engine: answers the namespace query only and records every statement."""
 
-    def __init__(self, exists: bool | None, *, delay: float = 0.0):
+    def __init__(self, exists: bool | None, *, delay: float = 0.0, names=None):
         self.exists = exists
         self.delay = delay
+        #: When set, the stored owner/schema names: a row only for an exact match.
+        self.names = names
         self.asked: list[str] = []
+        self.params: list[dict] = []
         self.lock = threading.Lock()
 
     def connect(self):
@@ -52,14 +55,18 @@ class _Catalog:
             def execute(self, stmt, params=None):
                 with catalog.lock:
                     catalog.asked.append(str(stmt))
+                    catalog.params.append(dict(params or {}))
                 if catalog.delay:
                     time.sleep(catalog.delay)
-                if catalog.exists is None:
+                if catalog.exists is None and catalog.names is None:
                     raise OSError("catalog did not answer")
+
+                hit = (catalog.exists if catalog.names is None
+                       else str((params or {}).get("name")) in catalog.names)
 
                 class _R:
                     def first(self_inner):
-                        return (1,) if catalog.exists else None
+                        return (1,) if hit else None
 
                 return _R()
 
@@ -68,8 +75,16 @@ class _Catalog:
 
 @pytest.fixture()
 def catalog(monkeypatch):
-    holder = {"engine": _Catalog(False)}
+    from services.sql_object_identity import ObjectIdentity
+
+    holder = {"engine": _Catalog(False), "table": "absent"}
     monkeypatch.setattr("connectors.generic_sql._engine", lambda cfg: holder["engine"])
+
+    def identity(engine, table, schema=None, *, columns=None, dialect=""):
+        state = holder["table"]
+        return ObjectIdentity(schema, table, state == "present", resolved=state != "unreadable")
+
+    monkeypatch.setattr("services.sql_object_identity.resolve_object_identity", identity)
     return holder
 
 
@@ -107,9 +122,11 @@ def test_studio_validate_refuses_a_missing_schema(catalog):
 def test_studio_validate_existing_schema_is_unaffected(catalog):
     catalog["engine"] = _Catalog(True)
     assert _gate(_validate(dict(_ORACLE))) is None
-    # A table that was read proves its schema: not even asked.
+    # A table that was read proves its schema, and an unknown one is not judged:
+    # only the create path (table proven absent) asks, as Execute does.
     catalog["engine"] = _Catalog(False)
     assert _gate(_validate(dict(_ORACLE), table_exists=True)) is None
+    assert _gate(_validate(dict(_ORACLE), table_exists=None)) is None
     assert catalog["engine"].asked == []
 
 
@@ -171,3 +188,63 @@ def test_execute_existing_or_unconfirmed_schema_is_not_refused(catalog):
     assert execute_plan_refusal(_oracle_request()) == ""
     catalog["engine"] = _Catalog(None)
     assert execute_plan_refusal(_oracle_request()) == ""
+
+
+def test_existing_table_append_is_not_refused_when_the_schema_probe_sees_no_row(catalog):
+    """Review of 7daf8e9bd: SQL Server's sys.schemas hides a schema the login
+    holds only table grants in. An existing-table append passed Validate and was
+    refused at Execute. Plan, Validate and Execute now agree: no refusal, and the
+    schema is never probed when the table exists."""
+    from services.plan_execute_blockers import execute_plan_refusal
+
+    catalog["table"] = "present"
+    catalog["engine"] = _Catalog(False)  # sys.schemas / ALL_USERS: no row
+    for cfg in (dict(_ORACLE), {**_ORACLE, "type": "sqlserver", "schema": "etl", "port": 1433}):
+        assert _gate(_validate(cfg, table_exists=True)) is None
+        request = _oracle_request()
+        request.destination.format = cfg["type"]
+        request.destination.schema = cfg["schema"]
+        assert execute_plan_refusal(request) == ""
+    assert catalog["engine"].asked == [], "the schema is not probed beside an existing table"
+    catalog["table"] = "unreadable"
+    assert execute_plan_refusal(_oracle_request()) == ""
+
+
+@pytest.mark.parametrize("db_type,configured,probed", [
+    ("oracle", "AppData", "AppData"),        # mixed case: the writer's quoted owner
+    ("oracle", "appdata", "APPDATA"),        # all-lowercase folds upper, as the writer folds
+    ("oracle", '"AppData"', "AppData"),      # quoted: exact
+    ("sqlserver", "[etl]", "etl"),           # bracketed: the stored name
+    ("sqlserver", '"Etl"', "Etl"),
+])
+def test_the_probe_asks_for_the_name_the_writer_uses(catalog, db_type, configured, probed):
+    from services import dest_namespace
+
+    catalog["engine"] = _Catalog(None, names={probed})
+    cfg = {**_ORACLE, "type": db_type, "schema": configured}
+    assert dest_namespace.missing_destination_namespace(cfg) == ""
+    assert catalog["engine"].params[-1]["name"] == probed
+    # And the same catalog without that exact name is "missing", named as configured.
+    catalog["engine"] = _Catalog(None, names={"SOMETHING_ELSE"})
+    assert dest_namespace.missing_destination_namespace(cfg) == probed
+
+
+def test_a_mixed_case_owner_that_exists_passes_validate(catalog):
+    catalog["engine"] = _Catalog(None, names={"AppData"})
+    assert _gate(_validate({**_ORACLE, "schema": "AppData"})) is None
+    assert _gate(_validate({**_ORACLE, "schema": "NoSuchOwner"})) is not None
+
+
+@pytest.mark.parametrize("text,schema", [
+    ("ORA-01918: user 'NOSUCHSCHEMA69' does not exist", "NOSUCHSCHEMA69"),
+    ('(2760, b\'The specified schema name "etl" either does not exist or you do not have '
+     'permission to use it.DB-Lib error message 20018\')', "etl"),
+])
+def test_a_create_that_hits_a_missing_schema_gets_a_named_message(text, schema):
+    """When the probe stayed unconfirmed, CREATE's own error is translated, not raw."""
+    from services.error_taxonomy import classify
+
+    out = classify(text, side="destination", phase="ddl")
+    assert out.code == "object.schema_not_found", out
+    assert out.object.get("schema") == schema
+    assert schema in out.message and "ORA-" not in out.message

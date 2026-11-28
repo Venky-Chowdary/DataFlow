@@ -25,20 +25,37 @@ _NAMESPACE_SQL = {
 }
 
 
+def _strip_delimiters(name: str) -> str:
+    """``"AppData"`` -> ``AppData``, ``[etl]`` -> ``etl``; the stored spelling inside."""
+    text = (name or "").strip()
+    if len(text) >= 2 and ((text[0], text[-1]) in {('"', '"'), ("[", "]")}):
+        return text[1:-1]
+    return text
+
+
 def _configured_namespace(db_type: str, cfg: Mapping[str, Any]) -> str:
-    from services.dialect_profiles import normalize_schema
+    """The schema name exactly as the writer will use it, delimiters removed.
+
+    ``normalize_schema`` is the writer's own fold: an all-lowercase Oracle name
+    is upper-cased, a mixed-case one (``AppData``) is kept as the quoted
+    identifier the writer creates objects under (review of 7daf8e9bd: probing
+    ``APPDATA`` for it blocked a valid owner).
+    """
+    from services.dialect_profiles import fold_identifier, normalize_schema
 
     raw = str(cfg.get("schema") or "").strip()
     if not raw:
         return ""  # the login's own default schema, which exists if the login does
-    schema = normalize_schema(db_type, raw, username=str(cfg.get("username") or "")) or ""
+    name = _strip_delimiters(
+        normalize_schema(db_type, raw, username=str(cfg.get("username") or "")) or ""
+    )
     if db_type == "oracle":
-        schema = schema if schema.startswith('"') else schema.upper()
-        if schema == str(cfg.get("username") or "").strip().upper():
+        user = _strip_delimiters(fold_identifier(db_type, str(cfg.get("username") or "")))
+        if name == user:
             return ""
-    if db_type == "sqlserver" and schema.lower() == "dbo":
+    if db_type == "sqlserver" and name.lower() == "dbo":
         return ""
-    return schema.strip('"')
+    return name
 
 
 #: The namespace probe's own budget: one catalog row, never the run's deadline.
@@ -127,9 +144,12 @@ def dest_namespace_gate(
 ) -> dict[str, Any] | None:
     """Preflight gate (Studio Validate, plan, Execute's preflight) for a missing schema.
 
-    A table that was read proves its schema exists: no probe then.
+    Asked only on the create path (the table is proven absent), as Execute asks
+    it: an existing table proves its schema, and an unknown one is not judged
+    here. On SQL Server ``sys.schemas`` lists only schemas the login holds some
+    permission on, so "no row" beside a readable table is not "missing".
     """
-    if table_exists is True:
+    if table_exists is not False:
         return None
     missing = missing_destination_namespace(cfg)
     if not missing:
@@ -141,3 +161,38 @@ def dest_namespace_gate(
         "duration_ms": 0,
         "details": {"kind": "destination_schema_missing", "schema": missing},
     }
+
+
+def create_path_namespace_refusal(cfg: Mapping[str, Any] | None, table: str, label: str = "") -> str:
+    """Execute's twin of :func:`dest_namespace_gate`: refuse only when the table is
+    proven absent and its configured schema is missing; ``""`` otherwise.
+
+    The table is looked up first, under the writer's schema spelling; an existing
+    or unreadable table never reaches the schema probe. Both reads share one
+    bounded step.
+    """
+    if not isinstance(cfg, Mapping) or not str(table or "").strip():
+        return ""
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    db_type = resolve_driver_type(str(cfg.get("type") or cfg.get("format") or ""))
+    if db_type not in _NAMESPACE_SQL:
+        return ""
+    name = _configured_namespace(db_type, cfg)
+    if not name:
+        return ""
+    from src.ai.copilot.tool_deadline import bounded_step, deadline_scope
+
+    def table_absent() -> bool:
+        from connectors.generic_sql import _engine
+        from services.sql_object_identity import resolve_object_identity
+
+        ident = resolve_object_identity(_engine(dict(cfg)), str(table), name, dialect=db_type)
+        return bool(ident.known_missing)
+
+    with deadline_scope(NAMESPACE_PROBE_SECONDS):
+        step = bounded_step(f"checking destination table {table}", table_absent,
+                            seconds=NAMESPACE_PROBE_SECONDS)
+    if step.timed_out or step.error is not None or not step.value:
+        return ""  # present, or unconfirmed: never refused on the schema's account
+    return namespace_refusal(cfg, label)

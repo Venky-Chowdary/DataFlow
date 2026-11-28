@@ -217,12 +217,12 @@ def execute_plan_refusal(request: Any) -> str:
 def _destination_namespace_refusal(destination: Any) -> str:
     """D431 AC-3 at Execute: the schema the run would create its table in is missing.
 
-    The same probe Validate's gate runs, before any DDL: an existing table cannot
-    live in a missing schema, so this is a refusal whatever the table's state.
+    Validate's rule exactly: only on the create path (the table proven absent),
+    before any DDL. An existing table is never refused on its schema's account.
     """
     if destination is None or str(getattr(destination, "kind", "") or "database") != "database":
         return ""
-    from services.dest_namespace import namespace_refusal
+    from services.dest_namespace import create_path_namespace_refusal
 
     try:
         from src.transfer.adapters import resolve_connector_config
@@ -231,7 +231,8 @@ def _destination_namespace_refusal(destination: Any) -> str:
     except Exception:  # noqa: BLE001 - unresolvable here is the connector gate's finding
         return ""
     label = str(getattr(destination, "host", "") or "") or "the destination"
-    return namespace_refusal(cfg, label)
+    table = str(getattr(destination, "table", "") or getattr(destination, "collection", "") or "")
+    return create_path_namespace_refusal(cfg, table, label)
 
 
 def refusal_details(refusal: Any) -> dict[str, Any]:

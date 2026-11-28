@@ -691,6 +691,8 @@ _OBJ_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("table", re.compile(r"command denied to user '[^']*'(?:@'[^']*')? for table '([^']+)'")),
     ("table", re.compile(r"The table '([^']+)' is full")),
     ("table", re.compile(r"ns (?:does not exist|not found): ([\w.$-]+)")),
+    ("schema", re.compile(r"ORA-01918: user '([^']+)' does not exist")),
+    ("schema", re.compile(r'specified schema name "([^"]+)"')),
     ("schema", re.compile(r'schema "([^"]+)"')),
     ("schema", re.compile(r"permission denied for schema ([\w\"]+)")),
     ("database", re.compile(r'database "([^"]+)" does not exist')),
@@ -989,7 +991,10 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("object.column_not_found", re.compile(
         r"^no such column: |column \"[^\"]+\" (?:of relation \"[^\"]+\" )?does not exist|unknown column '|"
         r"invalid column name '|has no column named ", re.I)),
-    ("object.schema_not_found", re.compile(r'schema "[^"]+" does not exist|unknown schema ', re.I)),
+    # D431: Oracle's missing owner and SQL Server's missing schema (msg 2760) at CREATE.
+    ("object.schema_not_found", re.compile(
+        r'schema "[^"]+" does not exist|unknown schema |ora-01918|'
+        r'specified schema name "[^"]+" either does not exist', re.I)),
     ("value.duplicate_key", re.compile(
         r"duplicate key value violates unique constraint|^duplicate entry |unique constraint failed: |"
         r"e11000 duplicate key|violation of primary key constraint|ora-00001", re.I)),
