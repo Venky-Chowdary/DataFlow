@@ -691,8 +691,8 @@ def replay_rows_already_landed(
                 dest_bind_dialect=cfg.dest_bind_dialect,
                 remap_dest_types=cfg.fingerprint_dest_types,
                 destination_pk_columns=list(cfg.pk_target_cols or []),
-                # An append compares what the recipe wrote (D359).
-                shape_runner=None if requires_upsert(cfg.effective_sync) else cfg.shape_runner,
+                # Compared as the recipe wrote them (D359).
+                shape_runner=cfg.shape_runner,
             )
             landed.update(group[i] for i in drop)
         if not verify:
@@ -716,6 +716,14 @@ def replay_rows_already_landed(
             # An upsert rewrites a re-read row by key: writing it again is harmless.
             logger.warning("Re-read window dedupe skipped (upsert, fail-open): %s", exc)
             return set()
+        from .stream_boundary_read import BoundaryStructural
+
+        if isinstance(exc, BoundaryStructural):
+            # Every run would fail the same way (D359: a recipe with no
+            # one-to-one image): name the remedy instead of retrying forever.
+            from .stream_boundary_keyed import BoundaryRefused, _refused_message
+
+            raise BoundaryRefused(_refused_message(str(exc))) from exc
         # D335: an append that cannot tell which re-read rows are already at the
         # destination stops before writing them and keeps its cursor.
         from .stream_boundary_keyed import BoundaryHeldBack, held_back_message
