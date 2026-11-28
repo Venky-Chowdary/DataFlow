@@ -74,6 +74,12 @@ describe("decisions are made on the code, not the text", () => {
     assert.equal(isConnectionError("network.refused"), true);
   });
 
+  it("a schema that is missing or not usable by this login is a missing object (D431)", () => {
+    assert.equal(isMissingObjectError("object.schema_not_found"), true);
+    assert.equal(isMissingObjectError("object.schema_not_visible"), true);
+    assert.equal(isConnectionError("object.schema_not_visible"), false);
+  });
+
   it("a retry refusal that mentions Transfer Studio is not an expired upload unless coded so (ERR-38)", () => {
     assert.equal(isUploadExpired(errorCodeOf(new Error("Retry failed. Open Transfer Studio for details."))), false);
     const coded = Object.assign(new Error("This job's uploaded file is no longer on the server."), {

@@ -64,6 +64,8 @@ export function isMissingObjectError(code: string | null | undefined): boolean {
     || code === "object.table_not_visible"
     || code === "object.collection_not_found"
     || code === "object.schema_not_found"
+    // SQL Server 2760: the schema is missing or this login may not use it (D431).
+    || code === "object.schema_not_visible"
   );
 }
 
