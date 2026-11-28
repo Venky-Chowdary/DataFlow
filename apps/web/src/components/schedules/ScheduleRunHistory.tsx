@@ -7,7 +7,7 @@ import { Button } from "../ui/Button";
 import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import type { ScheduleRun } from "../../lib/types";
 import { formatJobRowMetric } from "../../lib/conservationLedger";
-import { historyPollMs, isOpenRun, runLabel, runReason } from "../../lib/scheduleRunStatus";
+import { historyPollMs, isOpenRun, runLabel, runReason, runStartedBy } from "../../lib/scheduleRunStatus";
 import { createPoller, type Poller } from "../../lib/poller";
 
 interface ScheduleRunHistoryProps {
@@ -145,6 +145,7 @@ export function ScheduleRunHistory({ scheduleId, refreshKey, onOpenJob, onEditMa
             Boolean(run.error?.trim()) ||
             (Boolean(reason) && !isOpenRun(run.status) && !/^completed/.test(run.status));
           const drift = isSourceDriftError(reason);
+          const startedBy = runStartedBy(run);
           return (
             <article
               className={`df2-sched-run${run.retry_scheduled ? " is-retry" : ""}`}
@@ -155,6 +156,9 @@ export function ScheduleRunHistory({ scheduleId, refreshKey, onOpenJob, onEditMa
                 <span className={jobStatusBadgeClass(run.status)} title={reason || jobStatusLabel(run.status)}>
                   {runLabel(run)}
                 </span>
+                {startedBy && run.fire_reason !== "retry" && (
+                  <span className="df2-sched-attempt" title={startedBy.title}>{startedBy.label}</span>
+                )}
                 {run.attempt > 0 && (
                   <span className="df2-sched-attempt" title={`Retry attempt #${run.attempt}`}>
                     <DtIcon name="trend" size={11} /> retry #{run.attempt}

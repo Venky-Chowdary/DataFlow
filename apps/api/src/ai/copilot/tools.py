@@ -4118,11 +4118,13 @@ class DataPilotTools:
             "run_count": s.run_count,
             "missed_window_count": int(getattr(s, "missed_window_count", 0) or 0),
             "last_missed_windows": int(getattr(s, "last_missed_windows", 0) or 0),
-            # One overdue slot fires after resume. Extra missed windows are
-            # counted on the schedule and are not replayed (QA R2-115).
+            # Resume waits for the next window; a slot missed while the
+            # scheduler was down fires once, recorded as a catch-up (D433).
+            # Extra missed windows are counted and not replayed (QA R2-115).
             "catch_up_policy": (
-                "Resume keeps a past next_run_at so the beat fires one catch-up. "
-                "Further missed windows are counted and not replayed."
+                "Resume waits for the next cron window and cancels a retry still owed. "
+                "A window missed while the scheduler was down fires once, recorded as a "
+                "missed-window catch-up; further missed windows are counted and not replayed."
             ),
         }
         validation_mode = str(getattr(s, "validation_mode", "") or "").strip()
@@ -4174,7 +4176,15 @@ class DataPilotTools:
                 output=None,
                 error="Schedule not found. Ask for the pipeline name or id from Pipelines.",
             )
-        return ToolResult(name="get_schedule", success=True, output=self._schedule_summary(sched))
+        out = self._schedule_summary(sched)
+        from services.connector_delete_guard import connection_deleted_reason, orphaned_sides
+
+        sides = orphaned_sides(sched)
+        if sides:
+            # D432 AC-4: an orphaned schedule says so when opened, not at its next run.
+            out["connection_deleted"] = sides
+            out["connection_deleted_reason"] = connection_deleted_reason(sides)
+        return ToolResult(name="get_schedule", success=True, output=out)
 
     def _run_schedule_now(self, schedule_id: str = "", name: str = "") -> ToolResult:
         sched, clarify = self._resolve_schedule(schedule_id, name)
@@ -4415,10 +4425,12 @@ class DataPilotTools:
 
         return test_connector(connector_id, name)
 
-    def _delete_connector(self, connector_id: str = "", name: str = "") -> ToolResult:
+    def _delete_connector(
+        self, connector_id: str = "", name: str = "", bound_schedules: str = "", repoint_to: str = "",
+    ) -> ToolResult:
         from .lifecycle_tools import delete_connector
 
-        return delete_connector(connector_id, name)
+        return delete_connector(connector_id, name, bound_schedules, repoint_to)
 
     def _update_connector(  # nosec B107
         self,

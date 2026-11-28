@@ -54,8 +54,65 @@ export function inboxNeedsRunNow(item: ScheduleApprovalInboxItem): boolean {
   );
 }
 
+/** A connection the parked schedule uses no longer exists (D435 AC-3). */
+export function inboxConnectionDeleted(item: ScheduleApprovalInboxItem): boolean {
+  return (
+    item.remedy?.target === "connection_deleted"
+    || Boolean(item.source_connector?.deleted || item.destination_connector?.deleted)
+  );
+}
+
+/** The finding is fixed on the connection (DNS, port, sign-in), not in Validate (D435 AC-2). */
+export function inboxNeedsConnectionFix(item: ScheduleApprovalInboxItem): boolean {
+  return !inboxConnectionDeleted(item) && item.remedy?.target === "connection";
+}
+
+export interface InboxRouteEnd {
+  /** What the row shows: connection name and table, never a raw id. */
+  label: string;
+  /** Hover text: carries the connector id for copy/support. */
+  title: string;
+  type: string;
+  deleted: boolean;
+}
+
+function rawRouteEnd(raw: string): { id: string; table: string } {
+  const text = String(raw || "");
+  const cut = text.indexOf(":");
+  return cut > 0 ? { id: text.slice(0, cut), table: text.slice(cut + 1) } : { id: "", table: text };
+}
+
+/**
+ * One end of a parked schedule's route in an operator's words (D435 AC-1):
+ * "QAR72-MY · r72_up_src2", with the connector id only in the hover text.
+ */
+export function inboxRouteEnd(item: ScheduleApprovalInboxItem, side: "source" | "destination"): InboxRouteEnd {
+  const connector = side === "source" ? item.source_connector : item.destination_connector;
+  const raw = rawRouteEnd(side === "source" ? item.source : item.destination);
+  const table = (side === "source" ? item.source_table : item.dest_table) ?? raw.table;
+  const id = connector?.id || raw.id;
+  const deleted = Boolean(connector?.deleted);
+  const name = deleted
+    ? "Connection deleted"
+    : connector?.name || (connector ? "Unnamed connection" : "");
+  if (!connector) {
+    // An API without connector names: the table alone is still a word, the id stays on hover.
+    return { label: table || "—", title: id ? `Connector id ${id}` : "", type: "", deleted: false };
+  }
+  return {
+    label: [name, table].filter(Boolean).join(" · "),
+    title: `${deleted ? "Deleted connector" : connector.name || "Connector"} — id ${id}${table ? ` · table ${table}` : ""}`,
+    type: connector.type || "",
+    deleted,
+  };
+}
+
 /** Prefer Studio copy when a stored finding still says "Open Validate for this job". */
 export function inboxCorrectiveAction(item: ScheduleApprovalInboxItem): string {
+  if ((inboxConnectionDeleted(item) || inboxNeedsConnectionFix(item)) && item.remedy?.corrective_action) {
+    // The API names the fix that fits a connection finding (D435).
+    return item.remedy.corrective_action;
+  }
   if (isEmptyMappingFinding(item.approval.code, item.approval.finding)) {
     return EMPTY_MAPPING_STUDIO_CORRECTIVE;
   }

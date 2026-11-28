@@ -312,6 +312,10 @@ class PipelineSchedule:
     # Bookkeeping.
     last_run_at: str | None = None
     next_run_at: str | None = None
+    #: Set only by a human decision that re-armed the schedule at once
+    #: (``approval``, ``plan_change``, ``rebaseline``) so the run it starts is
+    #: recorded with that reason; cleared when a run claims the slot (D433).
+    next_run_reason: str = ""
     last_job_id: str | None = None
     last_status: str | None = None
     run_count: int = 0
@@ -519,6 +523,7 @@ class PipelineSchedule:
             notify_on_success=bool(data.get("notify_on_success", False)),
             last_run_at=data.get("last_run_at"),
             next_run_at=data.get("next_run_at"),
+            next_run_reason=str(data.get("next_run_reason") or ""),
             last_job_id=data.get("last_job_id"),
             last_status=data.get("last_status"),
             run_count=int(data.get("run_count", 0)),
@@ -2489,6 +2494,13 @@ def _update_schedule_locked(
         # and a stale future stamp only pretends one is coming (M24).
         if s.enabled and not bool(merged.get("enabled", s.enabled)):
             updated.next_run_at = None
+            updated.next_run_reason = ""
+            # A retry still owed when the schedule is paused is cancelled with
+            # the cadence: resuming used to fire it at once, outside any cron
+            # window (D433). The failed run stays recorded; resume waits for
+            # the next window, or the operator presses Run now.
+            updated.retry_at = None
+            updated.retry_attempt = 0
         # Enabling a paused schedule waits for the next cron slot. A past
         # next_run_at used to be left in place, so the beat fired immediately.
         if enabling:
@@ -2791,7 +2803,27 @@ def _holder_entry(kind: str, holder: PipelineSchedule) -> dict[str, Any]:
         "running_since": holder.running_started_at,
         "running_instance": holder.running_instance,
         "dest_table": holder.dest_table,
+        "started_by": _open_run_started_by(holder),
     }
+
+
+def _open_run_started_by(sched: PipelineSchedule) -> str:
+    """How the run holding the claim started ("its cron window", "Run now"…)."""
+    from services.schedule_fire_rule import FIRE_REASON_LABELS
+    from services.schedule_run_lifecycle import is_open
+
+    job = str(sched.running_job_id or "")
+    for row in reversed(list(sched.run_history or [])):
+        if not isinstance(row, dict) or not is_open(row.get("status")):
+            continue
+        if str(row.get("job_id") or "") != job:
+            continue  # the record of the run holding the claim, not a newer attempt
+        reason = str(row.get("fire_reason") or row.get("trigger") or "")
+        label = FIRE_REASON_LABELS.get(reason) or {
+            "cadence": "Cron window", "retry": "Retry of a failed run", "manual": "Run now",
+        }.get(reason, "")
+        return label
+    return ""
 
 
 def describe_claim_holder(holder: Mapping[str, Any] | None) -> str:
@@ -2804,8 +2836,14 @@ def describe_claim_holder(holder: Mapping[str, Any] | None) -> str:
         f", running since {since})" if since else ")"
     )
     kind = holder.get("kind")
+    started_by = str(holder.get("started_by") or "")
+    if started_by:
+        tail = tail[:-1] + f", started by: {started_by})"
     if kind == "this_schedule":
-        return "A run of this schedule is already in progress" + tail + "."
+        return (
+            "A run of this schedule is already in progress" + tail + ". Wait for it to "
+            "finish, or cancel that job, then run again."
+        )
     name = holder.get("schedule_name") or holder.get("schedule_id")
     what = (
         f"destination table {holder.get('dest_table')!s}"
@@ -2874,6 +2912,7 @@ def _claim_running_mongo(
     job_id: str = "",
     catch_up_windows_left: int | None = None,
     claimed_catch_up: bool = False,
+    expect: Mapping[str, Any] | None = None,
 ) -> PipelineSchedule | None:
     """CAS the running flag on the per-schedule Mongo document.
 
@@ -2881,6 +2920,10 @@ def _claim_running_mongo(
     only when the document still carries exactly the claim that was judged
     stale (same start stamp and job id): two beats that both judged it stale
     cannot both win, and a claim re-taken meanwhile is not stolen.
+
+    ``expect``: fields that must still hold the values the claim was decided
+    on (an unattended claim's slot and retry), so a run recorded by another
+    replica in between makes this claim lose instead of firing on a moved slot.
     """
     svc = _mongo_backend()
     if not svc:
@@ -2900,10 +2943,15 @@ def _claim_running_mongo(
                 else str(stale.running_job_id),
             }
         )
+    condition: dict[str, Any] = {"_id": schedule_id, "$or": free}
+    for key, value in dict(expect or {}).items():
+        condition[key] = value
+    advancing = bool(next_run_at) and (stale is None or next_run_at != stale.next_run_at)
     result = coll.find_one_and_update(
-        {"_id": schedule_id, "$or": free},
+        condition,
         {
             "$set": {
+                **({"next_run_reason": ""} if advancing else {}),
                 "running": True,
                 "running_instance": instance,
                 "running_started_at": now,
@@ -2944,12 +2992,19 @@ def _workspace_claim_refusal(schedule_id: str) -> dict[str, Any] | None:
 
 
 def mark_schedule_running(
-    schedule_id: str, instance: str, job_id: str = ""
+    schedule_id: str, instance: str, job_id: str = "", *, unattended: bool = False
 ) -> PipelineSchedule | None:
     """Mark a schedule as running on this instance.
 
     Acts as a concurrency guard: returns ``None`` if this schedule or another
     schedule writing the same destination object already has a live, non-stale run.
+
+    ``unattended`` (a beat, not Run now): the claim is refused unless a cron
+    window, a catch-up or a retry is owed on the document as loaded here
+    (:func:`services.schedule_fire_rule.fire_reason`), and on Mongo only while
+    the slot the decision read is still the stored one. The beat judged the
+    schedule due on an earlier snapshot; a run that finished since moved the
+    slot, and the stale decision used to start an unrequested run (D433).
     """
     # The workspace check reads only the schedule's own workspace, outside
     # the claim lock (review 6): a closing workspace — or one whose state the
@@ -2968,12 +3023,19 @@ def mark_schedule_running(
             _record_refusal(schedule_id, holder)
             if holder is not None:
                 return None
+            current = _parse_ts(now) or schedule_clock.utc_now()
+            if unattended:
+                from services.schedule_fire_rule import fire_reason
+
+                if not fire_reason(s, current):
+                    _record_refusal(schedule_id, {"kind": "not_due", "schedule_id": schedule_id,
+                                                  "schedule_name": s.name})
+                    return None
             # One catch-up for a slot already in the past, then the next
             # cadence boundary. Leaving next_run_at behind made every beat
             # fire again (a resumed schedule ran three times in one window)
             # and a crashed finalize left the schedule due forever.
             nxt = _parse_ts(s.next_run_at)
-            current = _parse_ts(now) or schedule_clock.utc_now()
             advanced = s.next_run_at
             missed = 0
             catching_up = False
@@ -3021,6 +3083,10 @@ def mark_schedule_running(
                     job_id=job_id,
                     catch_up_windows_left=catch_up_left,
                     claimed_catch_up=catching_up,
+                    expect=(
+                        {"next_run_at": s.next_run_at, "retry_at": s.retry_at}
+                        if unattended else None
+                    ),
                 )
                 if claimed is None:
                     live = get_schedule(schedule_id)
@@ -3051,6 +3117,7 @@ def mark_schedule_running(
                 "running_started_at": now,
                 "running_job_id": str(job_id or ""),
                 "next_run_at": advanced,
+                "next_run_reason": "" if advanced != s.next_run_at else s.next_run_reason,
                 "claimed_missed_windows": missed,
                 "catch_up_windows_left": catch_up_left,
                 "claimed_catch_up": catching_up,
@@ -3368,6 +3435,7 @@ def _mark_schedule_run_once(
             **s.to_dict(),
             "last_run_at": now,
             "next_run_at": next_at,
+            "next_run_reason": "",
             "last_job_id": job_id,
             "last_status": status or s.last_status,
             "run_count": s.run_count + 1,
@@ -3763,7 +3831,7 @@ def _slot_due(sched: PipelineSchedule, current: datetime) -> bool:
     if retry_at is not None:
         return retry_at <= current
     nxt = _parse_ts(sched.next_run_at)
-    return nxt is None or nxt <= current
+    return nxt is not None and nxt <= current
 
 
 def _record_overlap_skip(sched: PipelineSchedule) -> None:
@@ -3804,6 +3872,7 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     due: list[PipelineSchedule] = []
+    unslotted: list[str] = []
     for s in _load_all():
         try:
             if not s.enabled:
@@ -3818,14 +3887,7 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
                 # A deterministic refusal waiting on a decision is not a cadence
                 # event: the same inputs would produce the same refusal, so running
                 # it again only buries the finding under identical failures.
-                retry_at = _parse_ts(s.retry_at)
-                next_run_at = _parse_ts(s.next_run_at)
-                is_due = (
-                    retry_at <= current
-                    if retry_at is not None
-                    else next_run_at is None or next_run_at <= current
-                )
-                if is_due:
+                if _slot_due(s, current):
                     emit_event(
                         logger,
                         "schedule.run.skip",
@@ -3835,22 +3897,46 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
                     )
                     _record_approval_skip(s)
                 continue
-            retry_at = _parse_ts(s.retry_at)
-            if retry_at is not None:
-                # A parked retry owns the schedule until it runs: the cadence must
-                # not start a fresh attempt on top of the one still owed.
-                if retry_at <= current:
-                    due.append(s)
+            from services.schedule_fire_rule import fire_reason, needs_slot
+
+            if needs_slot(s):
+                # No stored slot is not "due now" (D433): an unslotted enabled
+                # schedule fired on the next beat, outside any cron window. It
+                # is armed to its next window instead.
+                unslotted.append(s.id)
                 continue
-            nxt = _parse_ts(s.next_run_at)
-            if nxt is None or nxt <= current:
+            if fire_reason(s, current):
                 due.append(s)
         except Exception:  # noqa: BLE001 — one document must not zero the beat
             logging.getLogger(__name__).exception(
                 "Schedule %s skipped this beat; its due time could not be read",
                 getattr(s, "id", ""),
             )
+    if unslotted:
+        arm_unslotted_schedules(unslotted, current)
     return due
+
+
+def arm_unslotted_schedules(schedule_ids: Sequence[str], now: datetime) -> int:
+    """Give each enabled schedule that has no next run its next cron window."""
+    from services.schedule_fire_rule import needs_slot
+
+    wanted = set(schedule_ids)
+    armed = 0
+    with _CLAIM_LOCK:
+        schedules = _load_all()
+        changed: list[PipelineSchedule] = []
+        for i, s in enumerate(schedules):
+            if s.id not in wanted or not needs_slot(s):
+                continue
+            schedules[i] = PipelineSchedule.from_dict(
+                {**s.to_dict(), "next_run_at": next_run_for(s, now), "next_run_reason": ""}
+            )
+            changed.append(schedules[i])
+            armed += 1
+        if changed:
+            _save_all(changed if _mongo_backend() is not None else schedules)
+    return armed
 
 
 def seconds_until_next_schedule(

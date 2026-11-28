@@ -818,6 +818,30 @@
   white-space: nowrap;
 }
 
+.df2-approval-route {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.df2-approval-route-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.df2-approval-route-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.df2-approval-route-end.is-deleted {
+  color: var(--df-warning);
+}
+
 .df2-approval-finding,
 .df2-approval-action,
 .df2-approval-nonapprovable {
@@ -928,6 +952,11 @@
   }
   .df2-approval-route {
     white-space: normal;
+    flex-wrap: wrap;
+  }
+  .df2-approval-route-label {
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 }
 

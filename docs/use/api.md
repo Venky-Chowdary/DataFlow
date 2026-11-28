@@ -82,6 +82,21 @@ To see the exact permission of any route, read
 - **Trailing slashes.** A few collection routes are defined with a trailing
   slash (for example `/connectors/`).
 
+### Deleting a connector that schedules use
+
+`DELETE /api/v1/connectors/saved/{id}` refuses a connector that a schedule
+reads from or writes to with 409 and `detail.code` `connector_in_use`;
+`detail.bound_schedules` names them (id, name, role) and `detail.options`
+lists the choices. Repeat the call with `bound_schedules` (`pause`, `repoint`
+or `delete_schedules`), `acknowledge_schedules` (the ids of exactly the
+schedules bound now, comma-separated) and, for `repoint`, `repoint_to` (a
+saved connector of the same type). A schedule bound since you looked is not
+acknowledged, so the call is refused again with the new list. A schedule with
+a run in progress refuses the delete. The choice is applied before the
+connector is removed and is audited as `connector.delete.bound_schedules`.
+A connector no schedule uses is deleted with no extra step. The MCP
+`delete_connector` tool and the app's delete follow the same rule.
+
 ## Errors
 
 Four shapes are in use. Handle all four, and read `detail` as a string when

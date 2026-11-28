@@ -657,6 +657,8 @@ def test_missing_connector_records_failed_history(temp_store, monkeypatch):
     before = sched.run_count
     monkeypatch.setattr(runner, "_resolve_connector", lambda _id: None)
     monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
+    # The beat fires the slot that came due (D433: an unattended run needs one).
+    store.update_schedule(sched.id, {"next_run_at": "2020-01-01T00:00:00+00:00"})
 
     job_id = runner._run_schedule(sched.id)
     assert job_id is None

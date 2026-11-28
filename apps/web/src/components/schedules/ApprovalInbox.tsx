@@ -3,10 +3,30 @@ import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { PageSection } from "../ui/PageSection";
 import { useToast } from "../Toast";
-import { acceptScheduleSourceSchema, approveScheduleFinding, rejectScheduleFinding } from "../../lib/api";
+import { ConnectorIcon } from "../../app/brand-icons";
+import { acceptScheduleSourceSchema, approveScheduleFinding, rejectScheduleFinding, testSavedConnector } from "../../lib/api";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
-import { inboxCorrectiveAction, inboxNeedsRunNow, inboxNeedsStudio } from "../../lib/scheduleApprovalCta";
+import {
+  inboxConnectionDeleted,
+  inboxCorrectiveAction,
+  inboxNeedsConnectionFix,
+  inboxNeedsRunNow,
+  inboxNeedsStudio,
+  inboxRouteEnd,
+} from "../../lib/scheduleApprovalCta";
 import type { ScheduleApprovalInboxItem } from "../../lib/types";
+
+/** One end of the route: type icon, connection name and table; the id stays on hover (D435). */
+function RouteEnd({ item, side }: { item: ScheduleApprovalInboxItem; side: "source" | "destination" }) {
+  const end = inboxRouteEnd(item, side);
+  return (
+    <span className={`df2-approval-route-end${end.deleted ? " is-deleted" : ""}`} title={end.title || undefined}>
+      {end.type && !end.deleted ? <ConnectorIcon id={end.type} size={14} /> : null}
+      {end.deleted ? <DtIcon name="alert" size={14} /> : null}
+      <span className="df2-approval-route-label">{end.label}</span>
+    </span>
+  );
+}
 
 const SCOPE_ACK: Record<string, "compliance" | "schema_drift" | "fk_risk"> = {
   replay_compliance_ack: "compliance",
@@ -65,6 +85,7 @@ export function ApprovalInbox({ items, compact = false, onDismiss, onDecided, on
   const [days, setDays] = useState(30);
   const [busy, setBusy] = useState(false);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
   const [minimized, setMinimized] = useState(false);
   const inboxVersion = items
     .map((item) => `${item.schedule_id}:${item.approval.id}:${item.approval.occurrences}:${item.approval.last_seen_at || ""}`)
@@ -106,6 +127,28 @@ export function ApprovalInbox({ items, compact = false, onDismiss, onDecided, on
       });
     } finally {
       setAcceptingId(null);
+    }
+  };
+
+  const testConnection = async (connectorId: string, label: string) => {
+    setTestingId(connectorId);
+    try {
+      const res = await testSavedConnector(connectorId);
+      toast({
+        title: res.success ? `${label} connects` : `${label} does not connect`,
+        message: res.success
+          ? "Run the schedule again, or wait for its next cron window."
+          : res.message,
+        tone: res.success ? "success" : "error",
+      });
+    } catch (err) {
+      toast({
+        title: `Could not test ${label.toLowerCase()}`,
+        message: err instanceof Error ? err.message : undefined,
+        tone: "error",
+      });
+    } finally {
+      setTestingId(null);
     }
   };
 
@@ -224,8 +267,10 @@ export function ApprovalInbox({ items, compact = false, onDismiss, onDecided, on
                     {item.schedule_name}
                   </button>
                 ) : <strong className="df2-approval-name">{item.schedule_name}</strong>}
-                <span className="df2-approval-route" title={`${item.source} → ${item.destination}`}>
-                  {item.source} → {item.destination}
+                <span className="df2-approval-route" aria-label="Route">
+                  <RouteEnd item={item} side="source" />
+                  <span aria-hidden="true">→</span>
+                  <RouteEnd item={item} side="destination" />
                 </span>
                 {appr.occurrences > 1 && (
                   <span className="df2-approval-count" title="Times this finding was seen">
@@ -241,7 +286,48 @@ export function ApprovalInbox({ items, compact = false, onDismiss, onDecided, on
                 </p>
               )}
 
-              {!appr.approvable && inboxNeedsRunNow(item) ? (
+              {inboxConnectionDeleted(item) ? (
+                <div className="df2-approval-plan-change">
+                  <p className="df2-approval-nonapprovable">
+                    Connection deleted. No signature can clear this — re-select a connection on
+                    this schedule, or restore the deleted one.
+                  </p>
+                  {onReviewMapping && (
+                    <div className="df2-approval-actions">
+                      <Button size="sm" variant="primary" onClick={() => onReviewMapping(item.schedule_id)}>
+                        Re-select connection
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ) : inboxNeedsConnectionFix(item) ? (
+                <div className="df2-approval-plan-change">
+                  <p className="df2-approval-nonapprovable">
+                    The connection has to be fixed first. A signature cannot make a host resolve
+                    or a sign-in succeed.
+                  </p>
+                  <div className="df2-approval-actions">
+                    {(["source", "destination"] as const).map((side) => {
+                      const connector = side === "source" ? item.source_connector : item.destination_connector;
+                      if (!connector?.id) return null;
+                      const label = side === "source" ? "Source connection" : "Destination connection";
+                      return (
+                        <Button
+                          key={side}
+                          size="sm"
+                          variant={side === "source" ? "primary" : "ghost"}
+                          loading={testingId === connector.id}
+                          disabled={testingId !== null}
+                          title={`Test ${connector.name || label.toLowerCase()} now`}
+                          onClick={() => void testConnection(connector.id, label)}
+                        >
+                          {side === "source" ? "Test source connection" : "Test destination connection"}
+                        </Button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : !appr.approvable && inboxNeedsRunNow(item) ? (
                 <div className="df2-approval-plan-change">
                   <p className="df2-approval-nonapprovable">
                     Dest existing after the first write is not a plan change. A signature

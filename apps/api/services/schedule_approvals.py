@@ -416,6 +416,8 @@ def approve_request(
         "next_run_at": (run_at or schedule_clock.utc_now())
         .astimezone(timezone.utc)
         .isoformat(),
+        # The run this starts is recorded as the approval's, not a cron window.
+        "next_run_reason": "approval",
         "retry_at": None,
         "retry_attempt": 0,
         "last_status": "approved",
@@ -545,6 +547,11 @@ def finding_closed_by_success(sched: Any) -> dict[str, Any] | None:
     }
 
 
+def is_system_actor(actor: str) -> bool:
+    """A decision the scheduler took by itself (``system:…``), not a person's."""
+    return str(actor or "").strip().lower().startswith("system:")
+
+
 def resolve_plan_change(
     schedule_id: str,
     *,
@@ -567,19 +574,29 @@ def resolve_plan_change(
     from services.schedule_store import next_run_for
 
     now = schedule_clock.utc_now()
+    rearm_reason = ""
     if is_empty_mapping_finding(str(request.get("code") or ""), str(request.get("finding") or "")):
         # Persisting the mapping contract arms the pipeline; it does not owe a
         # missed run. The first run is the next cadence slot, as on any enable
         # — "now" showed an unaligned next_run_at (QA SC8).
         next_due = next_run_for(sched, now)
+    elif is_system_actor(actor):
+        # Nobody asked for a run (D433): a release the scheduler decides by
+        # itself keeps the cadence slot already stored — a window that passed
+        # while parked fires once as a recorded catch-up, a future one waits.
+        # "Now" started an unrequested run seconds after the release.
+        next_due = str(sched.next_run_at or "") or next_run_for(sched, now)
     else:
-        # A drift/plan acceptance re-runs the refused beat straight away.
+        # The operator's drift/plan acceptance re-runs the refused beat
+        # straight away, and the run records that it was this decision.
         next_due = now.isoformat()
+        rearm_reason = "plan_change"
     patch = {
         "approval_request": _resolved(
             request, status=STATUS_APPROVED, actor=actor, reason=reason
         ),
         "next_run_at": next_due,
+        "next_run_reason": rearm_reason,
         "retry_at": None,
         "retry_attempt": 0,
         "last_status": "approved",
@@ -921,6 +938,38 @@ def _derive_parked_corrective(request: dict[str, Any]) -> str:
     )
 
 
+class _ConnectorLabels:
+    """``{id, name, type, deleted}`` per connector, read once per inbox."""
+
+    def __init__(self) -> None:
+        self._seen: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def label(self, connector_id: str, workspace_id: str = "") -> dict[str, Any]:
+        cid = str(connector_id or "").strip()
+        key = (cid, str(workspace_id or ""))
+        if key not in self._seen:
+            self._seen[key] = self._read(cid, key[1])
+        return dict(self._seen[key])
+
+    @staticmethod
+    def _read(cid: str, workspace_id: str) -> dict[str, Any]:
+        out: dict[str, Any] = {"id": cid, "name": "", "type": "", "deleted": False}
+        if not cid:
+            return out
+        try:
+            from services.connector_store import get_connector
+
+            conn = get_connector(cid, workspace_id=workspace_id or None)
+        except Exception:  # noqa: BLE001 - an unreadable store is not a deleted connector
+            _logger.debug("inbox connector label unavailable for %s", cid, exc_info=True)
+            return out
+        if conn is None:
+            out["deleted"] = True
+            return out
+        out.update(name=str(conn.name or ""), type=str(conn.type or ""))
+        return out
+
+
 def open_approvals(
     workspace_id: str = "", *, workspace_filter: WorkspaceFilter | None = None
 ) -> list[dict[str, Any]]:
@@ -935,6 +984,7 @@ def open_approvals(
     from services.schedule_store import has_open_approval, list_schedules
 
     out: list[dict[str, Any]] = []
+    connectors = _ConnectorLabels()
     for sched in list_schedules(workspace_filter):
         if not has_open_approval(sched):
             continue
@@ -954,12 +1004,37 @@ def open_approvals(
         # finding so the inbox always names the fix.
         if not str(request.get("corrective_action") or "").strip():
             request["corrective_action"] = _derive_parked_corrective(request)
+        from services.finding_remedy import finding_remedy
+
+        source = connectors.label(sched.source_connector_id, sched.workspace_id)
+        destination = connectors.label(sched.dest_connector_id, sched.workspace_id)
+        deleted = [side for side, c in (("source", source), ("destination", destination)) if c["deleted"]]
+        remedy = finding_remedy(request)
+        if remedy:
+            # Records parked before D435 still carry "Open Validate…" for a
+            # DNS or sign-in failure: the fix shown is the one that fits.
+            request["corrective_action"] = remedy["corrective_action"]
+        if deleted:
+            # D435 AC-3: no finding outranks a connection that no longer
+            # exists. The finding keeps its own corrective; the remedy (what
+            # the inbox shows first) says the connection is gone.
+            from services.connector_delete_guard import connection_deleted_reason
+
+            remedy = {"target": "connection_deleted", "code": "", "sides": ",".join(deleted),
+                      "corrective_action": connection_deleted_reason(deleted)}
         out.append({
             "schedule_id": sched.id,
             "schedule_name": sched.name,
             "workspace_id": sched.workspace_id or "",
+            # Kept for API clients: the raw "<connector id>:<table>" route.
             "source": f"{sched.source_connector_id}:{sched.source_table}",
             "destination": f"{sched.dest_connector_id}:{sched.dest_table}",
+            # D435: the route in names an operator recognises.
+            "source_connector": source,
+            "source_table": sched.source_table,
+            "destination_connector": destination,
+            "dest_table": sched.dest_table,
+            "remedy": remedy,
             "sync_mode": sched.sync_mode,
             "enabled": bool(sched.enabled),
             "approval": request,

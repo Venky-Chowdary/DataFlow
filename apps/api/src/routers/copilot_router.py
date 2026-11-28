@@ -484,7 +484,14 @@ async def _run_lifecycle_confirm(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     if kind == "delete_connector":
         cid = str(payload.get("connector_id") or "").strip()
-        out = saved_connectors_router.remove_saved_connector(cid, http_request, workspace_id)
+        # D432: the same delete as REST — the acknowledgement staged with the
+        # preview is re-checked against the schedules bound now.
+        out = saved_connectors_router.remove_saved_connector(
+            cid, http_request, workspace_id,
+            bound_schedules=str(payload.get("bound_schedules_action") or ""),
+            acknowledge_schedules=",".join(str(x) for x in payload.get("acknowledge_schedules") or []),
+            repoint_to=str(payload.get("repoint_to") or ""),
+        )
         return {**dict(out), "connector_id": cid, "name": payload.get("name") or ""}
     if kind == "update_connector":
         cid = str(payload.get("connector_id") or "").strip()

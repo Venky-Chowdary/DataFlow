@@ -133,24 +133,55 @@ def run_read_scope(
     return out
 
 
+#: ``last_status`` values that are bookkeeping, not how a run ended: a finding
+#: approved, a park re-armed or rejected, a run still open. Reading them as a
+#: failed run made the next run after a *completed* one a full pass (D433).
+_NOT_A_RUN_OUTCOME = frozenset({"", "approved", "rearmed", "rejected", "pending", "running", "skipped"})
+
+
 def _last_written_run_failed(sched: Any) -> bool:
-    """D296: did the schedule's last run that reached a job fail?
+    """D296 / D433: did the schedule's last run that reached a job fail?
 
     A pre-run refusal (source drift, a parked decision, a residency refusal) is
     recorded as a failed run with no job: nothing was written, so there is no
     stale row to repair and the watermark is where the last accepted run left
     it (R1). Only a run whose job failed can have left the destination behind
-    the source. When the last recorded run had a job it decides; a refusal is
-    skipped to the run before it.
+    the source. The newest finished run record that had a job decides; a
+    refusal, a skip and the record still open for this very run are skipped.
+    ``last_status`` decides only for a document with no such record, and only
+    when it is a run outcome: it is also overwritten by bookkeeping
+    ("approved" after a released finding), and that read a completed run as
+    failed, so the next run re-read the whole source instead of the delta.
     """
     from services.job_status import is_completed
+    from services.schedule_run_lifecycle import SKIPPED, is_open
 
-    if str(getattr(sched, "last_job_id", "") or ""):
-        return True
     for entry in reversed(list(getattr(sched, "run_history", None) or [])):
-        if isinstance(entry, dict) and str(entry.get("job_id") or ""):
-            return not is_completed(str(entry.get("status") or ""))
-    return False
+        if not isinstance(entry, dict) or not str(entry.get("job_id") or ""):
+            continue
+        status = str(entry.get("status") or "")
+        if status == SKIPPED or is_open(status):
+            continue
+        return not is_completed(status)
+    last_status = str(getattr(sched, "last_status", "") or "").strip().lower()
+    return (
+        bool(str(getattr(sched, "last_job_id", "") or ""))
+        and last_status not in _NOT_A_RUN_OUTCOME
+        and not is_completed(last_status)
+    )
+
+
+def _route_watermark_stored(xfer_req: Any) -> bool:
+    """True when the route has a committed watermark, or when it cannot be read."""
+    try:
+        from services.preflight_cursor_gate import read_scope_for_transfer_request
+
+        scope = read_scope_for_transfer_request(xfer_req)
+    except Exception:  # noqa: BLE001 - unknown state keeps the full pass (repair first)
+        return True
+    if not str(getattr(scope, "cursor_key", "") or ""):
+        return True  # not an incremental route this resolver addresses: keep D210
+    return getattr(scope, "watermark", None) not in (None, "")
 
 
 def apply_schedule_full_pass(xfer_req: Any, sched: Any, *, attempt: int) -> dict | None:
@@ -163,15 +194,15 @@ def apply_schedule_full_pass(xfer_req: Any, sched: Any, *, attempt: int) -> dict
     stale value would be kept forever. Re-upserting every row is idempotent and
     the saved watermark is neither used nor moved.
     """
-    from services.job_status import is_completed
-
-    last_status = str(getattr(sched, "last_status", "") or "")
-    after_failure = attempt > 0 or (
-        bool(last_status)
-        and not is_completed(last_status)
-        and _last_written_run_failed(sched)
-    )
+    after_failure = attempt > 0 or _last_written_run_failed(sched)
     if not after_failure:
+        return None
+    if not _route_watermark_stored(xfer_req):
+        # D433: no watermark has been committed on this route (the failed run
+        # was the first), so the incremental run already reads every row and
+        # upserts it on the key — the same repair a full pass makes. Converted
+        # to a full pass it left the watermark unset, and the next run re-read
+        # the whole source again instead of the delta since this one.
         return None
     parent: dict | None = None
     last_job_id = str(getattr(sched, "last_job_id", "") or "")

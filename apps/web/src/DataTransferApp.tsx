@@ -21,7 +21,7 @@ import { ForcePasswordChange } from "./components/ForcePasswordChange";
 import { MfaSessionGate } from "./components/MfaChallenge";
 import { PERMISSIONS, PermissionsProvider, useWriteGate } from "./lib/PermissionsContext";
 import { StudioActionsProvider } from "./lib/StudioActionsContext";
-import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, fetchTransferCapabilities, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
+import { AUTH_REQUIRED_EVENT, ConnectorInUseError, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, fetchTransferCapabilities, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
 import { EMPTY_JOB_HISTORY, type JobHistory } from "./lib/jobHistory";
 import { clearSession, readSession, sessionDisplayName, writeSession } from "./lib/session";
 import { loadStudioRecovery } from "./lib/studioRecovery";
@@ -1164,22 +1164,45 @@ function AppShell({
       return;
     }
     const target = connectors.find((c) => c.id === id);
-    const confirmed = await confirm({
+    // D432: schedules that use this connection are named and paused, never
+    // left pointing at a deleted id. The API checks the same list again.
+    const bound = schedules.filter((s) => s.source_connector_id === id || s.dest_connector_id === id);
+    const ask = (rows: Array<{ id: string; name: string }>) => confirm({
       title: `Delete ${target?.name ?? "this connector"}?`,
-      message: "This removes saved credentials and route references for this connection. Schedules that used it will need a new connection.",
-      confirmLabel: "Delete connection",
+      message: rows.length
+        ? `${rows.length} schedule${rows.length === 1 ? " uses" : "s use"} this connection: ${rows.map((r) => `“${r.name}”`).join(", ")}. `
+          + "Deleting it pauses them; each keeps its history and shows “connection deleted” until you re-select a connection. "
+          + "This also removes the saved credentials."
+        : "This removes saved credentials for this connection. No schedule uses it.",
+      confirmLabel: rows.length ? `Pause ${rows.length} schedule${rows.length === 1 ? "" : "s"} and delete` : "Delete connection",
       cancelLabel: "Keep connection",
       tone: "danger",
     });
-    if (!confirmed) return;
+    if (!(await ask(bound))) return;
 
+    const remove = (rows: Array<{ id: string }>) => deleteConnector(
+      id,
+      rows.length ? { action: "pause", scheduleIds: rows.map((r) => r.id) } : undefined,
+    );
     try {
-      await deleteConnector(id);
+      try {
+        await remove(bound);
+      } catch (err) {
+        // The schedule list was stale: the API names the schedules bound now.
+        if (!(err instanceof ConnectorInUseError) || err.boundSchedules.length === 0) throw err;
+        if (!(await ask(err.boundSchedules))) return;
+        await remove(err.boundSchedules);
+      }
       await loadConnectors();
+      if (bound.length) void loadSchedules();
       setTransferSeedSource((seed) => (seed?.connectorId === id ? null : seed));
-      toast({ title: "Connector removed", tone: "success" });
-    } catch {
-      toast({ title: "Delete failed", message: "Could not remove this connector.", tone: "error" });
+      toast({ title: "Connector removed", message: bound.length ? "Its schedules were paused." : undefined, tone: "success" });
+    } catch (err) {
+      toast({
+        title: "Delete failed",
+        message: err instanceof Error && err.message ? err.message : "Could not remove this connector.",
+        tone: "error",
+      });
     }
   }
 }

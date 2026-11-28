@@ -2,9 +2,9 @@
   "cases": {
     "mutation_then_read": {
       "prompt_sha256": [
-        "f6b4bf4b135ec7dc5ea58374fc05039d737270479c3cd9e8a30da5ba0c00dfb9",
-        "3a860efb0f36636c0e6704aeb0132a61e90ed4033884c052f46ed80a24327713",
-        "cd5edf24950ca898bf1680fc55884860a8cd53a4ff566ba8791d580719b518f9"
+        "94bbfa697626cab80ab9860686606ee2f384ee0736dd6c5a6a9424e126b22c35",
+        "9174ef604b955bafff5bee95f935f4416eaf646f7ddb49e22972fd73d9e0c7b4",
+        "e8c820b49fd5b934aababcf2e132f59582db0763fe96e5373c7cafadd2ce71ed"
       ],
       "responses": [
         {

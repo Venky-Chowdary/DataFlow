@@ -47,6 +47,7 @@ async function render(
     compact?: boolean;
     onRunNow?: (scheduleId: string) => void;
     onOpenStudio?: (scheduleId: string) => void;
+    onReviewMapping?: (scheduleId: string) => void;
   } = {},
 ) {
   const { act, createElement, useState } = await import("react");
@@ -70,6 +71,7 @@ async function render(
       compact: options.compact,
       onRunNow: options.onRunNow,
       onOpenStudio: options.onOpenStudio,
+      onReviewMapping: options.onReviewMapping,
     });
   }
   await act(async () => root!.render(createElement(ToastProvider, null, createElement(InboxHarness))));
@@ -142,5 +144,58 @@ describe("schedule decision inbox", () => {
     const { act } = await import("react");
     await act(async () => button("Open Transfer Studio").click());
     assert.deepEqual(opened, ["schedule-a"]);
+  });
+
+  it("names the route by connection and offers connection tests for a DNS finding (D435)", async () => {
+    const dns = item({
+      source: "c81fd66d-be79-4cf2-8720-5987b9e26069:r72_up_src2",
+      destination: "42ca781c-83ec-4afa-9dba-60bf69983083:R72_UP_ORA2",
+      source_connector: { id: "c81fd66d-be79-4cf2-8720-5987b9e26069", name: "QAR72-MY", type: "mysql", deleted: false },
+      source_table: "r72_up_src2",
+      destination_connector: { id: "42ca781c-83ec-4afa-9dba-60bf69983083", name: "QAR72-ORA", type: "oracle", deleted: false },
+      dest_table: "R72_UP_ORA2",
+      remedy: {
+        target: "connection",
+        code: "network.dns_not_found",
+        corrective_action: "Check the spelling of the host name on the connection. Open the schedule's connection (Test, or Edit connection) to confirm it connects, then run the schedule again.",
+      },
+      approval: {
+        ...item().approval,
+        id: "dns",
+        finding: "Host not found: the connection's host name didn't resolve (DNS).",
+        corrective_action: "Check the spelling of the host name on the connection.",
+      },
+    });
+    await render([dns]);
+    const route = host!.querySelector(".df2-approval-route")!;
+    assert.match(route.textContent || "", /QAR72-MY · r72_up_src2.*QAR72-ORA · R72_UP_ORA2/);
+    assert.doesNotMatch(route.textContent || "", /c81fd66d/);
+    assert.match(route.querySelector(".df2-approval-route-end")!.getAttribute("title") || "", /c81fd66d/);
+    assert.doesNotMatch(host!.textContent || "", /Open Validate/);
+    assert.ok(button("Test source connection"));
+    assert.ok(button("Test destination connection"));
+    assert.equal(
+      Array.from(host!.querySelectorAll("button")).some((b) => b.textContent?.trim() === "Decide"),
+      false,
+    );
+  });
+
+  it("says a deleted connection is deleted and offers to re-select it (D435)", async () => {
+    const reselect: string[] = [];
+    const orphan = item({
+      source_connector: { id: "gone-1", name: "", type: "", deleted: true },
+      source_table: "orders",
+      remedy: {
+        target: "connection_deleted",
+        sides: "source",
+        corrective_action: "Connection deleted: the source connection of this schedule no longer exists. Re-select the connection on this schedule, or restore the deleted connection, then resume.",
+      },
+    });
+    await render([orphan], { onReviewMapping: (id) => reselect.push(id) });
+    assert.match(host!.textContent || "", /Connection deleted · orders/);
+    assert.match(host!.textContent || "", /Re-select the connection on this schedule/);
+    const { act } = await import("react");
+    await act(async () => button("Re-select connection").click());
+    assert.deepEqual(reselect, ["schedule-a"]);
   });
 });

@@ -122,6 +122,7 @@ def _close_finding(sched: Any, *, action: str, actor: str, reason: str, due_now:
     now = schedule_clock.utc_now()
     patch: dict[str, Any] = {
         "next_run_at": now.isoformat() if due_now else next_run_for(sched, now),
+        "next_run_reason": "rebaseline" if due_now else "",
         "retry_at": None,
         "retry_attempt": 0,
     }

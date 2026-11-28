@@ -84,6 +84,34 @@ export function runLabel(run: ScheduleRun): string {
   return jobStatusLabel(run.status);
 }
 
+const FIRE_REASON_LABELS: Record<string, string> = {
+  cron_window: "Cron window",
+  missed_window_catch_up: "Catch-up",
+  retry: "Retry",
+  manual: "Run now",
+  approval: "After approval",
+  plan_change: "After plan change",
+  rebaseline: "After rebaseline",
+};
+
+/**
+ * Why a run started and what it read, for the history row (D433): a run the
+ * scheduler started names the cron window, catch-up or retry it served, and
+ * every run says which watermark it read from.
+ */
+export function runStartedBy(run: ScheduleRun): { label: string; title: string } | null {
+  if (run.status === "skipped") return null;
+  const reason = String(run.fire_reason || "");
+  const label = FIRE_REASON_LABELS[reason] ?? "";
+  if (!label) return null;
+  const parts: string[] = [];
+  if (run.scheduled_for) parts.push(`Started for ${reason === "retry" ? "the retry due" : "the window"} at ${run.scheduled_for}.`);
+  const mark = run.watermark;
+  if (mark?.scope === "delta" && mark.from) parts.push(`Read rows past watermark ${mark.from}.`);
+  else if (mark?.scope === "full_source") parts.push(mark.reason || "Read the whole source.");
+  return { label, title: parts.join(" ") || label };
+}
+
 export function historyPollMs(runs: readonly ScheduleRun[] | null | undefined): number {
   return (runs || []).some((r) => isOpenRun(r.status)) ? ACTIVE_POLL_MS : IDLE_POLL_MS;
 }
@@ -137,6 +165,16 @@ export interface NextRunView {
  * the action that clears it) or due now.
  */
 export function nextRunView(sched: PipelineSchedule): NextRunView {
+  if ((sched.connection_deleted ?? []).length > 0) {
+    // D432: an orphaned schedule says so before its next run is refused,
+    // paused or not (a connector delete with "pause" leaves it paused).
+    return {
+      label: "Connection deleted",
+      title: String(sched.stalled_reason || "").trim()
+        || "A connection this schedule uses was deleted. Re-select it on this schedule.",
+      stalled: true,
+    };
+  }
   if (!sched.enabled || sched.state === "paused") {
     return { label: "Paused", title: "Paused: no scheduled runs until it is enabled.", stalled: false };
   }

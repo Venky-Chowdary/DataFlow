@@ -247,3 +247,71 @@ test("create without mappings opens Studio — the beat will not invent Map", ()
   assert.equal(scheduleCreateOpensStudio({ mapping_count: 0 }), true);
   assert.equal(scheduleCreateOpensStudio({ mapping_count: 2 }), false);
 });
+
+// D435: a parked schedule names its route in an operator's words and gives the fix that fits.
+const parkedOnDns = (extra: Partial<ScheduleApprovalInboxItem> = {}): ScheduleApprovalInboxItem => ({
+  schedule_id: "s-dns",
+  schedule_name: "QAR72-S4b-my-ora-iu",
+  workspace_id: "",
+  source: "c81fd66d-be79-4cf2-8720-5987b9e26069:r72_up_src2",
+  destination: "42ca781c-83ec-4afa-9dba-60bf69983083:R72_UP_ORA2",
+  source_connector: { id: "c81fd66d-be79-4cf2-8720-5987b9e26069", name: "QAR72-MY", type: "mysql", deleted: false },
+  source_table: "r72_up_src2",
+  destination_connector: { id: "42ca781c-83ec-4afa-9dba-60bf69983083", name: "QAR72-ORA", type: "oracle", deleted: false },
+  dest_table: "R72_UP_ORA2",
+  remedy: {
+    target: "connection",
+    code: "network.dns_not_found",
+    corrective_action: "Check the spelling of the host name on the connection. Open the schedule's connection (Test, or Edit connection) to confirm it connects, then run the schedule again.",
+  },
+  sync_mode: "incremental_upsert",
+  enabled: true,
+  approval: {
+    id: "a1", status: "open", kind: "run_refused", code: "RUN_REFUSED",
+    finding: "Host not found: the connection's host name didn't resolve (DNS).",
+    corrective_action: "Open Validate for this job and resolve the blocking check, then run the schedule again.",
+    approvable: false, requested_scopes: [], occurrences: 1, created_at: "2026-11-25T00:00:00Z",
+  },
+  ...extra,
+} as ScheduleApprovalInboxItem);
+
+test("the inbox route shows connection names and tables; the id is hover text only", async () => {
+  const { inboxRouteEnd } = await import("./scheduleApprovalCta");
+  const src = inboxRouteEnd(parkedOnDns(), "source");
+  const dst = inboxRouteEnd(parkedOnDns(), "destination");
+  assert.equal(src.label, "QAR72-MY · r72_up_src2");
+  assert.equal(dst.label, "QAR72-ORA · R72_UP_ORA2");
+  assert.doesNotMatch(src.label + dst.label, /[0-9a-f]{8}-[0-9a-f]{4}/);
+  assert.match(src.title, /c81fd66d-be79-4cf2-8720-5987b9e26069/);
+  assert.equal(src.type, "mysql");
+});
+
+test("a DNS finding's fix points at the connection, not Validate", async () => {
+  const { inboxNeedsConnectionFix } = await import("./scheduleApprovalCta");
+  const item = parkedOnDns();
+  assert.equal(inboxNeedsConnectionFix(item), true);
+  assert.doesNotMatch(inboxCorrectiveAction(item), /Validate/);
+  assert.match(inboxCorrectiveAction(item), /host name on the connection/);
+});
+
+test("a deleted connection is named as such with re-select guidance", async () => {
+  const { inboxConnectionDeleted, inboxRouteEnd } = await import("./scheduleApprovalCta");
+  const item = parkedOnDns({
+    source_connector: { id: "c81fd66d-be79-4cf2-8720-5987b9e26069", name: "", type: "", deleted: true },
+    remedy: {
+      target: "connection_deleted", sides: "source",
+      corrective_action: "Connection deleted: the source connection of this schedule no longer exists. Re-select the connection on this schedule (edit it, or open it in Transfer Studio), or restore the deleted connection, then resume.",
+    },
+  });
+  assert.equal(inboxConnectionDeleted(item), true);
+  assert.equal(inboxRouteEnd(item, "source").label, "Connection deleted · r72_up_src2");
+  assert.match(inboxCorrectiveAction(item), /^Connection deleted.*Re-select/);
+});
+
+test("an inbox item from an API without names still hides the raw id", async () => {
+  const { inboxRouteEnd } = await import("./scheduleApprovalCta");
+  const item = parkedOnDns({ source_connector: undefined, source_table: undefined, remedy: undefined });
+  const end = inboxRouteEnd(item, "source");
+  assert.equal(end.label, "r72_up_src2");
+  assert.match(end.title, /c81fd66d/);
+});

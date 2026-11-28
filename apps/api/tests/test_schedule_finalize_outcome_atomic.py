@@ -1141,6 +1141,8 @@ def test_a_cadence_start_on_a_run_still_being_recorded_is_a_skip(store, runner, 
     sched = _finished_but_held(store, runner, monkeypatch, "cad-contended", "job-held")
     _jobs_ended(store, monkeypatch, "job-held")
     _start_stubs(monkeypatch)
+    # Due again (D433: the beat starts an unattended run only for a due slot).
+    store.update_schedule(sched.id, {"next_run_at": "2020-01-01T00:00:00+00:00"})
     attempts = _contend(store, monkeypatch, sched.id)
 
     assert runner._run_schedule(sched.id) is None
@@ -1307,6 +1309,8 @@ def test_beats_refused_by_a_live_peer_on_the_destination_coalesce_into_one_skip(
     })
     _jobs_ended(store, monkeypatch)
     dispatched = _real_starts(runner, monkeypatch)
+    # Due (D433: the beat starts an unattended run only for a due slot).
+    store.update_schedule(sched.id, {"next_run_at": "2020-01-01T00:00:00+00:00"})
 
     for _ in range(3):
         assert runner._run_schedule(sched.id) is None

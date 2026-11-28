@@ -421,13 +421,21 @@ class ScheduleResponse(BaseModel):
     #: signal before (QA r12 Mongo D9).
     state: str = ""
     stalled_reason: str = ""
+    #: ``source`` / ``destination`` when that connection was deleted (D432
+    #: AC-4): the schedule shows "connection deleted" instead of looking
+    #: healthy until its next run is refused.
+    connection_deleted: list[str] = Field(default_factory=list)
     #: What this write must tell the caller without refusing it (draft saved
     #: disabled, source table unverifiable). Empty on reads.
     warnings: list[str] = Field(default_factory=list)
 
     @classmethod
     def from_schedule(
-        cls, s: PipelineSchedule, *, warnings: Optional[list[str]] = None
+        cls,
+        s: PipelineSchedule,
+        *,
+        warnings: Optional[list[str]] = None,
+        connector_ids: Optional[set[str]] = None,
     ) -> ScheduleResponse:
         from services.schedule_run_lifecycle import derive_status
 
@@ -444,6 +452,19 @@ class ScheduleResponse(BaseModel):
         from services.schedule_store import schedule_run_state
 
         data["state"], data["stalled_reason"] = schedule_run_state(s)
+        from services.connector_delete_guard import connection_deleted_reason, orphaned_sides
+
+        sides = (
+            orphaned_sides(s)
+            if connector_ids is None
+            else [side for side, cid in (("source", s.source_connector_id), ("destination", s.dest_connector_id))
+                  if str(cid or "").strip() and str(cid) not in connector_ids]
+        )
+        if sides:
+            data["connection_deleted"] = sides
+            data["stalled_reason"] = connection_deleted_reason(sides)
+            if data["state"] not in ("paused", "running"):
+                data["state"] = "stalled"
         data["warnings"] = list(warnings or [])
         # run_history / running_instance stay on the history endpoint.
         allowed = set(cls.model_fields)
@@ -528,6 +549,7 @@ class ScheduleSummaryResponse(BaseModel):
     authorized: bool = False
     state: str = ""
     stalled_reason: str = ""
+    connection_deleted: list[str] = Field(default_factory=list)
     # Due but not started: how late, and exactly what holds the one-writer
     # claim (schedule + job). "Next run in the past" alone was a dead end.
     overdue_seconds: int = 0
@@ -540,14 +562,16 @@ class ScheduleSummaryResponse(BaseModel):
     last_skip: Optional[dict[str, Any]] = None
 
     @classmethod
-    def from_schedule(cls, s: PipelineSchedule) -> ScheduleSummaryResponse:
+    def from_schedule(
+        cls, s: PipelineSchedule, *, connector_ids: Optional[set[str]] = None
+    ) -> ScheduleSummaryResponse:
         from services.schedule_store import (
             claim_holder,
             describe_claim_holder,
             schedule_overdue_seconds,
         )
 
-        full = ScheduleResponse.from_schedule(s)
+        full = ScheduleResponse.from_schedule(s, connector_ids=connector_ids)
         payload = full.model_dump()
         payload.pop("mappings", None)
         overdue = schedule_overdue_seconds(s)
@@ -865,7 +889,19 @@ async def list_pipeline_schedules(
 
     scope = tenant_scope(request, workspace_id).filter
     schedules = await asyncio.to_thread(list_schedules, scope)
-    return [ScheduleSummaryResponse.from_schedule(s) for s in schedules]
+    # One connector read for the page, not two per row (D432 "connection deleted").
+    known = await asyncio.to_thread(_visible_connector_ids)
+    return [ScheduleSummaryResponse.from_schedule(s, connector_ids=known) for s in schedules]
+
+
+def _visible_connector_ids() -> set[str] | None:
+    """Ids of the saved connectors this request can see; None when unreadable."""
+    try:
+        from services.connector_store import list_connectors
+
+        return {c.id for c in list_connectors()}
+    except Exception:  # noqa: BLE001 - unknown is not "deleted": fall back per row
+        return None
 
 
 @router.get("/{schedule_id}", response_model=ScheduleResponse)

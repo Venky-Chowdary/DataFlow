@@ -158,6 +158,8 @@ def test_run_now_is_refused_but_the_unattended_beat_is_not_preempted(singer_conn
         workspace_id="ws",
         source_connector_id="c-singer",
         dest_connector_id="dest",
+        # The beat dispatches a due slot (D433: an unattended run needs one).
+        next_run_at="2020-01-01T00:00:00+00:00",
     )
     monkeypatch.setattr(store, "get_schedule", lambda _id: sched)
     with pytest.raises(SingerUnavailable) as exc:

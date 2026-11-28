@@ -1043,8 +1043,13 @@ def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
         return f"{' · '.join(bits)}.\n{effect}\n\nConfirm to proceed: **{label}**."
     if name == "delete_connector":
         bound = p.get("bound_schedules") or []
+        fate = {
+            "pause": "they will be paused and show “connection deleted” until re-pointed",
+            "repoint": f"they will be re-pointed to connector `{p.get('repoint_to') or '?'}`",
+            "delete_schedules": "they will be deleted with it",
+        }.get(str(p.get("bound_schedules_action") or ""), "they will fail on their next run")
         warn = (
-            f"\n⚠ {len(bound)} pipeline(s) reference it: {', '.join(f'**{b}**' for b in bound)} — they will fail on their next run."
+            f"\n⚠ {len(bound)} pipeline(s) reference it: {', '.join(f'**{b}**' for b in bound)} — {fate}."
             if bound
             else ""
         )

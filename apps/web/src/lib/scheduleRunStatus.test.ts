@@ -102,3 +102,41 @@ describe("polling", () => {
     assert.ok(IDLE_POLL_MS > 0, "the list never stops re-reading");
   });
 });
+
+describe("a schedule whose connection was deleted (D432)", () => {
+  it("says so on Next run, paused or not, with the API's re-select guidance", async () => {
+    const { nextRunView } = await import("./scheduleRunStatus.js");
+    const reason = "Connection deleted: the source connection of this schedule no longer exists. Re-select the connection on this schedule.";
+    for (const enabled of [true, false]) {
+      const view = nextRunView(sched({
+        enabled,
+        state: enabled ? "stalled" : "paused",
+        connection_deleted: ["source"],
+        stalled_reason: reason,
+        next_run_at: enabled ? "2027-01-01T03:00:00+00:00" : null,
+      }));
+      assert.equal(view.label, "Connection deleted");
+      assert.equal(view.stalled, true);
+      assert.equal(view.title, reason);
+    }
+  });
+});
+
+describe("why a run started and what it read (D433)", () => {
+  it("names the cron window and the watermark a scheduler run read from", async () => {
+    const { runStartedBy } = await import("./scheduleRunStatus.js");
+    const base = { job_id: "j", attempt: 0, started_at: "", finished_at: "", duration_seconds: 1,
+      records_transferred: 6, rejected_rows: 0, coerced_null_rows: 0, error: "" } as ScheduleRun;
+    const window = runStartedBy({
+      ...base, status: "completed", fire_reason: "cron_window", scheduled_for: "2027-01-01T03:00:00+00:00",
+      watermark: { scope: "delta", from: "2026-01-01T00:30:00" },
+    });
+    assert.equal(window?.label, "Cron window");
+    assert.match(window?.title || "", /2027-01-01T03:00:00/);
+    assert.match(window?.title || "", /past watermark 2026-01-01T00:30:00/);
+    assert.equal(runStartedBy({ ...base, status: "completed", fire_reason: "missed_window_catch_up" })?.label, "Catch-up");
+    assert.equal(runStartedBy({ ...base, status: "completed", fire_reason: "manual" })?.label, "Run now");
+    assert.equal(runStartedBy({ ...base, status: "skipped", fire_reason: "cron_window" }), null);
+    assert.equal(runStartedBy({ ...base, status: "completed" }), null);
+  });
+});

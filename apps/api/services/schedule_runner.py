@@ -1025,6 +1025,12 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
         entry["reason"] = str(doc.get("message") or "")[:500]
     if isinstance(hist, dict) and hist:
         entry["load_history_report"] = hist
+    from services.schedule_fire_rule import watermark_used
+
+    used = watermark_used(doc)
+    if used:
+        # The run record states which watermark the run read from (D433 AC-3).
+        entry["watermark"] = used
     return entry
 
 
@@ -1877,6 +1883,14 @@ def _finding_patch(
                     corrective = DRIFT_CORRECTIVE
             elif is_schema_drift_echo(message):
                 kind, code = KIND_SOURCE_DRIFT, SOURCE_DRIFT_CODE
+            else:
+                from services.finding_remedy import connection_corrective, connection_error_code
+
+                # D435: a DNS, port or sign-in failure is fixed on the
+                # connection, not in Validate — the remedy names it.
+                conn_code = connection_error_code(str((evidence or {}).get("error_code") or ""), message)
+                if conn_code:
+                    corrective = connection_corrective(conn_code)
             found = {"failure_class": classification.kind, **(evidence or {})}
         request = build_approval_request(
             kind=kind,
@@ -2207,6 +2221,14 @@ def _run_schedule(
         return None
     if not sched.enabled and not manual:
         return None
+    from services.schedule_fire_rule import FIRE_MANUAL, FIRE_RETRY, fire_reason
+
+    # An unattended run starts only for a reason that holds on the schedule as
+    # stored now — the beat's due list is an earlier snapshot (D433). The
+    # claim checks the same rule again under the store lock.
+    reason = FIRE_MANUAL if manual else fire_reason(sched)
+    if not reason:
+        return None
     from services.parity_scale.watermark import schedule_waits_for_verification
 
     waiting = "" if manual else schedule_waits_for_verification(sched)
@@ -2220,10 +2242,15 @@ def _run_schedule(
     attempt = int(getattr(sched, "retry_attempt", 0) or 0) if retrying else 0
     trigger = (
         life.TRIGGER_MANUAL if manual
-        else life.TRIGGER_RETRY if retrying
+        else life.TRIGGER_RETRY if reason == FIRE_RETRY
         else life.TRIGGER_CADENCE
     )
-    run_id = life.begin_run(schedule_id, trigger=trigger, attempt=attempt)
+    run_id = life.begin_run(
+        schedule_id, trigger=trigger, attempt=attempt, fire_reason=reason,
+        scheduled_for="" if manual else str(
+            (sched.retry_at if reason == FIRE_RETRY else sched.next_run_at) or ""
+        ),
+    )
     with life.bound_run(schedule_id, run_id):
         try:
             job_id = _start_schedule_run(
@@ -2427,8 +2454,21 @@ def _start_schedule_run(
     )
 
     with _CLAIM_LOCK:
-        if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:
+        if mark_schedule_running(
+            schedule_id, _scheduler_instance_id(), unattended=not manual
+        ) is None:
             holder = last_claim_refusal(schedule_id) or {}
+            if str(holder.get("kind") or "") == "not_due":
+                from services.schedule_fire_rule import not_due_detail
+
+                # The beat's decision was stale: a run finished since. Nothing
+                # is owed, so nothing starts and no claim back-off is noted.
+                life.finish_run(
+                    schedule_id, life.current_run_id(schedule_id), life.SKIPPED,
+                    reason=not_due_detail(_reload_schedule(schedule_id) or sched),
+                    reason_code="not_due",
+                )
+                return None
             fresh = _reload_schedule(schedule_id)
             bound = str(getattr(fresh, "running_job_id", "") or "") if fresh else ""
             if bound and not str(holder.get("job_id") or ""):

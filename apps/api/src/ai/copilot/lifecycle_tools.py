@@ -314,11 +314,26 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         "name": "delete_connector",
         "description": (
             "Stage deletion of one saved connector by name or id. Destructive; pending "
-            "action until Confirm. Never deletes more than one connector per ask."
+            "action until Confirm. Never deletes more than one connector per ask. A "
+            "connector that schedules use is refused until bound_schedules says what "
+            "happens to them: pause, repoint (with repoint_to, a saved connector of the "
+            "same type) or delete_schedules — the same rule as the REST delete."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"connector_id": {"type": "string"}, "name": {"type": "string"}},
+            "properties": {
+                "connector_id": {"type": "string"},
+                "name": {"type": "string"},
+                "bound_schedules": {
+                    "type": "string",
+                    "enum": ["", "pause", "repoint", "delete_schedules"],
+                    "description": "What happens to schedules that use this connector.",
+                },
+                "repoint_to": {
+                    "type": "string",
+                    "description": "With bound_schedules=repoint: the connector id the schedules move to.",
+                },
+            },
             "required": [],
         },
     },
@@ -1253,7 +1268,9 @@ def test_connector(connector_id: str = "", name: str = "") -> ToolResult:
     )
 
 
-def delete_connector(connector_id: str = "", name: str = "") -> ToolResult:
+def delete_connector(
+    connector_id: str = "", name: str = "", bound_schedules: str = "", repoint_to: str = "",
+) -> ToolResult:
     conn, err = _connector("delete_connector", connector_id, name)
     if err:
         return err
@@ -1261,11 +1278,42 @@ def delete_connector(connector_id: str = "", name: str = "") -> ToolResult:
     brief = _connector_brief(conn)
     if not brief["connector_id"]:
         return _unresolved_id_error("delete_connector", conn)
-    dependents = _schedules_bound_to(brief["connector_id"])
-    preview = {**brief, "bound_schedules": dependents}
+    from types import SimpleNamespace
+
+    from services.connector_delete_guard import ConnectorInUse, plan_connector_delete, schedules_bound_to
+
+    workspace = str(conn.get("workspace_id") or "")
+    bound = schedules_bound_to(brief["connector_id"], workspace)
+    # D432: the REST delete's rule, decided up front so the stage never offers
+    # a Confirm the delete would refuse. Confirm re-checks it: a schedule bound
+    # in between is not acknowledged and the delete is refused again.
+    target = SimpleNamespace(id=brief["connector_id"], name=brief["name"],
+                             type=str(conn.get("type") or ""), workspace_id=workspace)
+    try:
+        plan = plan_connector_delete(
+            target, workspace_id=workspace, action=bound_schedules,
+            acknowledged=[r["id"] for r in bound] if bound_schedules else [],
+            repoint_to=repoint_to,
+        )
+    except ConnectorInUse as exc:
+        return _tool_result("delete_connector", success=False,
+                            output={**brief, **exc.payload}, error=str(exc))
+    except ValueError as exc:
+        return _tool_result("delete_connector", success=False, output=brief, error=str(exc))
+    preview = {**brief, "bound_schedules": [r["name"] for r in bound]}
+    payload: dict[str, Any] = {"connector_id": brief["connector_id"], "name": brief["name"]}
+    if bound:
+        preview["bound_schedules_action"] = plan.action
+        payload.update(
+            bound_schedules_action=plan.action,
+            acknowledge_schedules=[r["id"] for r in bound],
+            repoint_to=plan.repoint_to,
+        )
+        if plan.repoint_to:
+            preview["repoint_to"] = plan.repoint_to
     return _stage(
         "delete_connector",
-        payload={"connector_id": brief["connector_id"], "name": brief["name"]},
+        payload=payload,
         preview=preview,
         label=f"Delete connector “{brief['name']}”",
         destructive=True,
@@ -1542,25 +1590,17 @@ def update_connector(  # nosec B107
     return _stage(
         "update_connector",
         payload={"connector_id": brief["connector_id"], "name": brief["name"], "changes": changes},
-        preview={**brief, "changes": shown, "bound_schedules": _schedules_bound_to(brief["connector_id"])},
+        preview={**brief, "changes": shown, "bound_schedules": _schedules_bound_to(
+            brief["connector_id"], str(conn.get("workspace_id") or ""))},
         label=f"Update connector “{brief['name']}”",
         destructive=False,
     )
 
 
-def _schedules_bound_to(connector_id: str) -> list[str]:
-    try:
-        from services.schedule_store import list_schedules
-    except ImportError:
-        return []
-    names: list[str] = []
-    for s in list_schedules():
-        if connector_id and connector_id in {
-            str(getattr(s, "source_connector_id", "") or ""),
-            str(getattr(s, "dest_connector_id", "") or ""),
-        }:
-            names.append(str(s.name or s.id))
-    return names[:10]
+def _schedules_bound_to(connector_id: str, workspace_id: str = "") -> list[str]:
+    from services.connector_delete_guard import schedules_bound_to
+
+    return [row["name"] for row in schedules_bound_to(connector_id, workspace_id)][:10]
 
 
 def _schedule(tool: str, resolver: Any, schedule_id: str, name: str) -> tuple[Any, "ToolResult | None"]:

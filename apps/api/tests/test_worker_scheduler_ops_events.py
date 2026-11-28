@@ -258,6 +258,8 @@ def test_schedule_skip_connector_missing_and_append_replay(monkeypatch, caplog):
         enabled=True,
         source_connector_id="source-event",
         dest_connector_id="destination-event",
+        # The beat dispatches a due slot (D433: an unattended run needs one).
+        next_run_at="2020-01-01T00:00:00+00:00",
     )
     monkeypatch.setattr(schedule_store, "get_schedule", lambda _sid: schedule)
     monkeypatch.setattr(schedule_runner, "_resolve_connector", lambda _connector_id: None)

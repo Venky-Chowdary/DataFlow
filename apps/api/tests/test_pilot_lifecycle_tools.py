@@ -231,14 +231,27 @@ def test_delete_connector_never_guesses(monkeypatch, staged):
 
 
 def test_delete_connector_stages_with_bound_schedules(monkeypatch, staged):
+    """D432: the REST rule — a bound connector is staged only with a choice for its schedules."""
+    import services.connector_delete_guard as guard
+
     monkeypatch.setattr(
         lt, "_connector_dict", lambda connector_id="", name="", **_kw: {"id": "c1", "name": "Warehouse", "type": "postgresql"}
     )
-    monkeypatch.setattr(lt, "_schedules_bound_to", lambda cid: ["Nightly Orders"])
-    tr = lt.delete_connector(name="Warehouse")
+    bound = [{"id": "s1", "name": "Nightly Orders", "enabled": True, "role": "source",
+              "running": False, "workspace_id": ""}]
+    monkeypatch.setattr(guard, "schedules_bound_to", lambda cid, workspace_id="": list(bound))
+    refused = lt.delete_connector(name="Warehouse")
+    assert not refused.success and "Nightly Orders" in refused.error
+    assert staged == []
+
+    tr = lt.delete_connector(name="Warehouse", bound_schedules="pause")
     assert tr.success and tr.output["destructive"]
-    assert staged[0]["payload"] == {"connector_id": "c1", "name": "Warehouse"}
+    assert staged[0]["payload"] == {
+        "connector_id": "c1", "name": "Warehouse", "bound_schedules_action": "pause",
+        "acknowledge_schedules": ["s1"], "repoint_to": "",
+    }
     assert staged[0]["preview"]["bound_schedules"] == ["Nightly Orders"]
+    assert staged[0]["preview"]["bound_schedules_action"] == "pause"
 
 
 class _Sched:

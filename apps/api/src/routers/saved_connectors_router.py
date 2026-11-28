@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from services.rbac import require_admin_connector_access
@@ -429,13 +429,48 @@ def remove_saved_connector(
     connector_id: str,
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+    bound_schedules: Annotated[str, Query(max_length=32)] = "",
+    acknowledge_schedules: Annotated[str, Query(max_length=8000)] = "",
+    repoint_to: Annotated[str, Query(max_length=128)] = "",
 ):
+    """Delete a saved connector (D432: one rule for REST, Studio and MCP).
+
+    A connector that schedules use is refused 409 ``connector_in_use`` naming
+    them and the options, unless ``bound_schedules`` (pause | repoint |
+    delete_schedules) is sent with ``acknowledge_schedules`` = the ids of
+    exactly the schedules bound now (comma-separated) and, to re-point,
+    ``repoint_to``. The choice is applied first and audited.
+    """
+    from services.connector_delete_guard import (
+        ConnectorInUse,
+        apply_bound_schedule_action,
+        plan_connector_delete,
+    )
+
     workspace_id = _resolve_workspace(request, workspace_id)
     conn = get_connector(connector_id, workspace_id=workspace_id)
     _writable_connector_or_404(request, conn)
+    try:
+        plan = plan_connector_delete(
+            conn,
+            workspace_id=str(conn.workspace_id or workspace_id or ""),
+            action=bound_schedules,
+            acknowledged=[part for part in acknowledge_schedules.split(",") if part.strip()],
+            repoint_to=repoint_to,
+        )
+    except ConnectorInUse as exc:
+        raise HTTPException(status_code=409, detail=exc.payload | {"message": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    user = getattr(request.state, "user", None) or {}
+    actor = str(user.get("email") or user.get("name") or "").strip()
+    affected = apply_bound_schedule_action(plan, actor=actor, request=request)
     if not delete_connector(connector_id, workspace_id=workspace_id):
         raise HTTPException(status_code=404, detail="Connector not found")
-    return {"ok": True}
+    out: dict[str, Any] = {"ok": True}
+    if affected:
+        out["bound_schedules"] = {"action": plan.action, "schedules": affected}
+    return out
 
 
 class RotateSecretsBody(BaseModel):

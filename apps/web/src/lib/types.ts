@@ -1684,12 +1684,37 @@ export interface StandingAuthorization {
 }
 
 /** An inbox row: the parked schedule, and the decision it is waiting on. */
+/** One end of a parked schedule's route, by the name an operator recognises (D435). */
+export interface ScheduleInboxConnector {
+  id: string;
+  name: string;
+  type: string;
+  /** The connection no longer exists: the schedule cannot run until re-pointed. */
+  deleted: boolean;
+}
+
+/** What fixes a parked finding when it is not a decision (D435). */
+export interface ScheduleInboxRemedy {
+  /** ``connection``: fix the connection (DNS, port, sign-in). ``connection_deleted``: re-select it. */
+  target?: "connection" | "connection_deleted" | string;
+  code?: string;
+  corrective_action?: string;
+  /** For ``connection_deleted``: ``source``, ``destination`` or both, comma-separated. */
+  sides?: string;
+}
+
 export interface ScheduleApprovalInboxItem {
   schedule_id: string;
   schedule_name: string;
   workspace_id: string;
+  /** Raw ``<connector id>:<table>`` (API clients); the UI shows the named fields below. */
   source: string;
   destination: string;
+  source_connector?: ScheduleInboxConnector;
+  source_table?: string;
+  destination_connector?: ScheduleInboxConnector;
+  dest_table?: string;
+  remedy?: ScheduleInboxRemedy;
   sync_mode: string;
   enabled: boolean;
   approval: ScheduleApproval;
@@ -1756,6 +1781,8 @@ export interface PipelineSchedule {
   state?: "paused" | "running" | "scheduled" | "stalled";
   /** Why a stalled schedule will not fire, and the action that clears it. */
   stalled_reason?: string;
+  /** ``source`` / ``destination`` whose connection was deleted (D432): shown as "connection deleted". */
+  connection_deleted?: string[];
   last_job_id: string | null;
   /** Derived by the API from the latest run record (not a stored copy). */
   last_status: string | null;
@@ -1850,6 +1877,22 @@ export interface ScheduleRun {
   run_id?: string;
   /** cadence | retry | manual */
   trigger?: string;
+  /**
+   * Why the run started (D433): cron_window, missed_window_catch_up, retry,
+   * manual, or the human decision that re-armed it (approval, plan_change, rebaseline).
+   */
+  fire_reason?: string;
+  /** The cron window (or retry time) this run served. */
+  scheduled_for?: string;
+  /** Which watermark the run read from: ``delta`` past ``from``, or the whole source. */
+  watermark?: {
+    scope?: "delta" | "full_source" | string;
+    from?: string | null;
+    to?: string | null;
+    cursor_column?: string;
+    rows_selected?: number | null;
+    reason?: string;
+  };
   /** Why the run ended as it did — every terminal record has one. */
   reason?: string;
   reason_code?: string;

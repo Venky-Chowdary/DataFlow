@@ -2323,9 +2323,63 @@ export function streamJobProgress(
   }
 }
 
-export async function deleteConnector(id: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/connectors/saved/${id}`, { method: "DELETE" });
+/** A schedule that reads from or writes to a connector being deleted (D432). */
+export interface ConnectorBoundSchedule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  role: string;
+  running?: boolean;
+}
+
+/** What happens to the bound schedules when their connector is deleted (D432). */
+export type BoundScheduleAction = "pause" | "repoint" | "delete_schedules";
+
+export interface ConnectorDeleteAcknowledgement {
+  action: BoundScheduleAction;
+  /** Exactly the schedules bound now; one bound since is refused again. */
+  scheduleIds: string[];
+  repointTo?: string;
+}
+
+/** The API refused the delete: schedules use this connector (409 ``connector_in_use``). */
+export class ConnectorInUseError extends Error {
+  readonly boundSchedules: ConnectorBoundSchedule[];
+
+  constructor(message: string, boundSchedules: ConnectorBoundSchedule[]) {
+    super(message);
+    this.name = "ConnectorInUseError";
+    this.boundSchedules = boundSchedules;
+  }
+}
+
+/**
+ * Delete a saved connector. A connector that schedules use needs an
+ * acknowledgement naming those schedules and what happens to them — the same
+ * rule REST and MCP apply (D432).
+ */
+export async function deleteConnector(id: string, ack?: ConnectorDeleteAcknowledgement): Promise<void> {
+  const query = ack
+    ? `?${new URLSearchParams({
+      bound_schedules: ack.action,
+      acknowledge_schedules: ack.scheduleIds.join(","),
+      ...(ack.repointTo ? { repoint_to: ack.repointTo } : {}),
+    }).toString()}`
+    : "";
+  const res = await apiFetch(`${API_BASE}/connectors/saved/${id}${query}`, { method: "DELETE" });
   if (res.ok) return;
+  if (res.status === 409) {
+    try {
+      const detail = (await res.clone().json())?.detail;
+      if (detail && typeof detail === "object" && detail.code === "connector_in_use") {
+        const rows = Array.isArray(detail.bound_schedules) ? detail.bound_schedules as ConnectorBoundSchedule[] : [];
+        throw new ConnectorInUseError(String(detail.message || "Schedules use this connection."), rows);
+      }
+    } catch (err) {
+      if (err instanceof ConnectorInUseError) throw err;
+      /* not the in-use refusal: fall through to the API's own reason */
+    }
+  }
   throw new Error(await parseApiError(res, "Failed to delete connector"));
 }
 

@@ -329,11 +329,16 @@ def _history_patch(sched: Any, entry: dict[str, Any], *, mirror: bool = True) ->
     return patch
 
 
-def begin_run(schedule_id: str, *, trigger: str, attempt: int = 0) -> str:
-    """Persist a ``pending`` record before any work starts. Returns its id."""
+def begin_run(schedule_id: str, *, trigger: str, attempt: int = 0, **fields: Any) -> str:
+    """Persist a ``pending`` record before any work starts. Returns its id.
+
+    ``fields`` carry why the run started (``fire_reason``) and the window it
+    serves (``scheduled_for``), so the history says it (D433 AC-4).
+    """
     run_id = new_run_id()
     now = _now()
     entry = {
+        **{k: v for k, v in fields.items() if v not in (None, "")},
         "run_id": run_id,
         "status": PENDING,
         "trigger": trigger,

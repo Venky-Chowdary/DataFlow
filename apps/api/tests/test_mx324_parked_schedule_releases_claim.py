@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from services.cron_schedule import next_run
 
@@ -161,6 +161,8 @@ def test_dispatch_exception_after_claim_releases_it_immediately(tmp_path, monkey
         raise RuntimeError("connector registry unavailable")
 
     monkeypatch.setattr(schedule_runner, "_dispatch_transfer", boom)
+    # The beat fires the slot that came due (D433: an unattended run needs one).
+    store.update_schedule(sched.id, {"next_run_at": (frozen_schedule_clock - timedelta(minutes=1)).isoformat()})
     with pytest.raises(RuntimeError, match="registry unavailable"):
         schedule_runner._run_schedule(sched.id)
     after = store.get_schedule(sched.id)
