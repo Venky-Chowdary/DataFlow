@@ -704,6 +704,10 @@ def _mssql_stamp_bind(stamp: datetime) -> tuple[str, str]:
     digits and the offset under either driver.
     """
     target = "DATETIMEOFFSET(7)" if stamp.tzinfo is not None else "DATETIME2(7)"
+    if stamp.tzinfo is not None:
+        # In UTC: a DATETIME2 column keeps a DATETIMEOFFSET's local wall clock,
+        # so 02:51-05:00 would land as 02:51 instead of the instant 07:51.
+        stamp = stamp.astimezone(timezone.utc)
     return stamp.isoformat(timespec="microseconds"), f"CAST(:ts AS {target})"
 
 

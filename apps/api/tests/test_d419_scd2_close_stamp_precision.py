@@ -53,9 +53,32 @@ def test_the_driver_model_is_pymssql_itself():
     assert pymssql.quote_simple_value(_STAMP) == b"'2026-11-24 02:51:23.661'"
 
 
-@pytest.mark.parametrize("stamp", [_STAMP, _STAMP.replace(tzinfo=None),
-                                   _STAMP.astimezone(timezone(timedelta(hours=-5)))])
-def test_sqlserver_close_binds_the_stamp_with_its_microseconds(stamp):
+def _stored_in(column_type: str, sql: str) -> datetime:
+    """What SQL Server stores for ``SET valid_to = <sql>`` (the server-side rules).
+
+    ``CAST('<iso>' AS DATETIMEOFFSET(7))`` keeps the instant and its offset; a
+    DATETIME2 column receiving a DATETIMEOFFSET keeps its local wall clock and
+    drops the offset (SQL Server data type conversion). A bare quoted literal
+    is what pymssql sent: milliseconds, no offset.
+    """
+    import re
+
+    cast = re.search(r"CAST\(N?'([^']+)' AS (DATETIMEOFFSET|DATETIME2)\(7\)\)", sql)
+    if cast:
+        value = datetime.fromisoformat(cast.group(1))
+    else:
+        literal = re.search(r"valid_to\S* = N?'([^']+)'", sql)
+        value = datetime.fromisoformat(literal.group(1))
+    if column_type == "DATETIME2":
+        return value.replace(tzinfo=None)
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("column_type", ["DATETIMEOFFSET", "DATETIME2"])
+@pytest.mark.parametrize("stamp", [_STAMP, _STAMP.astimezone(timezone(timedelta(hours=-5)))])
+def test_sqlserver_close_stores_the_run_instant_exactly(stamp, column_type):
+    """The stored valid_to is the instant the successor's valid_from opened at:
+    every microsecond, and on DATETIME2 (UTC wall clock) not the -05:00 local time."""
     from services.scd2_engine import _expire_rows
 
     conn = _PymssqlConn()
@@ -64,9 +87,21 @@ def test_sqlserver_close_binds_the_stamp_with_its_microseconds(stamp):
         cols={"valid_from": "valid_from", "valid_to": "valid_to", "is_current": "is_current"},
     )
     assert closed == 1
-    sql = conn.statements[0]
-    assert stamp.isoformat(timespec="microseconds") in sql, sql
-    assert "CAST(" in sql and ("DATETIMEOFFSET(7)" if stamp.tzinfo else "DATETIME2(7)") in sql
+    stored = _stored_in(column_type, conn.statements[0])
+    if column_type == "DATETIME2":
+        assert stored == _STAMP.replace(tzinfo=None), (stored, conn.statements[0])
+    else:
+        assert stored == _STAMP, (stored, conn.statements[0])
+
+
+def test_sqlserver_close_of_a_naive_stamp_keeps_microseconds():
+    from services.scd2_engine import _expire_rows
+
+    conn = _PymssqlConn()
+    naive = _STAMP.replace(tzinfo=None)
+    _expire_rows(conn, "[dbo].[t]", ["id"], {"3"}, naive, "mssql",
+                 cols={"valid_from": "valid_from", "valid_to": "valid_to", "is_current": "is_current"})
+    assert _stored_in("DATETIME2", conn.statements[0]) == naive, conn.statements[0]
 
 
 def test_sqlserver_close_of_keys_missing_from_the_snapshot_keeps_microseconds():
