@@ -387,6 +387,32 @@ def _object_payload_duplicates(
     )
 
 
+def _kafka_run_start(cfg: dict[str, Any], topic: str) -> dict[str, Any] | None:
+    """Where an incremental Kafka run starts reading, as a reader continuation.
+
+    ``None`` reads from the log start: a full refresh (it re-reads the topic),
+    a read with no group, or a group that has committed nothing yet (the first
+    run reads the whole topic, so the whole topic is its population).
+    """
+    from connectors.kafka_reader import (
+        KAFKA_START_KEY,
+        configured_kafka_group_id,
+        group_committed_offsets,
+    )
+
+    # Only where the engine stamped this run's start (``stamp_kafka_source``):
+    # a plan or preview that names no run keeps reading the whole topic.
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    stamped = str(cfg.get(KAFKA_START_KEY) or extra.get(KAFKA_START_KEY) or "").strip()
+    group = configured_kafka_group_id(cfg)
+    if stamped != "committed" or not group:
+        return None
+    offsets = group_committed_offsets(cfg, topic, group)
+    if not offsets:
+        return None
+    return {"topic": topic, "pending_offsets": offsets, "start_position": "committed"}
+
+
 def _paged_payload_duplicates(
     cfg: dict[str, Any],
     db_type: str,
@@ -416,7 +442,13 @@ def _paged_payload_duplicates(
     # group_id kicks the transfer member out on commit (kafka-python:
     # "consumer was kicked out of the group") after dest apply — fail-closed
     # on a unique payload.
+    first_token: Any = None
     if db_type == "kafka":
+        # R3 / D396: an incremental run reads only the messages past its
+        # group's committed offsets, so its uniqueness is judged there too.
+        # Scanning from the log start counted every earlier version of a key
+        # as a duplicate ("5x2, 3x2") and refused runs 2-3 of a changelog.
+        first_token = _kafka_run_start(cfg, key)
         cfg = dict(cfg)
         gid = f"dataflow-kafka-uniqueness-{uuid.uuid4().hex[:12]}"
         cfg["group_id"] = gid
@@ -435,7 +467,9 @@ def _paged_payload_duplicates(
     # re-read page one and reported its own re-reads as source duplicate keys —
     # a fail-closed gate on a unique keyspace.
     token_kwarg = CONTINUATION_KWARG.get(resolve_driver_type(db_type), "")
-    token: Any = None
+    token: Any = first_token
+    if token is not None:
+        token = {**token, "group_id": cfg["group_id"]}
     complete = True
     try:
         while True:

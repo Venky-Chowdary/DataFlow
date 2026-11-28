@@ -243,6 +243,39 @@ def commit_kafka_offsets(cfg: dict[str, Any], cursor: dict[str, Any] | None) -> 
         consumer.close()
 
 
+def group_committed_offsets(cfg: dict[str, Any], topic: str, group_id: str) -> list[dict[str, Any]]:
+    """``[{topic, partition, offset}]`` the group has committed on ``topic``.
+
+    Read without joining the group (no subscribe, no assignment, no commit), so
+    a running pipeline that owns the group is never rebalanced. A partition the
+    group never committed is left out: a read starts it at the log start.
+    """
+    if not (topic and group_id):
+        return []
+    from kafka import KafkaConsumer, TopicPartition
+
+    from connectors.kafka_debezium_bridge import KAFKA_OFFSET_LOOKUP_TIMEOUT_MS
+    from services.copy_kafka_common import kafka_classified_bootstrap
+
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg, group_id=group_id, enable_auto_commit=False, request_timeout_ms=8000
+            )
+        )
+    try:
+        out = []
+        for partition in sorted(consumer.partitions_for_topic(topic) or ()):
+            offset = consumer.committed(
+                TopicPartition(topic, int(partition)), timeout_ms=KAFKA_OFFSET_LOOKUP_TIMEOUT_MS
+            )
+            if offset is not None:
+                out.append({"topic": topic, "partition": int(partition), "offset": int(offset)})
+        return out
+    finally:
+        consumer.close(autocommit=False)
+
+
 _JOIN_WAIT_S = 15.0
 
 
