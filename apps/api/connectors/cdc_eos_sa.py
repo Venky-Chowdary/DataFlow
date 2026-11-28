@@ -1343,6 +1343,7 @@ def apply_eos_sqlalchemy(
                 expected_lsn=result.committed_lsn,
                 expected_fence=result.fence_epoch,
                 expected_seq=result.apply_seq,
+                dest_object=dest_table,
             )
         return result
     except EosCrash:
@@ -1575,19 +1576,30 @@ def sa_dest_watermark_view(
     cfg.setdefault("type", dialect)
     engine = _engine(cfg)
     wm_token = _enter_wm_scope(engine, dialect)
+    sql = text(
+        f"SELECT committed_lsn, epoch, fence_epoch, phase, "
+        f"apply_checksum, resume_blob, apply_seq, window_id, "
+        f"snapshot_signal_id, window_hi_pk "
+        f"FROM {_wm_ref(dialect)} WHERE stream_key = :k"
+    )
     try:
-        with engine.connect() as conn:
+        for attempt in range(1, _RECONNECT_ATTEMPTS + 1):
             try:
-                row = conn.execute(
-                    text(
-                        f"SELECT committed_lsn, epoch, fence_epoch, phase, "
-                        f"apply_checksum, resume_blob, apply_seq, window_id, "
-                        f"snapshot_signal_id, window_hi_pk "
-                        f"FROM {_wm_ref(dialect)} WHERE stream_key = :k"
-                    ),
-                    {"k": stream_key},
-                ).fetchone()
+                with engine.connect() as conn:
+                    return _row_to_wm(conn.execute(sql, {"k": stream_key}).fetchone())
             except SQLAlchemyError as exc:
+                if _connection_dropped(exc) and attempt < _RECONNECT_ATTEMPTS:
+                    # D406/D426: a dropped connection is not a missing
+                    # watermark. The read is retried on a fresh connection, so
+                    # a commit that landed is confirmed instead of failing the
+                    # run with "watermark LSN None".
+                    _logger.warning(
+                        "cdc_eos: post-commit watermark read lost its connection "
+                        "(attempt %d of %d); reading again on a new connection",
+                        attempt,
+                        _RECONNECT_ATTEMPTS,
+                    )
+                    continue
                 # No readable watermark → empty view → verify_dest_commit fails closed.
                 _logger.warning(
                     "cdc_eos: post-commit watermark read failed stream_key=%s: %s",
@@ -1595,7 +1607,7 @@ def sa_dest_watermark_view(
                     exc,
                 )
                 return DestWmView()
-            return _row_to_wm(row)
+        raise AssertionError("unreachable")  # pragma: no cover
     finally:
         _WM_TABLE.reset(wm_token)
         release_engine(engine)

@@ -717,6 +717,7 @@ def verify_dest_commit(
     expected_lsn: str,
     expected_fence: int = 0,
     expected_seq: int = 0,
+    dest_object: str = "",
 ) -> None:
     """Re-read dest after COMMIT. Refuse success if dest did not persist.
 
@@ -725,7 +726,22 @@ def verify_dest_commit(
     """
     if not expected_lsn:
         return
-    if not dest.committed_lsn or compare_lsn(dest.committed_lsn, expected_lsn) < 0:
+    if not dest.committed_lsn:
+        # D426: never surface an internal "LSN None". Name what is missing,
+        # that the source was not acknowledged, and what the next run does.
+        from services.brand import PRODUCT_NAME
+
+        where = f" for {dest_object}" if dest_object else ""
+        raise ExactlyOnceRouteError(
+            f"{PRODUCT_NAME} could not confirm the destination commit{where}: the "
+            "exactly-once watermark row was not readable after the commit "
+            f"(expected position {expected_lsn}). The source position was not "
+            "acknowledged, so no change is lost: the next run reads these changes "
+            "again and applies each one once. Run the job again; if this repeats, "
+            "check that the destination login can read the watermark table.",
+            reason=REASON_UNVERIFIED,
+        )
+    if compare_lsn(dest.committed_lsn, expected_lsn) < 0:
         raise ExactlyOnceRouteError(
             "exactly_once dest commit unverified — watermark LSN "
             f"{dest.committed_lsn!r} is behind expected {expected_lsn!r}. "
