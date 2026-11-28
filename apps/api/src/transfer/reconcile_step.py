@@ -7652,6 +7652,15 @@ def _run_reconciliation_impl(
         )
 
     target_cols = _mapped_targets(mapping_dicts, columns)
+    # The writer names each target with the destination's identifier rule
+    # (``Customer ID`` lands as ``Customer_ID``). Read back by the raw header,
+    # SQLite answered the unknown quoted name with the literal string on every
+    # row and the strict checksum failed an exact keep_last load.
+    from connectors.destination_naming import target_identifier as _writer_ident
+
+    _ident = _writer_ident(db_type)
+    if _ident is not None:
+        target_cols = list(dict.fromkeys(_ident(c) for c in target_cols))
     pk_cols = list(
         dest_summary.get("primary_key_columns")
         or dest_summary.get("conflict_columns")
