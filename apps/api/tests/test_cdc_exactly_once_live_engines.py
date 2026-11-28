@@ -414,3 +414,100 @@ def test_live_postgresql_eos_mixed_case_update_overwrites_stale_value() -> None:
         assert lsn == "0/20"
     finally:
         _drop("postgresql", [table])
+
+
+def _set_row(engine: str, table: str, row_id: str, value: str, lsn: str) -> None:
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+    from sqlalchemy import text
+
+    eng = _engine(dict(ENGINES[engine]))
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    f"UPDATE {_quoted(engine, table)} SET {_quoted(engine, 'v')} = :v, "
+                    f"{_quoted(engine, '_df_lsn')} = :lsn WHERE {_quoted(engine, 'id')} = :id"
+                ),
+                {"v": value, "lsn": lsn, "id": row_id},
+            )
+    finally:
+        release_engine(eng)
+
+
+def _row(engine: str, table: str, row_id: str) -> tuple:
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+    from sqlalchemy import text
+
+    eng = _engine(dict(ENGINES[engine]))
+    try:
+        with eng.connect() as conn:
+            return tuple(
+                conn.execute(
+                    text(
+                        f"SELECT {_quoted(engine, 'v')}, {_quoted(engine, '_df_lsn')} "
+                        f"FROM {_quoted(engine, table)} WHERE {_quoted(engine, 'id')} = :id"
+                    ),
+                    {"id": row_id},
+                ).one()
+            )
+    finally:
+        release_engine(eng)
+
+
+@pytest.mark.parametrize("engine", ["oracle", "postgresql", "sqlserver"])
+def test_live_d437_drift_repair_in_the_watermark_transaction(engine: str) -> None:
+    """D437: confirmed drift repair runs where the at-least-once writer has no guard.
+
+    The key is re-copied under the stream's watermark lock with the committed
+    position as ``_df_lsn``; a row a newer change holds is refused; the
+    watermark does not move; a lease generation behind the fence writes nothing.
+    """
+    from connectors.cdc_eos_drift_repair import repair_row_in_eos_transaction
+    from services.cdc_exactly_once import ExactlyOnceRouteError
+
+    _require(engine)
+    table = "eos_t_d437"
+    key = "t-d437|" + uuid.uuid4().hex[:8]
+    _drop(engine, [table])
+    try:
+        _apply(
+            engine, table,
+            _batch("0/100", inserts=[{"id": "1", "v": "a"}, {"id": "2", "v": "b"}]),
+            key=key,
+        )
+        stream_key = eos_stream_key(
+            dest_type=engine, dest_database=str(ENGINES[engine]["database"]),
+            dest_object=table, cursor_key=key, stream_name="",
+        )
+        from connectors.cdc_eos_sql import open_eos_session
+
+        # The repair's lease generation, raised on the destination as repair does.
+        fence = open_eos_session(
+            dest_type=engine, dest_cfg=dict(ENGINES[engine]), stream_key=stream_key,
+            incoming_fence=5,
+        ).fence_epoch
+        assert fence == 5
+        _set_row(engine, table, "1", "drifted", "0/100")  # drift at the committed position
+        _set_row(engine, table, "2", "newer", "0/200")  # a newer change holds this key
+
+        def repair(row: dict, writer_fence: int) -> str:
+            return repair_row_in_eos_transaction(
+                dest_type=engine, dest_cfg=dict(ENGINES[engine]), dest_table=table,
+                stream_key=stream_key, row=row, mappings=MAPPINGS, column_types=TYPES,
+                pk_targets=PK, committed_lsn="0/100", writer_fence=writer_fence,
+            )
+
+        assert repair({"id": "1", "v": "a"}, fence) == "repaired"
+        assert repair({"id": "2", "v": "b"}, fence) == "refused_newer_event"
+        assert repair({"id": "3", "v": "c"}, fence) == "repaired"  # missing on the destination
+        assert _row(engine, table, "1") == ("a", "0/100")
+        assert _row(engine, table, "2") == ("newer", "0/200")
+        assert _row(engine, table, "3") == ("c", "0/100")
+        assert _wm_lsn(engine, table, key) == "0/100"
+        with pytest.raises(ExactlyOnceRouteError):
+            repair({"id": "1", "v": "zombie"}, fence - 1)
+        assert _row(engine, table, "1") == ("a", "0/100")
+    finally:
+        _drop(engine, [table])

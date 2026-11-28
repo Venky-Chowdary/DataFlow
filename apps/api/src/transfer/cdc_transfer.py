@@ -4722,6 +4722,7 @@ def _run_cdc_single_stream(
                         pk_fields=pk_fields,
                         committed_position=token,
                         rows=missing_image,
+                        dest_type=str(dest_type or ""),
                     )
                     head_position = None
                     head_reader = getattr(cdc, "capture_head_position", None)
@@ -4886,6 +4887,7 @@ def _run_cdc_single_stream(
                             pk_fields=pk_fields,
                             committed_position=post_drain_token,
                             rows=missing_image,
+                            dest_type=str(dest_type or ""),
                         )
                         # A capture job behind the source log hides the change
                         # from both the reader and the head it is checked

@@ -866,6 +866,7 @@ def _upsert_row(
     values: dict[str, Any],
     dialect: str = "",
     absent: set[str] | frozenset[str] = frozenset(),
+    allow_equal_lsn: bool = False,
 ) -> int:
     where = " AND ".join(f"{_q(c, dialect)} = :pk_{i}" for i, c in enumerate(pk_cols))
     pk_binds = {f"pk_{i}": values.get(c) for i, c in enumerate(pk_cols)}
@@ -874,7 +875,14 @@ def _upsert_row(
         pk_binds,
     ).fetchone()
     prior = existing[0] if existing else None
-    if not should_apply_pk_row(
+    if allow_equal_lsn:
+        # Confirmed drift repair (D437): the committed position itself may
+        # overwrite; a newer stamp may not.
+        from connectors.cdc_eos_drift_repair import repair_overwrite_allowed
+
+        if not repair_overwrite_allowed(prior, str(values.get(DF_LSN_COL) or "")):
+            return 0
+    elif not should_apply_pk_row(
         existing_lsn=prior, incoming_lsn=values.get(DF_LSN_COL)
     ).applied:
         return 0

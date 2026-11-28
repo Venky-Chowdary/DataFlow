@@ -739,6 +739,14 @@ def _job_tool(
                 output=None,
                 error="This job has no operator-fenced CDC drift evidence to repair.",
             )
+        from services.cdc_drift_repair import drift_repair_refusal
+        from src.transfer.connector_capabilities import resolve_driver_type
+
+        # D437: refuse at preview, with the reason, before any confirm card.
+        dest_format = str(destination.get("format") or evidence.get("dest_type") or "")
+        refusal = drift_repair_refusal(resolve_driver_type(dest_format)) if dest_format else ""
+        if refusal:
+            return _tool_result(tool, success=False, output=None, error=refusal)
         if (
             str(evidence.get("source_table") or "") != str(source.get("table") or source.get("collection") or "")
             or str(evidence.get("dest_table") or "") != str(destination.get("table") or destination.get("collection") or "")

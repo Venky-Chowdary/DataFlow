@@ -17,6 +17,52 @@ class CdcDriftRequiresFencedRepair(RuntimeError):
         super().__init__(cdc_drift_operator_message(evidence))
 
 
+#: Repaired by the at-least-once writer, whose upsert SQL carries the guard.
+_WRITER_REPAIR_DESTS = frozenset({"sqlite", "postgresql", "mysql"})
+
+
+def drift_repair_route(dest_type: str) -> str:
+    """How confirmed drift is repaired on this destination (D437).
+
+    ``"writer"`` (SQLite, PostgreSQL, MySQL), ``"eos_transaction"`` (SQL
+    Server, Oracle, generic SQL: inside the dest-owned watermark transaction)
+    or ``""`` when no guarded repair exists. One rule for the failure
+    message, the preview and the confirmed repair.
+    """
+    from connectors.cdc_eos_drift_repair import EOS_TRANSACTION_REPAIR_DESTS
+
+    dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest == "postgres":
+        dest = "postgresql"
+    if dest in _WRITER_REPAIR_DESTS:
+        return "writer"
+    if dest in EOS_TRANSACTION_REPAIR_DESTS:
+        return "eos_transaction"
+    return ""
+
+
+def drift_repair_refusal(dest_type: str) -> str:
+    """The reason repair_cdc_drift cannot run on this destination, or ``""``."""
+    if drift_repair_route(dest_type):
+        return ""
+    from services.engine_names import engine_display_name
+
+    label = engine_display_name(dest_type) if dest_type else "this destination"
+    return (
+        f"repair_cdc_drift cannot run on {label}: re-copying a key there has no "
+        "guard against overwriting a newer change. It runs on SQLite, PostgreSQL, "
+        "MySQL, SQL Server, Oracle and generic SQL destinations. "
+        + _UNGUARDED_RECOVERY
+    )
+
+
+_UNGUARDED_RECOVERY = (
+    "To recover, re-snapshot this stream with clear_cursor_resnapshot (the next "
+    "run re-copies the table, then streams from the new position), or correct "
+    "the drifted rows on the destination and run again."
+)
+
+
 _CAPTURE_PENDING_REASONS = {
     "rescan_incomplete": "the source re-scan did not finish",
     "stream_behind": "the change reader ended behind the capture head",
@@ -50,6 +96,9 @@ def cdc_drift_operator_message(evidence: dict[str, Any]) -> str:
     pk = ", ".join(str(f) for f in evidence.get("pk_fields") or []) or "key"
     noun = "row" if count == 1 else "rows"
     reason_key = str(evidence.get("capture_pending_reason") or "")
+    dest_type = str(evidence.get("dest_type") or "")
+    # Evidence recorded before D437 names no destination type: as before.
+    repairable = not dest_type or bool(drift_repair_route(dest_type))
     if evidence.get("capture_pending") is True and reason_key in _HARVEST_PENDING_REASONS:
         message = (
             f"Capture pending: {count} {noun} in {dest} (evidenced by {pk}) do not "
@@ -59,18 +108,27 @@ def cdc_drift_operator_message(evidence: dict[str, Any]) -> str:
         )
         if reason_key == "harvest_unverified":
             message += " or grant the CDC login db_owner"
-        message += (
-            "; or run repair_cdc_drift (the confirmed repair action) to re-copy "
-            "exactly those keys under the CDC fence."
-        )
+        if repairable:
+            message += (
+                "; or run repair_cdc_drift (the confirmed repair action) to re-copy "
+                "exactly those keys under the CDC fence."
+            )
+        else:
+            message += ". " + _UNGUARDED_RECOVERY
         return message + _reader_range_text(evidence)
     message = (
         f"CDC verification found {count} {noun} in {dest} whose values do not match "
-        f"the source image (evidenced by {pk}). Run repair_cdc_drift (the confirmed "
-        "repair action) on this job to re-copy exactly those keys under the CDC "
-        "fence, then resume. This is state convergence / reconciliation, not log "
-        "replay."
+        f"the source image (evidenced by {pk}). "
     )
+    if repairable:
+        message += (
+            "Run repair_cdc_drift (the confirmed repair action) on this job to "
+            "re-copy exactly those keys under the CDC fence, then resume. This is "
+            "state convergence / reconciliation, not log replay."
+        )
+    else:
+        # D437: a remedy is only offered where it can run.
+        message += drift_repair_refusal(dest_type)
     added = [str(c) for c in evidence.get("added_columns") or [] if c]
     if added:
         names = ", ".join(added)
@@ -108,6 +166,7 @@ def _build_drift_evidence(
     pk_fields: list[str],
     committed_position: Any,
     rows: list[dict[str, Any]],
+    dest_type: str = "",
 ) -> dict[str, Any]:
     from services.audit_log import _platform_hmac_secret
 
@@ -145,6 +204,7 @@ def _build_drift_evidence(
         "keys": keys,
         "truncated": len(rows) > len(keys),
         "semantics": "state convergence / reconciliation, not log replay",
+        **({"dest_type": dest_type} if dest_type else {}),
     }
 
 
@@ -253,13 +313,9 @@ def run_fenced_drift_repair(
     )
     if expected_cursor_key != cursor_key:
         raise ValueError("CDC drift evidence cursor does not match the saved job route.")
-    if dest_type not in {"sqlite", "postgresql", "mysql"}:
-        raise ValueError(
-            f"Inclusive _df_lsn compare-and-set is not supported for {dest_type}; "
-            "it is not supported for SQL Server, Oracle, MongoDB, Snowflake, "
-            "BigQuery, Redshift, object stores, or other unguarded writers. "
-            "Supported repair dialects are SQLite, PostgreSQL, and MySQL."
-        )
+    repair_route = drift_repair_route(dest_type)
+    if not repair_route:
+        raise ValueError(drift_repair_refusal(dest_type))
 
     from connectors.cdc_eos_sql import dest_watermark_view
     if dest_type == "sqlite":
@@ -442,6 +498,26 @@ def run_fenced_drift_repair(
                     {"source": "_df_lsn", "target": "_df_lsn", "confidence": 1.0}
                 )
             try:
+                if repair_route == "eos_transaction":
+                    from connectors.cdc_eos_drift_repair import (
+                        repair_row_in_eos_transaction,
+                    )
+
+                    with egress_workspace(workspace_id):
+                        outcome = repair_row_in_eos_transaction(
+                            dest_type=dest_type,
+                            dest_cfg=dest_cfg,
+                            dest_table=dest_table,
+                            stream_key=cursor_key,
+                            row=row,
+                            mappings=mappings,
+                            column_types=saved.get("column_types") or {},
+                            pk_targets=pk_targets,
+                            committed_lsn=lsn,
+                            writer_fence=int(opened.fence_epoch),
+                        )
+                    counts[outcome] += 1
+                    continue
                 # Bound for the S3 bucket-region guard and the egress policy (review 3, H4).
                 with egress_workspace(workspace_id):
                     _written, _columns, writer_summary = write_destination_database(
