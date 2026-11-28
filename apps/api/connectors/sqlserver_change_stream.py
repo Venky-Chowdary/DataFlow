@@ -29,6 +29,7 @@ from typing import Any, Iterator
 from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
 from connectors.sqlserver_cdc_native import (
     SqlServerCdcReadError,
+    _raise_if_connection_lost,
     _retry_sqlserver_poll,
 )
 from connectors.write_resilience import is_connection_lost
@@ -257,6 +258,9 @@ class SqlServerChangeTrackingCdc:
                     )
                     return cur.fetchone() is not None
         except Exception as exc:
+            _raise_if_connection_lost(
+                exc, table=f"{self.schema}.{self.table}", cursor_key=self.cursor_key
+            )
             logger.debug("SQL Server CT unavailable for %s.%s: %s", self.schema, self.table, exc)
             return False
 

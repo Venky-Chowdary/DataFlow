@@ -240,7 +240,22 @@ def test_cdc_transfer_sqlserver_branch_end_to_end() -> None:
             return key
         return key or "generic_sql"
 
+    class NativeCdcOff:
+        """Native CDC is not enabled on this table (the CT branch is under test).
+
+        Without this the real reader dialled SQL Server: unreachable (no server
+        on this runner) is a lost connection and now fails the run (D427),
+        instead of being taken for "native CDC is off".
+        """
+
+        def __init__(self, *a, **k):
+            pass
+
+        def is_available(self):
+            return False
+
     with (
+        patch("src.transfer.cdc_transfer.SqlServerNativeCdc", NativeCdcOff),
         patch("src.transfer.cdc_transfer.SqlServerChangeTrackingCdc", FakeCt),
         patch("connectors.sqlserver_change_stream.SqlServerChangeTrackingCdc", FakeCt),
         patch("src.transfer.cdc_transfer.resolve_driver_type", side_effect=_resolve_driver),

@@ -127,6 +127,20 @@ class SqlServerCdcReadError(RuntimeError):
         )
 
 
+def _raise_if_connection_lost(exc: BaseException, *, table: str, cursor_key: str = "") -> None:
+    """D427: a capture probe that lost its connection has not learned anything.
+
+    Reporting it as "CDC is not enabled" sent a run down the "change log is
+    off" refusal (or a cursor-poll downgrade) during a tunnel outage. Only a
+    driver code that means the connection dropped raises; any other failure
+    keeps the probe's "unavailable" answer.
+    """
+    from services.connection_lost_codes import connection_lost_code
+
+    if connection_lost_code(exc):
+        raise SqlServerCdcReadError(exc, table=table, cursor_key=cursor_key) from exc
+
+
 def _sqlserver_connection_lost(exc: BaseException) -> bool:
     pending = [exc]
     seen: set[int] = set()
@@ -1385,6 +1399,9 @@ class SqlServerNativeCdc:
         except CdcLsnGapError:
             raise
         except Exception as exc:
+            _raise_if_connection_lost(
+                exc, table=f"{self.schema}.{self.table}", cursor_key=self.cursor_key
+            )
             logger.debug("SQL Server native CDC unavailable: %s", exc)
             return False
 

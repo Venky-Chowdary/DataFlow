@@ -3941,8 +3941,11 @@ def _run_cdc_single_stream(
                 ]
         except Exception as exc:
             from services.cdc_lease import CdcLeaseConflict
+            from services.connection_lost_codes import connection_lost_code
 
-            if isinstance(exc, CdcLeaseConflict):
+            # D427: a dropped connection is retried by the next run, never
+            # taken for "CDC is off" (refusal) or a cursor-poll downgrade.
+            if isinstance(exc, CdcLeaseConflict) or connection_lost_code(exc):
                 raise
             cdc = None
         if cdc is None:
@@ -3967,8 +3970,9 @@ def _run_cdc_single_stream(
                 ]
             except Exception as exc:
                 from services.cdc_lease import CdcLeaseConflict
+                from services.connection_lost_codes import connection_lost_code
 
-                if isinstance(exc, CdcLeaseConflict):
+                if isinstance(exc, CdcLeaseConflict) or connection_lost_code(exc):
                     raise
                 capture_downgrade = _query_cdc_downgrade(exc, "sqlserver")
                 cdc = CdcEngine(

@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from services.brand import PRODUCT_NAME
 from services.brand_env import getenv_brand
 from services.cdc_capability import CAUSE_SLOT_QUOTA, SLOT_QUOTA_SIGNALS
 from services.cdc_capability import _remedy as _cdc_remedy
@@ -900,6 +901,9 @@ def humanize_transfer_failure(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     from services.error_taxonomy import classify, driver_code
 
+    lost = _connection_lost_failure(error, raw, side=side, phase=phase, engine=engine, object=object)
+    if lost is not None:
+        return lost
     # ERR-2: a driver's structured code (SQLSTATE, MySQL number, Mongo code)
     # decides before any text rule, so a NOT NULL or type error that names a
     # column is never read as a missing column.
@@ -1051,6 +1055,46 @@ def _is_product_refusal(error: Any) -> bool:
         return False
     module = type(error).__module__ or ""
     return module.startswith(_PRODUCT_MODULES) or _raised_in_product_code(error)
+
+
+def _connection_lost_failure(
+    error: Any, raw: str, *, side: str, phase: str, engine: str, object: Any  # noqa: A002
+) -> dict[str, Any] | None:
+    """D427: a driver code that means the connection dropped decides first.
+
+    The text rules below match words such as "change tracking" or "binlog" and
+    reported a dropped SQL Server session (DB-Library 20047) as a CDC cursor
+    gap. A connection problem is said as one, with its code, and is retriable;
+    a cursor gap is reported only by ``CdcCursorGapError``, raised when the
+    position check proves it.
+    """
+    from services.connection_lost_codes import connection_lost_code
+    from services.error_taxonomy import classify, legacy_code
+
+    code = connection_lost_code(error)
+    if not code:
+        return None
+    classified = classify(error, side=side, phase=phase, engine=engine, object=object, fallback=False)
+    if classified is not None and classified.code.startswith("network."):
+        out = _taxonomy_failure(classified, raw)
+        out["retriable"] = True
+        return out
+    where = f"the {side} " if side in {"source", "destination"} else "the "
+    return {
+        "legacy_code": legacy_code("network.connection_lost"),
+        "code": "network.connection_lost",
+        "category": "network",
+        "title": "Connection lost",
+        "message": (
+            f"Connection lost: {where}database connection dropped while "
+            f"{PRODUCT_NAME} was using it ({code}). Run again once the connection "
+            "is back."
+        ),
+        "fix": "Run again. If it repeats, check the network path and the database server's logs.",
+        "raw": raw,
+        "retriable": True,
+        "confidence": "high",
+    }
 
 
 def _driver_sentence(error: Any) -> str:
