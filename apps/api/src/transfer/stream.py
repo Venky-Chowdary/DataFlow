@@ -56,7 +56,7 @@ from services.source_reread import (
     should_reread_source,
 )
 from services.primary_key import dest_is_key_addressed
-from services.duplicate_policy import merge_skipped_identity_keys, rows_without_kept_keys
+from services.duplicate_policy import copy_cannot_keep_stored_rows, merge_skipped_identity_keys, rows_without_kept_keys
 from services.millisecond_fit import merge_truncations as ms_totals
 from services.row_conservation import (
     CENSUS_KEY,
@@ -811,6 +811,7 @@ def _stream_database_transfer_impl(
                 or run.cfg.fk_orphan_guard is not None
                 or bool(risk_contract_columns)
                 or keyless_merge_target
+                or copy_cannot_keep_stored_rows(run.cfg.destination)
                 or copy_declined_for_replay(run.cfg)
                 or copy_declined_for_borrowed_map(run.cfg, inherited=mappings_inherited)
                 or (per_stream_coverage is not None and not mappings_inherited

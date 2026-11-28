@@ -123,6 +123,18 @@ def route_keyed_duplicate_policy(request: Any) -> bool:
     return policy in {"dedupe_skip", "upsert"}
 
 
+def copy_cannot_keep_stored_rows(destination: Any) -> bool:
+    """``dedupe_skip`` keeps a stored key's row; the engine COPY merge updates it.
+
+    The staged COPY upsert (``services.copy_upsert``) has one merge statement,
+    ``ON CONFLICT … DO UPDATE``: a same-server skip_duplicates run overwrote
+    the very rows it was told to keep, under a green Gate-8. Such a run takes
+    the row path, which skips stored keys and verifies around them.
+    """
+    extra = getattr(destination, "extra", None) or {}
+    return normalize_duplicate_policy(str(extra.get("duplicate_policy") or "")) == "dedupe_skip"
+
+
 def summary_keyed_duplicate_policy(summary: Any) -> bool:
     """The write resolved stored keys by the route's dedupe_skip / upsert choice."""
     raw = (summary or {}).get("duplicate_policy") if isinstance(summary, dict) else ""
