@@ -694,6 +694,30 @@ def _oracle_stamp_bind(stamp: datetime) -> tuple[str, str]:
     )
 
 
+def _mssql_stamp_bind(stamp: datetime) -> tuple[str, str]:
+    """``(param, sql)`` binding ``stamp`` to SQL Server with its microseconds.
+
+    D419: pymssql renders a ``datetime`` parameter as ``'… HH:MM:SS.fff'`` —
+    milliseconds, offset dropped — so a closed version's ``valid_to`` landed
+    678 µs before the ``valid_from`` its successor opened at (a gap, and a
+    recount of "0 versions closed"). ISO text cast server-side keeps all six
+    digits and the offset under either driver.
+    """
+    target = "DATETIMEOFFSET(7)" if stamp.tzinfo is not None else "DATETIME2(7)"
+    return stamp.isoformat(timespec="microseconds"), f"CAST(:ts AS {target})"
+
+
+def _stamp_bind(stamp: Any, dialect_name: str) -> tuple[Any, str]:
+    """A close stamp's ``(param, sql)`` that keeps every fractional digit."""
+    if isinstance(stamp, datetime) and dialect_name == "oracle":
+        # python-oracledb binds a datetime as DATE and drops the microseconds,
+        # so valid_to stops matching the run stamp the new version opened at.
+        return _oracle_stamp_bind(stamp)
+    if isinstance(stamp, datetime) and dialect_name == "mssql":
+        return _mssql_stamp_bind(stamp)
+    return stamp, ":ts"
+
+
 def _expire_rows(
     conn: Any,
     qualified: str,
@@ -733,13 +757,7 @@ def _expire_rows(
                 pk_columns, chunk, prefix="e", dialect=dialect_name,
                 column_types=column_types,
             )
-            params["ts"] = stamp
-            ts_sql = ":ts"
-            if dialect_name == "oracle" and isinstance(stamp, datetime):
-                # python-oracledb binds a datetime as DATE and drops the
-                # microseconds, so valid_to stops matching the run stamp the
-                # new version opened at. Bind the exact text instead.
-                params["ts"], ts_sql = _oracle_stamp_bind(stamp)
+            params["ts"], ts_sql = _stamp_bind(stamp, dialect_name)
             sql = (
                 f"UPDATE {qualified} "  # nosec B608
                 f"SET {valid_to_quoted} = {ts_sql}, {current_quoted} = {false_lit} "
@@ -900,10 +918,7 @@ def close_versions_missing_from_snapshot(
     ).scalar()
     closed_n = int(closed or 0)
     if closed_n:
-        ts_param: Any = stamp
-        ts_sql = ":ts"
-        if dialect == "oracle":
-            ts_param, ts_sql = _oracle_stamp_bind(stamp)
+        ts_param, ts_sql = _stamp_bind(stamp, dialect)
         conn.execute(
             sa.text(
                 f"UPDATE {target_qualified} "  # nosec B608

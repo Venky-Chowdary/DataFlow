@@ -1070,6 +1070,7 @@ jobs:
             tests/test_sqlserver_oracle_cdc.py \
             tests/test_c3_lossy_pairs_sqlserver_live.py \
             tests/test_d335_boundary_sqlserver_live.py \
+            tests/test_d419_scd2_sqlserver_live.py \
             -v --tb=short -rs \
             --junitxml="$RUNNER_TEMP/live-junit/sqlserver-cdc.xml"
 
