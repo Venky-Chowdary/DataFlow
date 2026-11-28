@@ -151,16 +151,20 @@ def _kafka_row(
     it to the rejected-rows channel instead of writing an all-NULL row.
     """
     meta = meta or {}
-    written_image = bool(meta.get(WRITTEN_IMAGE_FLAG))
-    for _k, _col in (
+    envelope = (
         ("topic", "_kafka_topic"),
         ("partition", "_kafka_partition"),
         ("offset", "_kafka_offset"),
         ("key", "_kafka_key"),
-    ):
+    )
+    # A read-back of a body that carries lineage as data takes none of it from
+    # this broker: a lineage field the write dropped must read as missing, not
+    # be filled in with the destination's coordinates and pass by coincidence.
+    body_lineage = bool(meta.get(WRITTEN_IMAGE_FLAG)) and any(col in row for _k, col in envelope)
+    for _k, _col in envelope:
         # A message without a key still has the column (NULL): the row shape
         # must not depend on whether the producer set one.
-        if _k in meta and not (written_image and _col in row):
+        if _k in meta and not body_lineage:
             row[_col] = meta[_k]
     if poison:
         row["_kafka_poison"] = poison

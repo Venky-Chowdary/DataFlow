@@ -172,3 +172,27 @@ def test_a_wrong_data_field_still_fails_and_is_named(fake_broker, jobs, monkeypa
     text = json.dumps(recon, default=str)
     assert "note" in text and "tampered" in text, recon.get("message")
     assert "_kafka_topic" not in str(recon.get("message") or "")
+
+
+def test_a_lineage_field_the_write_dropped_is_not_filled_in_from_the_broker(
+    fake_broker, jobs, monkeypatch
+):
+    """Single partition: source and destination offsets are both 0..29, so a
+    dropped ``_kafka_offset`` filled in from the destination broker would
+    match by coincidence. The read-back takes no envelope from the broker
+    when the body carries lineage, so the missing field is a mismatch."""
+    src, dst = _names()
+    _seed(fake_broker, src)
+    real_produce = fake_broker.produce
+
+    def _dropping(topic, value, key=None, partition=None):
+        if topic == dst and value:
+            body = json.loads(value)
+            body.pop("_kafka_offset", None)
+            value = json.dumps(body).encode("utf-8")
+        return real_produce(topic, value, key=key, partition=partition)
+
+    monkeypatch.setattr(fake_broker, "produce", _dropping)
+    result, recon = _run(jobs, _request(src, dst, "strict"))
+    assert not result.success
+    assert recon.get("passed") is not True, recon.get("message")
