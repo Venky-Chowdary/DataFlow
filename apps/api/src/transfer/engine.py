@@ -1017,6 +1017,9 @@ class UniversalTransferEngine:
     ) -> TransferResult:
         """Core transfer engine body (see :meth:`execute_tracked`)."""
         self._resolve_saved_connectors(request)
+        from services.duplicate_policy import stamp_route_duplicate_options
+
+        stamp_route_duplicate_options(request)  # whether or not Validate runs
         # Programmatic callers (tests/CLI/fleet) may pass a job_id that is not yet
         # in the store. Mint a pending shell so checkpoint persistence cannot
         # fail-closed solely because the document is missing.

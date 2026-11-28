@@ -114,6 +114,28 @@ def request_duplicate_option(request: Any) -> dict[str, str]:
     return {"duplicate_policy": policy} if policy else {}
 
 
+def stamp_route_duplicate_options(request: Any) -> None:
+    """Put the route's one duplicate choice on the destination before any write.
+
+    Validate stamped it there too (``engine_preflight``), but only when it ran:
+    ``skip_preflight=True`` with ``duplicate_policy='skip_duplicates'`` on the
+    request or the source left the writers (COPY and row path) without it, so
+    the stored rows were merged over under a green Gate-8.
+    """
+    dest = getattr(request, "destination", None)
+    if dest is None:
+        return
+    extra = dict(getattr(dest, "extra", None) or {})
+    options = route_duplicate_options(
+        dict(getattr(getattr(request, "source", None), "extra", None) or {}),
+        extra,
+        request_duplicate_option(request),
+    )
+    if options and any(extra.get(k) != v for k, v in options.items()):
+        extra.update(options)
+        dest.extra = extra
+
+
 def route_keyed_duplicate_policy(request: Any) -> bool:
     """The route chose ``dedupe_skip`` / ``upsert``: a stored key resolves on the key."""
     extra = getattr(getattr(request, "destination", None), "extra", None) or {}

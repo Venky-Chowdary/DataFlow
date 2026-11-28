@@ -71,14 +71,35 @@ def _endpoint(table: str, **extra) -> EndpointConfig:
                           password=c["password"], schema="public", extra=extra)
 
 
-def _run(store, table: str):
+_DEFAULT = {"policy_on": "destination", "skip_preflight": True, "route": "copy"}
+
+
+def _run(store, table: str, **how):
+    """``policy_on``: where the route names skip_duplicates (destination extra,
+    source extra, or the request field); ``route``: ``row`` declines the COPY
+    with an operator transform that leaves these values unchanged."""
+    how = {**_DEFAULT, **how}
+    on = how["policy_on"]
+    mappings = None
+    if how["route"] == "row":
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 0.99},
+            {"source": "name", "target": "name", "transform": "lower", "transform_override": True,
+             "confidence": 0.99},
+            {"source": "updated_at", "target": "updated_at", "confidence": 0.99},
+        ]
     request = TransferRequest(
-        source=_endpoint(table),
-        destination=_endpoint(table + "_out", duplicate_policy="skip_duplicates"),
+        source=_endpoint(table, **({"duplicate_policy": "skip_duplicates"} if on == "source" else {})),
+        destination=_endpoint(
+            table + "_out", **({"duplicate_policy": "skip_duplicates"} if on == "destination" else {})
+        ),
+        duplicate_policy="skip_duplicates" if on == "request" else "",
         sync_mode=_MODE,
+        mappings=mappings or [],
         stream_contracts=[{"name": table, "primary_key": ["id"], "cursor_field": "updated_at",
+                           "cursor_semantics": "modification_timestamp",
                            "sync_mode": _MODE, "selected": True}],
-        skip_preflight=True,
+        skip_preflight=how["skip_preflight"],
         validation_mode="strict",
     )
     job_id = "t2a" + uuid.uuid4().hex[:16]
@@ -95,12 +116,18 @@ def _change_source(cur, table: str) -> None:
     cur.execute(f"INSERT INTO {table} VALUES (31, 'n31', timestamp '2026-02-02')")  # nosec B608
 
 
-def test_changed_source_keeps_the_stored_rows_and_verifies_green(store, pg):
+@pytest.mark.parametrize("route", ["copy", "row"])
+@pytest.mark.parametrize("skip_preflight", [True, False])
+@pytest.mark.parametrize("policy_on", ["destination", "source", "request"])
+def test_changed_source_keeps_the_stored_rows_and_verifies_green(store, pg, policy_on, skip_preflight, route):
+    """Review: the policy on the request or the source reached the writer only via
+    Validate, so ``skip_preflight=True`` merged over the stored rows."""
     cur, table = pg
-    first, _job = _run(store, table)
+    how = {"policy_on": policy_on, "skip_preflight": skip_preflight, "route": route}
+    first, _job = _run(store, table, **how)
     assert first.success, first.error
     _change_source(cur, table)
-    second, job = _run(store, table)
+    second, job = _run(store, table, **how)
     assert second.success, second.error
     cur.execute(f"SELECT id, name FROM {table}_out ORDER BY id")  # nosec B608
     stored = dict(cur.fetchall())
