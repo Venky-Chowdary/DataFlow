@@ -53,3 +53,23 @@ def test_a_verifying_run_waits_outside_the_denominator(store, monkeypatch):
     assert [r["verdict"] for r in built["runs"]].count("verifying") == 1
     assert built["kpis"]["fully_proven_pct"] == 100.0, built["kpis"]
     assert built["kpis"]["runs"] == 2
+
+
+def test_a_gate8_failed_run_still_counts_while_verification_runs(store, monkeypatch):
+    """A run Gate-8 failed stays in the denominator even while verification runs:
+    dropping it would raise fully_proven_pct above what the runs proved."""
+    _run(store)
+    failing = _run(store)
+    real = psum._job_summary
+
+    def summary(job, job_id):
+        out = real(job, job_id)
+        if job_id == failing:
+            out = {**out, "verdict": "verifying",
+                   "tables": [{**t, "status": "verifying", "check": "verifying", "failed_verification": True}
+                              for t in out.get("tables") or []]}
+        return out
+
+    monkeypatch.setattr(psum, "_job_summary", summary)
+    built = psum.build_summary(None, limit=30)
+    assert built["kpis"]["fully_proven_pct"] == 50.0, built["kpis"]
