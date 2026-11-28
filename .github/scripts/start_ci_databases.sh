@@ -98,9 +98,13 @@ start_mysql() {
   # grants below then need the real server.
   wait_for "MySQL" 60 2 mysql_serving \
     || { docker logs dataflow-ci-mysql || true; exit 1; }
+  # performance_schema read: Parity at Scale pins a MySQL snapshot only when its
+  # login can see other sessions' metadata-lock waits (parity_scale
+  # dialects/mysql.py watch_refusal; test_parity_scale_lock_yield_live).
   docker exec dataflow-ci-mysql mysql -h 127.0.0.1 -u root -pdataflow -e "
     GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%';
     GRANT ALL PRIVILEGES ON dataflow.* TO 'dataflow'@'%';
+    GRANT SELECT ON performance_schema.* TO 'dataflow'@'%';
     FLUSH PRIVILEGES;"
   docker exec dataflow-ci-mysql mysql -h 127.0.0.1 -u root -pdataflow -Ne \
     "SHOW VARIABLES WHERE Variable_name IN ('local_infile','log_bin','binlog_format')"

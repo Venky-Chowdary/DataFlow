@@ -109,6 +109,18 @@ def test_all_source_to_postgresql(source: EndpointConfig):
         sync_mode="full_refresh_overwrite",
         skip_preflight=True,
     )
+    if source.format == "pgvector":
+        # The pgvector seed table also carries a RAG chunk shape this route does
+        # not move. A run without Validate refuses a source column that is
+        # neither mapped nor declared omitted (G13 at Execute), so the route
+        # maps what it moves and declares the rest omitted.
+        request.mappings = [
+            *mappings,
+            *(
+                {"source": c, "target": "", "intentional_omit": True}
+                for c in ("content", "metadata", "source_id", "chunk_index", "created_at")
+            ),
+        ]
 
     engine = UniversalTransferEngine()
     # snowflake_conn auto-patches local accounts — do not nest fakesnow.patch().

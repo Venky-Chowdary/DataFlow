@@ -255,7 +255,7 @@ def _landed(run, headers, rows, *, cursor_dest_col, watermark, keyed, record):
     if summary is not None and record:
         tie = summary.setdefault(BOUNDARY_TIE_KEY, {})
         tie.update(cursor_column=cursor_dest_col, watermark=str(watermark), types=types,
-                   mode="keyed" if keyed else "keyless")
+                   mode="keyed" if keyed else "keyless", table=str(cfg.dest_table or ""))
     if keyed:
         return _keyed_landed(run, headers, rows, mapped, tie, dialect=dialect, types=types,
                              cursor_dest_col=cursor_dest_col, watermark=watermark)
@@ -367,7 +367,13 @@ def boundary_duplicates(*, dest_summary: Any, endpoint: Any, mappings: list[dict
         return []
     dialect = resolve_driver_type(getattr(endpoint, "format", "") or "")
     dest_cfg = resolve_connector_config(endpoint)
-    table = str(getattr(endpoint, "table", "") or dest_summary.get("table") or "")
+    # A document store's endpoint names its target as ``collection`` (a Mongo
+    # schedule leaves ``table`` empty): reading collection "" failed every
+    # post-write count (InvalidName -> TargetSampleUnavailable).
+    table = str(
+        tie.get("table") or getattr(endpoint, "table", "") or getattr(endpoint, "collection", "")
+        or dest_summary.get("table") or ""
+    )
     types = dict(tie.get("types") or {})
     cursor_col = str(tie.get("cursor_column") or "")
     watermark = str(tie.get("watermark"))

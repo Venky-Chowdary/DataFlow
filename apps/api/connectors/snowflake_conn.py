@@ -1189,12 +1189,14 @@ def _login(
             product_managed = False
             with _fakesnow_lock:
                 if (
-                    _fakesnow_refcount > 0
-                    and _fakesnow_patch_cm is not None
+                    _fakesnow_patch_cm is not None
                     and _fakesnow_installed_db_path != db_path
                 ):
                     # The active patch is pinned to a different catalog —
-                    # drop it so this connect binds the right db_path.
+                    # drop it so this connect binds the right db_path. Also
+                    # at refcount 0: FAKESNOW_KEEP_PATCH (CI) leaves the patch
+                    # active after the last close, and sharing it wrote every
+                    # later test into the first test's catalog.
                     try:
                         _fakesnow_patch_cm.__exit__(None, None, None)
                     except Exception:

@@ -1832,7 +1832,7 @@ def _timestamp_range_section() -> GeneratedSection | None:
             "so a value before 1970 or after 2038 is out of range for that carrier "
             "and is reported before the write rather than capped.",
             "MySQL DATETIME covers the years 1000 to 9999 but is a wall clock with "
-            "no polarity marker: an instant is stored there as UTC digits in a "
+            "no polarity marker: an instant is written there as UTC digits in a "
             "zone-less column, which Validate discloses and a downstream reader "
             "has to know about.",
         ]

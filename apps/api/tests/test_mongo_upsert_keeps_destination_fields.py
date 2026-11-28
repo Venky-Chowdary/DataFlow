@@ -101,12 +101,14 @@ def _source(path: Path) -> None:
     conn.close()
 
 
-#: Writes id/name/email/score; ``internal_note`` is deliberately unmapped.
+#: Writes id/name/email/score; ``internal_note`` is deliberately left out, which a
+#: run without Validate must say (G13 at Execute): it is declared omitted.
 MAPPINGS = [
     {"source": "id", "target": "id", "confidence": 1.0},
     {"source": "name", "target": "name", "confidence": 1.0},
     {"source": "email", "target": "email", "confidence": 1.0},
     {"source": "score", "target": "score", "confidence": 1.0},
+    {"source": "internal_note", "target": "", "intentional_omit": True},
 ]
 
 

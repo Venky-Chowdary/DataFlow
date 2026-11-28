@@ -19,6 +19,8 @@ data:
     server {
         listen {{ .Values.web.containerPort }};
         server_name _;
+        # No nginx version in the Server header or on nginx's own error pages (ZAP 10036).
+        server_tokens off;
         root /usr/share/nginx/html;
         index index.html;
 
@@ -40,6 +42,8 @@ data:
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
 
         gzip on;
         gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
@@ -136,6 +140,8 @@ data:
             add_header X-Content-Type-Options "nosniff" always;
             add_header Referrer-Policy "strict-origin-when-cross-origin" always;
             add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+            add_header Cross-Origin-Opener-Policy "same-origin" always;
+            add_header Cross-Origin-Resource-Policy "same-origin" always;
             add_header Cache-Control "public, max-age=31536000, immutable" always;
             try_files $uri =404;
         }
@@ -150,6 +156,8 @@ data:
             add_header X-Content-Type-Options "nosniff" always;
             add_header Referrer-Policy "strict-origin-when-cross-origin" always;
             add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+            add_header Cross-Origin-Opener-Policy "same-origin" always;
+            add_header Cross-Origin-Resource-Policy "same-origin" always;
             add_header Cache-Control "no-cache" always;
             try_files $uri $uri/ /index.html;
         }

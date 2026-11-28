@@ -125,11 +125,13 @@ def test_live_pg_to_sqlserver_incremental_append_never_reappends_the_watermark_r
 
 
 def test_live_pg_to_sqlserver_datetime_destination_compares_at_1_300_s(store):
-    """A pre-existing DATETIME cursor column stores 1/300 s ticks: .005 reads
-    back as .007, .827 as .827 (0.82666...). The boundary row is found at the
-    carrier's precision, never appended again. TIMESTAMP(3) -> DATETIME is not
-    a narrowing at plan (DATETIME keeps three digits), so the run is not
-    refused before it reaches the boundary."""
+    """A pre-existing DATETIME cursor column stores 1/300 s ticks: .003 is held
+    as 0.00333..., .017 as 0.01666... The boundary row is found at the carrier's
+    precision, never appended again. The source values are ones DATETIME can
+    store (last millisecond digit 0, 3 or 7): the writer quarantines any other
+    value rather than rounding it after commit. TIMESTAMP(3) -> DATETIME is not
+    a narrowing at plan, so the run is not refused before it reaches the
+    boundary."""
     from tests.c3_live_helpers import pg_endpoint, pg_sql, sqlalchemy_sql
     from tests.helpers.d335_boundary_scenario import run_boundary_scenario
 
@@ -147,6 +149,6 @@ def test_live_pg_to_sqlserver_datetime_destination_compares_at_1_300_s(store):
         dest_ids=_ids,
         drop_dest=_drop,
         source_cursor_type="TIMESTAMP(3)",
-        ts=lambda i: f"2026-11-24 10:{i:02d}:00.{(5 + i * 211) % 1000:03d}",
+        ts=lambda i: f"2026-11-24 10:{i:02d}:00.{(i * 10 + (3, 7, 0)[i % 3]) % 1000:03d}",
         pre_create=_pre_create,
     )

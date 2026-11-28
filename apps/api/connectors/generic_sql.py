@@ -1855,12 +1855,13 @@ def _refuse_sqlserver_datetime_rounding(
         )
     if physical != "DATETIME" and logical_u != "DATETIME":
         return
-    if us in {0, 3000, 7000}:
+    # 1/300 s ticks: every millisecond whose last digit is 0, 3 or 7 (.120, .217).
+    if us % 10000 in {0, 3000, 7000}:
         return
     raise ValueError(
         f"SQL Server DATETIME cannot store microsecond {us:06d} "
         f"({value.isoformat(sep='T')}) — column keeps 1/300 s "
-        "(.000/.003/.007). Quarantine; refuse round-after-commit."
+        "(last millisecond digit 0, 3 or 7). Quarantine; refuse round-after-commit."
     )
 
 

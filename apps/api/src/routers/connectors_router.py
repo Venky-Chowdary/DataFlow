@@ -2876,13 +2876,15 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         _stream_live_types,
         refuse_unaccounted_without_validate,
         refuse_unapproved_add_without_validate,
+        replay_source_columns,
     )
 
+    source_columns = replay_source_columns(columns)
     try:
-        refuse_unaccounted_without_validate(child_req, columns, mappings)
+        refuse_unaccounted_without_validate(child_req, source_columns, mappings)
         if dest.kind == "database" and dest.table:
             refuse_unapproved_add_without_validate(
-                child_req, columns, mappings,
+                child_req, source_columns, mappings,
                 _stream_live_types(
                     resolve_driver_type(str(dest_cfg.get("type") or dest.format or "")).lower(),
                     dest_cfg, str(dest.table),

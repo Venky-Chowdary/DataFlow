@@ -572,14 +572,20 @@ def test_postgresql_to_oracle_typed_preflight_on():
         (gate,) = [b for b in plan.get("blockers") or [] if oe.GATE_ID in (b.get("id"), b.get("gate"))]
         assert "note_empty" in gate["message"] and "2 empty string(s)" in gate["message"], gate
 
+        # The approval is bound to this destination (connector, schema, table), as
+        # the product's risk_acceptance signs it; operator-approved mappings sit above
+        # the Map confidence floor.
+        ora = oracle_endpoint(dst)
         signed = oe.sign_empty_as_null(
-            [{"source": c, "target": c} for c in
+            [{"source": c, "target": c, "confidence": 1.0, "approved": True} for c in
              ("id", "amt_dec", "amt_float", "note_null", "note_empty", "ts_utc", "flag")],
             {"option": oe.OPTION, "columns": ["note_empty"], "approved_by": "qa@example.com",
              "reason": "an empty note is an absent note"},
             table=dst,
+            destination=oe.destination_binding(
+                config={k: getattr(ora, k) for k in ("host", "port", "database", "schema")}, table=dst),
         )
-        result = run_typed_transfer(pg_endpoint(src), oracle_endpoint(dst), mappings=signed)
+        result = run_typed_transfer(pg_endpoint(src), ora, mappings=signed)
         assert result.success is True, result.error
         assert result.records_transferred == 2
         assert_preflight_ran(result)

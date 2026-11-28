@@ -253,6 +253,10 @@ jobs:
           done
           docker exec "$cid" mysql -uroot -proot_ci -e \
             "GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'; FLUSH PRIVILEGES;"
+          # Parity at Scale reads performance_schema lock tables to yield to writers
+          # (same grant as .github/scripts/start_ci_databases.sh for the PR jobs).
+          docker exec "$cid" mysql -uroot -proot_ci -e \
+            "GRANT SELECT ON performance_schema.* TO 'dataflow'@'%'; FLUSH PRIVILEGES;"
           # MySQL 8's auto-generated CA, for the TLS tests (same as the PR jobs).
           docker cp "$cid":/var/lib/mysql/ca.pem "$RUNNER_TEMP/mysql-ca.pem"
           echo "DATAFLOW_TEST_MYSQL_CA=$RUNNER_TEMP/mysql-ca.pem" >> "$GITHUB_ENV"

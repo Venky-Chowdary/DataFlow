@@ -1527,6 +1527,43 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   box-sizing: border-box;
 }
 
+/* The canvas action bar behaves like the shared step footer: Back and the
+   primary keep their size and whole label; the row between them gives way
+   (a disabled reason ellipsizes), so the primary is never pushed off a phone. */
+.df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions > .df2-step-back,
+.df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions > .df2-btn-row > .df2-step-primary {
+  flex: 0 0 auto;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions > .df2-btn-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions .df2-step-footer-reason {
+  flex: 0 1 auto;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.df2-step-back-label-narrow {
+  display: none;
+}
+
+/* Phone: "Back to Destination" and "Continue with this transform" do not fit one row. */
+@media (max-width: 480px) {
+  .df2-step-back-label {
+    display: none;
+  }
+
+  .df2-step-back-label-narrow {
+    display: inline;
+  }
+}
+
 .df2-page-transfer-studio.is-studio-next .df2-map-footer-status,
 .df2-page-transfer-studio.is-studio-next .df2-wizard-footer .df2-label-hint {
   flex: 1 1 auto;
