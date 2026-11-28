@@ -140,8 +140,6 @@ class SourceDuplicateProbeResult:
     #: (``None`` when this source kind was not counted). GROUP BY folds NULL
     #: keys into one group, so a single NULL never shows up as a duplicate.
     null_key_rows: int | None = None
-    #: NULL-key rows the run's source filter removed (D420); None without a filter.
-    null_key_rows_filtered_out: int | None = None
 
     @property
     def ran(self) -> bool:
@@ -270,7 +268,6 @@ def _sql_duplicates(
             )
             null_counts["rows"] = int(conn.execute(null_stmt).scalar() or 0)
             if source_filter and null_counts["rows"]:
-                null_counts["rows_before_filter"] = null_counts["rows"]
                 null_counts["rows"] = _filtered_null_key_rows(
                     conn, tbl, pk_cols, filter_cols, filter_stored, source_filter,
                     engine=str(cfg.get("type") or ""),
@@ -1214,11 +1211,6 @@ def probe_source_duplicate_keys_result(
             db_type=db_type,
             primary_key_columns=pk_columns,
             null_key_rows=null_counts.get("rows"),
-            null_key_rows_filtered_out=(
-                int(null_counts["rows_before_filter"]) - int(null_counts.get("rows") or 0)
-                if "rows_before_filter" in null_counts
-                else None
-            ),
         )
     except Exception as exc:
         logger.warning("Source duplicate-key probe failed: %s", exc, exc_info=exc)
