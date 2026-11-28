@@ -35,11 +35,18 @@ def _signed_cast_and_continue() -> dict:
     return body
 
 
-_MAPPINGS = [
-    {"source": "id", "target": "id", "confidence": 0.99, "target_type": "INTEGER"},
-    {"source": "qty", "target": "qty", "confidence": 0.99, "target_type": "INTEGER",
-     "transform": "integer", "risk_contract": _signed_cast_and_continue()},
-]
+def _mappings() -> list[dict]:
+    """Signed when the test runs, by the key the server verifies with then.
+
+    Risk Contracts are HMAC-signed by the deployment's audit key; a contract
+    signed at import (collection) time no longer verifies once an earlier test
+    in the session rotates or replaces that key.
+    """
+    return [
+        {"source": "id", "target": "id", "confidence": 0.99, "target_type": "INTEGER"},
+        {"source": "qty", "target": "qty", "confidence": 0.99, "target_type": "INTEGER",
+         "transform": "integer", "risk_contract": _signed_cast_and_continue()},
+    ]
 
 
 def _fit_gate(rows: list[dict[str, str]], sample: int = 0, **kw) -> dict:
@@ -47,7 +54,7 @@ def _fit_gate(rows: list[dict[str, str]], sample: int = 0, **kw) -> dict:
         columns=["id", "qty"],
         column_types={"id": "INTEGER", "qty": "TEXT"},
         row_count=len(rows),
-        mappings=_MAPPINGS,
+        mappings=_mappings(),
         destination_connected=True,
         destination_column_types={"id": "INTEGER", "qty": "INTEGER"},
         destination_db_type="postgresql",
@@ -87,7 +94,7 @@ def test_a_truly_partial_scan_never_states_its_holdouts_as_the_total(monkeypatch
         columns=["id", "qty"],
         column_types={"id": "INTEGER", "qty": "TEXT"},
         row_count=3,
-        mappings=_MAPPINGS,
+        mappings=_mappings(),
         destination_connected=True,
         destination_column_types={"id": "INTEGER", "qty": "INTEGER"},
         destination_db_type="postgresql",
