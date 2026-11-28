@@ -584,6 +584,9 @@ def test_a_column_the_table_already_had_but_the_map_leaves_out_does_not_stop(
         mapped = [
             {"source": "id", "target": "id", "confidence": 0.99, "approved": True},
             {"source": "name", "target": "name", "confidence": 0.99, "approved": True},
+            # Deliberately left out: under G13 at Execute that is a declared omission
+            # (an unmentioned column stops a run without Validate before any write).
+            {"source": "status", "target": "", "intentional_omit": True},
         ]
 
         def run(sync: str):

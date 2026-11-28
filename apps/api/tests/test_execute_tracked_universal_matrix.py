@@ -813,6 +813,12 @@ _UNMOVED_SOURCE_FIELDS = {
     "stripe": ("object", "email"),
     # The pgvector seed table carries a RAG chunk shape next to id/amount.
     "pgvector": ("content", "embedding", "metadata", "source_id", "chunk_index", "created_at"),
+    # Reader envelopes the matrix does not move (services/desktop_lab_cross.py
+    # declares the same omissions): Mongo's ObjectId, the Redis key/type, and
+    # the Kafka message provenance.
+    "mongodb": ("_id",),
+    "redis": ("redis_key", "redis_type"),
+    "kafka": ("_kafka_topic", "_kafka_partition", "_kafka_offset", "_kafka_key"),
 }
 
 
