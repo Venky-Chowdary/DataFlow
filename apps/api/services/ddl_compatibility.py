@@ -324,7 +324,9 @@ def evaluate_ddl_compatibility(
 
     from services.target_name_collision import target_collision_message, target_name_collisions
 
-    collision = target_collision_message(target_name_collisions(mappings, dest_type=dest_db_type))
+    collision = target_collision_message(
+        target_name_collisions(mappings, dest_type=dest_db_type, table_exists=table_exists)
+    )
     if collision:
         issues.append(collision)
     seen_targets: set[str] = set()

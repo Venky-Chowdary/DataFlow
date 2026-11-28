@@ -14,32 +14,73 @@ from collections.abc import Callable
 from typing import Any
 
 
+def _skipped_by_writer(mapping: dict[str, Any], table_exists: bool | None) -> bool:
+    """The writer's own skips (``writer_common.resolve_target_columns``)."""
+    from services.mapping_constraints import is_intentional_omit
+
+    if not mapping.get("target") or is_intentional_omit(mapping):
+        return True
+    # Destination existence unknown at Map: the writer invents no column for it.
+    return (
+        str(mapping.get("assignment_strategy") or "") == "pending_dest_schema"
+        and table_exists is not False
+    )
+
+
+def _case_exact(dest_type: str, identifier: Callable[[Any], str] | None) -> bool:
+    """Whether two names differing only in case are two columns on this destination.
+
+    Document, search, key-value, stream and SaaS stores keep a field name exactly
+    (``destination_naming.EXACT_NAME_STORES``), and so do file exports (a header
+    is text). Every SQL engine treats ``Name`` and ``name`` as one column on the
+    writer's path: SQLite, MySQL and SQL Server compare names case-insensitively,
+    and a writer folding case (``preserve_case=False``) lands both as ``name``.
+    """
+    from connectors import destination_naming as naming
+
+    kind = naming.dest_kind(dest_type)
+    return (
+        naming.keeps_exact_names(dest_type)
+        or kind in naming.FILE_EXPORTS
+        or identifier is naming._exact  # noqa: SLF001 - the exact-name writer rule itself
+    )
+
+
 def target_name_collisions(
     mappings: list[dict[str, Any]] | None,
     *,
     dest_type: str = "",
     identifier: Callable[[Any], str] | None = None,
+    table_exists: bool | None = None,
 ) -> list[tuple[str, list[str]]]:
     """``(landed name, [source columns])`` for each column several sources land in.
 
     The planner may already have sanitised both targets to ``a_b``; the
-    operator may have typed ``a b`` and ``a_b``. Either way two source columns
-    share one destination column. One source mapped twice is not a collision.
+    operator may have typed ``a b`` and ``a_b``, or ``Name`` and ``name``.
+    Either way two source columns share one destination column. One source
+    mapped twice is not a collision, and a mapping the writer skips is not
+    written. Validate and the writer call this with the same inputs, so they
+    decide alike whichever case rule the writer names with.
     """
     from connectors.destination_naming import target_identifier
-    from services.mapping_constraints import is_intentional_omit
 
     name_of = identifier or target_identifier(dest_type) or (lambda name: str(name))
-    sources_by_landed: dict[str, list[str]] = {}
+    exact = _case_exact(dest_type, identifier)
+    landed_by_key: dict[str, str] = {}
+    sources_by_key: dict[str, list[str]] = {}
     for mapping in mappings or []:
-        if not isinstance(mapping, dict) or not mapping.get("target") or is_intentional_omit(mapping):
+        if not isinstance(mapping, dict) or _skipped_by_writer(mapping, table_exists):
             continue
         landed = str(name_of(str(mapping["target"])))
+        key = landed if exact else landed.casefold()
+        landed_by_key.setdefault(key, landed)
         source = str(mapping.get("source") or mapping["target"])
-        sources = sources_by_landed.setdefault(landed, [])
+        sources = sources_by_key.setdefault(key, [])
         if source not in sources:
             sources.append(source)
-    return [(landed, sources) for landed, sources in sources_by_landed.items() if len(sources) > 1]
+    return [
+        (landed_by_key[key], sources) for key, sources in sources_by_key.items() if len(sources) > 1
+    ]
 
 
 def target_collision_message(collisions: list[tuple[str, list[str]]]) -> str:
@@ -59,11 +100,13 @@ def target_collision_message(collisions: list[tuple[str, list[str]]]) -> str:
 
 def refuse_target_collisions(
     mappings: list[dict[str, Any]] | None, *, identifier: Callable[[Any], str] | None = None,
-    dest_type: str = "",
+    dest_type: str = "", table_exists: bool | None = None,
 ) -> None:
     """Raise ``ValueError`` (the writer's refusal) when two targets collide."""
     message = target_collision_message(
-        target_name_collisions(mappings, dest_type=dest_type, identifier=identifier)
+        target_name_collisions(
+            mappings, dest_type=dest_type, identifier=identifier, table_exists=table_exists
+        )
     )
     if message:
         raise ValueError(message)
