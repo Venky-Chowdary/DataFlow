@@ -235,16 +235,68 @@ def test_a_mixed_case_owner_that_exists_passes_validate(catalog):
     assert _gate(_validate({**_ORACLE, "schema": "NoSuchOwner"})) is not None
 
 
-@pytest.mark.parametrize("text,schema", [
-    ("ORA-01918: user 'NOSUCHSCHEMA69' does not exist", "NOSUCHSCHEMA69"),
-    ('(2760, b\'The specified schema name "etl" either does not exist or you do not have '
-     'permission to use it.DB-Lib error message 20018\')', "etl"),
-])
-def test_a_create_that_hits_a_missing_schema_gets_a_named_message(text, schema):
-    """When the probe stayed unconfirmed, CREATE's own error is translated, not raw."""
+def test_oracle_missing_owner_at_create_gets_a_named_message():
+    """When the probe stayed unconfirmed, CREATE's ORA-01918 is translated, not raw."""
     from services.error_taxonomy import classify
 
+    text = ("(oracledb.exceptions.DatabaseError) ORA-01918: user 'NOSUCHSCHEMA69' does not exist "
+            '[SQL: CREATE TABLE "NOSUCHSCHEMA69"."ORDERS_OUT" ("ID" NUMBER(10))]')
     out = classify(text, side="destination", phase="ddl")
     assert out.code == "object.schema_not_found", out
-    assert out.object.get("schema") == schema
-    assert schema in out.message and "ORA-" not in out.message
+    assert out.object.get("schema") == "NOSUCHSCHEMA69"
+    assert "NOSUCHSCHEMA69" in out.message and "ORA-" not in out.message
+    # The phase alone (a write with no statement text) is the same owner context.
+    assert classify("ORA-01918: user 'X1' does not exist", phase="write").code == "object.schema_not_found"
+
+
+@pytest.mark.parametrize("text,phase", [
+    ("ORA-01918: user 'BOB' does not exist [SQL: GRANT SELECT ON ORDERS TO BOB]", "ddl"),
+    ("ORA-01918: user 'BOB' does not exist [SQL: ALTER USER BOB QUOTA 10M ON USERS]", "ddl"),
+    ("ORA-01918: user 'BOB' does not exist", ""),
+])
+def test_ora_01918_about_a_grantee_is_not_relabelled_a_missing_schema(text, phase):
+    from services.error_taxonomy import classify
+
+    assert classify(text, side="destination", phase=phase).code != "object.schema_not_found"
+
+
+def test_sql_server_2760_says_missing_or_not_permitted():
+    """Msg 2760 cannot tell a missing schema from one the login may not use."""
+    from services.error_taxonomy import classify
+
+    text = ('(2760, b\'The specified schema name "etl" either does not exist or you do not have '
+            "permission to use it.DB-Lib error message 20018')")
+    out = classify(text, side="destination", phase="ddl")
+    assert out.code == "object.schema_not_visible", out
+    assert out.object.get("schema") == "etl"
+    assert "does not exist" in out.message and "lacks permission" in out.message
+    action = str(out.action)
+    assert "create the schema" in action and "grant this login" in action
+
+
+def test_a_qualified_table_probes_the_schema_it_is_written_to(catalog, monkeypatch):
+    """OTHER.T is written to OTHER: the lookup and the probe both ask about OTHER."""
+    from services.plan_execute_blockers import execute_plan_refusal
+    from services.sql_object_identity import ObjectIdentity
+
+    looked: list[tuple] = []
+
+    def identity(engine, table, schema=None, *, columns=None, dialect=""):
+        looked.append((schema, table))
+        return ObjectIdentity(schema, table, False)
+
+    monkeypatch.setattr("services.sql_object_identity.resolve_object_identity", identity)
+    catalog["engine"] = _Catalog(None, names={"APP_SCHEMA"})  # the connector's schema exists
+    request = _oracle_request()
+    request.destination.schema = "APP_SCHEMA"
+    request.destination.table = "OTHER.ORDERS_OUT"
+    refusal = execute_plan_refusal(request)
+    assert looked == [("OTHER", "ORDERS_OUT")]
+    assert catalog["engine"].params[-1]["name"] == "OTHER"
+    assert refusal and "Destination schema OTHER does not exist" in refusal
+    # Validate asks the same question of the same schema.
+    from services.dest_namespace import dest_namespace_gate
+
+    gate = dest_namespace_gate({**_ORACLE, "schema": "APP_SCHEMA"}, False, "OTHER.ORDERS_OUT")
+    assert gate and gate["details"]["schema"] == "OTHER"
+    assert dest_namespace_gate({**_ORACLE, "schema": "APP_SCHEMA"}, False, "ORDERS_OUT") is None

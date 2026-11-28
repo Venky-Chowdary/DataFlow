@@ -58,6 +58,24 @@ def _configured_namespace(db_type: str, cfg: Mapping[str, Any]) -> str:
     return name
 
 
+def _probe_cfg_for_table(cfg: Mapping[str, Any], table: str) -> Mapping[str, Any]:
+    """The config whose schema the writer uses for ``table``: its own qualifier wins.
+
+    ``OTHER.T`` is written to OTHER, not the connector's schema, so both the
+    table lookup and the namespace probe ask about OTHER. A quoted or bracketed
+    qualifier keeps its exact spelling.
+    """
+    from connectors.sql_identifiers import split_qualified_table
+
+    text = str(table or "").strip()
+    qualifier, _bare = split_qualified_table(text, None)
+    if not qualifier:
+        return cfg
+    head = text.split(".", 1)[0].strip()
+    exact = head[:1] in {'"', "["}
+    return {**cfg, "schema": f'"{qualifier}"' if exact else qualifier}
+
+
 #: The namespace probe's own budget: one catalog row, never the run's deadline.
 NAMESPACE_PROBE_SECONDS = 10.0
 MISSING_NAMESPACE_GATE_ID = "g_dest_schema_missing"
@@ -140,7 +158,7 @@ def _label(cfg: Mapping[str, Any] | None, label: str = "") -> str:
 
 
 def dest_namespace_gate(
-    cfg: Mapping[str, Any] | None, table_exists: bool | None = None
+    cfg: Mapping[str, Any] | None, table_exists: bool | None = None, table: str = ""
 ) -> dict[str, Any] | None:
     """Preflight gate (Studio Validate, plan, Execute's preflight) for a missing schema.
 
@@ -151,6 +169,8 @@ def dest_namespace_gate(
     """
     if table_exists is not False:
         return None
+    if isinstance(cfg, Mapping) and table:
+        cfg = _probe_cfg_for_table(cfg, table)
     missing = missing_destination_namespace(cfg)
     if not missing:
         return None
@@ -178,16 +198,21 @@ def create_path_namespace_refusal(cfg: Mapping[str, Any] | None, table: str, lab
     db_type = resolve_driver_type(str(cfg.get("type") or cfg.get("format") or ""))
     if db_type not in _NAMESPACE_SQL:
         return ""
-    name = _configured_namespace(db_type, cfg)
+    from connectors.sql_identifiers import split_qualified_table
+
+    probe_cfg = _probe_cfg_for_table(cfg, str(table))
+    name = _configured_namespace(db_type, probe_cfg)
     if not name:
         return ""
+    _qualifier, bare = split_qualified_table(str(table), None)
     from src.ai.copilot.tool_deadline import bounded_step, deadline_scope
 
     def table_absent() -> bool:
         from connectors.generic_sql import _engine
         from services.sql_object_identity import resolve_object_identity
 
-        ident = resolve_object_identity(_engine(dict(cfg)), str(table), name, dialect=db_type)
+        # The lookup and the probe ask about the same schema (the writer's).
+        ident = resolve_object_identity(_engine(dict(cfg)), bare, name, dialect=db_type)
         return bool(ident.known_missing)
 
     with deadline_scope(NAMESPACE_PROBE_SECONDS):
@@ -195,4 +220,4 @@ def create_path_namespace_refusal(cfg: Mapping[str, Any] | None, table: str, lab
                             seconds=NAMESPACE_PROBE_SECONDS)
     if step.timed_out or step.error is not None or not step.value:
         return ""  # present, or unconfirmed: never refused on the schema's account
-    return namespace_refusal(cfg, label)
+    return namespace_refusal(probe_cfg, label)

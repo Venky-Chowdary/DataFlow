@@ -301,7 +301,8 @@ _TRANSIENT_CODES = frozenset({
 #: Families a later attempt cannot repair: the configuration or the data must change.
 _DETERMINISTIC_FAMILIES = ("auth.", "access.", "config.", "query.", "value.")
 _DETERMINISTIC_CODES = frozenset({
-    "object.database_not_found", "object.schema_not_found", "object.column_not_found",
+    "object.database_not_found", "object.schema_not_found", "object.schema_not_visible",
+    "object.column_not_found",
     "object.file_not_found", "network.dns_not_found", "network.tls_required",
     "network.tls_untrusted", "network.egress_blocked", "capacity.disk_full", "capacity.table_full",
 })

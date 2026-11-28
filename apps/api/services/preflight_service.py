@@ -1983,7 +1983,7 @@ def run_file_preflight(
     from services.source_filter_gate import route_request_gates  # + filter (H2), unread dest (D431)
 
     route_gates = route_request_gates(shape_recipe, sync_mode, source_filter, stream_contracts, mappings,
-                                      destination_config, destination_table_exists)
+                                      destination_config, destination_table_exists, destination_table)
     blockers.extend({k: g[k] for k in ("id", "message")} | {"details": dict(g["details"])}
                     for g in route_gates)
     shape_route_blocked = bool(route_gates)

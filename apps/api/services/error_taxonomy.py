@@ -224,6 +224,15 @@ TEMPLATES: dict[str, Template] = {
             "query": ("Check the table name in the query.", "edit_query"),
         },
     ),
+    # SQL Server msg 2760 cannot tell a missing schema from one this login may
+    # not use; say both and offer both remedies (D431).
+    "object.schema_not_visible": Template(
+        "Schema not usable",
+        "Schema{s} does not exist{side_on}, or this login lacks permission on it.",
+        "Check the schema name on the connection and create the schema if it is missing, "
+        "or grant this login permission on it (for example CREATE TABLE and ALTER on the schema).",
+        "open_connection", _EDIT_API,
+    ),
     "object.table_not_visible": Template(
         "Table not visible",
         "Table{t} isn't visible to this connection: it does not exist, or the connection's role has no privilege on it.",
@@ -991,10 +1000,11 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("object.column_not_found", re.compile(
         r"^no such column: |column \"[^\"]+\" (?:of relation \"[^\"]+\" )?does not exist|unknown column '|"
         r"invalid column name '|has no column named ", re.I)),
-    # D431: Oracle's missing owner and SQL Server's missing schema (msg 2760) at CREATE.
-    ("object.schema_not_found", re.compile(
-        r'schema "[^"]+" does not exist|unknown schema |ora-01918|'
-        r'specified schema name "[^"]+" either does not exist', re.I)),
+    # D431: SQL Server msg 2760 (missing schema OR no permission on it). Oracle's
+    # ORA-01918 is judged in classify(), only where it names a schema owner.
+    ("object.schema_not_visible", re.compile(
+        r'specified schema name "[^"]+" either does not exist or you do not have permission', re.I)),
+    ("object.schema_not_found", re.compile(r'schema "[^"]+" does not exist|unknown schema ', re.I)),
     ("value.duplicate_key", re.compile(
         r"duplicate key value violates unique constraint|^duplicate entry |unique constraint failed: |"
         r"e11000 duplicate key|violation of primary key constraint|ora-00001", re.I)),
@@ -1159,6 +1169,26 @@ def _anchored(raw: str) -> str:
     return ""
 
 
+_ORA_MISSING_USER = re.compile(r"\bora-01918\b", re.I)
+_ORA_USER_AS_GRANTEE = re.compile(r"\b(?:grant|revoke|alter\s+user|drop\s+user|connect\s+through)\b", re.I)
+_ORA_OWNER_STATEMENT = re.compile(
+    r"\bcreate\s+(?:global\s+temporary\s+)?(?:table|view|index|sequence)\b|\binsert\s+into\b|"
+    r"\bmerge\s+into\b", re.I)
+
+
+def _ora_missing_owner(text: str, phase: str) -> bool:
+    """ORA-01918 ("user does not exist") read as a missing schema owner (D431).
+
+    Only where the user is the owner of the object being written: a CREATE /
+    INSERT / MERGE statement, or a DDL / write phase. A GRANT, REVOKE or ALTER
+    USER naming a missing user is about that user, not a schema, and keeps its
+    own classification.
+    """
+    if not _ORA_MISSING_USER.search(text or "") or _ORA_USER_AS_GRANTEE.search(text or ""):
+        return False
+    return bool(_ORA_OWNER_STATEMENT.search(text or "")) or phase in {"ddl", "write"}
+
+
 def classify(
     exc: Any,
     *,
@@ -1200,6 +1230,9 @@ def classify(
         # MySQL 2013 at connect is a handshake that never finished, not a drop.
         if _anchored(raw) == "network.handshake_timeout":
             code = "network.handshake_timeout"
+    if not code and _ora_missing_owner(full_raw, phase):
+        code = "object.schema_not_found"
+        matched_by = "structured"
     if _dns_from_sqlserver_numbers(full_raw):
         # pymssql reports DNS and a dead host under the same 20009, and the
         # connect-timeout phrase matches both. FreeTDS's own report tells them
