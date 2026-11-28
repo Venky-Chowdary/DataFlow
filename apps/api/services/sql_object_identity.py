@@ -198,17 +198,25 @@ def resolve_object_identity(
     want_schema, want_table = split_qualified_table(str(table or ""), schema)
     if not want_table:
         return ObjectIdentity(want_schema, want_table, False)
-    url = getattr(engine, "url", None)
-    if url is None or not hasattr(engine, "connect"):
+    if not _is_engine(engine):
         return _resolve_identity(engine, want_table, want_schema, columns, dialect)
     from services.introspect_memo import memoized_plan_read
 
     # Inside one read-only plan the same object is resolved by several checks
     # (NULL cursor, text cursor order, ...): one catalog read serves them (D423).
     return memoized_plan_read(
-        ("object_identity", str(url), dialect, want_schema, want_table, tuple(columns or ())),
+        ("object_identity", str(engine.url), dialect, want_schema, want_table, tuple(columns or ())),
         lambda: _resolve_identity(engine, want_table, want_schema, columns, dialect),
     )
+
+
+def _is_engine(engine: Any) -> bool:
+    """A real SQLAlchemy Engine (a Connection or a driver handle is used as given)."""
+    try:
+        import sqlalchemy as sa
+    except ImportError:  # pragma: no cover - SQLAlchemy is a hard dependency
+        return False
+    return isinstance(engine, sa.engine.Engine)
 
 
 def _resolve_identity(
@@ -222,7 +230,7 @@ def _resolve_identity(
 
     if (dialect or "").strip().lower() == "oracle" or _dialect_name(engine) == "oracle":
         return _oracle_identity(engine, want_table, want_schema, columns)
-    if hasattr(engine, "connect"):
+    if _is_engine(engine):
         # One pooled connection for every catalog question below: an inspector
         # bound to the Engine checks a connection out (and pings it) per call,
         # four round trips more per object on a tunnelled host (D423).
