@@ -3640,7 +3640,7 @@ def _covered_keyed_noop_verify(
         src_type=src_type,
     )
     if as_target is None:
-        return _noop_drift_unmeasured(target_rows)
+        return _noop_drift_unmeasured(target_rows, NOOP_DRIFT_NO_RECIPE_IMAGE)
     drift = measure_drift(
         source_rows=as_target,
         target_rows=[r for r in dest_rows if isinstance(r, dict)],
@@ -3670,15 +3670,20 @@ def _covered_keyed_noop_verify(
 NOOP_DRIFT_UNMEASURED = (
     "Out-of-window drift was not measured: this source cannot be re-read for comparison."
 )
+#: The source was re-read, but the route's recipe gives no row-for-row image of it.
+NOOP_DRIFT_NO_RECIPE_IMAGE = (
+    "Out-of-window drift was not measured: this route's recipe cannot be re-applied "
+    "row for row to the re-read source rows."
+)
 
 
-def _noop_drift_unmeasured(target_rows: int) -> dict[str, Any]:
+def _noop_drift_unmeasured(target_rows: int, why: str = NOOP_DRIFT_UNMEASURED) -> dict[str, Any]:
     """A quiet poll whose out-of-window drift could not be compared, said plainly."""
     return {
         "passed": True,
         "message": (
             "No new source rows since the last watermark — nothing written, "
-            f"destination unchanged at {target_rows:,} row(s). {NOOP_DRIFT_UNMEASURED}"
+            f"destination unchanged at {target_rows:,} row(s). {why}"
         ),
         "assurance_level": NO_OP_DEST_UNCHANGED,
         "out_of_window_drift_measured": False,

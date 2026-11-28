@@ -177,3 +177,43 @@ def test_pg_noop_rerun_with_transforms_names_only_real_drift(store):
     finally:
         pg_sql(f"DROP TABLE IF EXISTS {src}")
         pg_sql(f"DROP TABLE IF EXISTS {dst}")
+
+
+def test_pg_noop_rerun_whose_recipe_has_no_row_image_says_so(store):
+    """Re-review LOW: a SQL source was re-read, but a recipe that removes a row has
+    no row-for-row image - the sentence says that, not "cannot be re-read"."""
+    from services.shape_models import ShapeRecipe
+    from tests.c3_live_helpers import pg_endpoint, pg_sql
+    from tests.helpers.live_env import pg_up
+
+    if not pg_up():
+        pytest.skip("live PostgreSQL not available")
+    src, dst = f"d421f_{uuid.uuid4().hex[:8]}", f"d421g_{uuid.uuid4().hex[:8]}"
+    pg_sql(f"CREATE TABLE {src} (id INT PRIMARY KEY, name TEXT, updated_at TIMESTAMP)")
+    for i in range(1, 11):
+        pg_sql(f"INSERT INTO {src} VALUES (%s, %s, %s)", (i, f"n{i}", f"2026-11-01 10:{i:02d}:00"))
+    recipe = {"steps": [{"op": "filter_rows", "options": {"condition": "[id] <> 3"}}]}
+    cols = ["id", "name", "updated_at"]
+
+    def request():
+        return TransferRequest(
+            source=pg_endpoint(src), destination=pg_endpoint(dst), sync_mode="incremental_upsert",
+            mappings=[{"source": c, "target": c, "confidence": 0.99, "approved": True} for c in cols],
+            validation_mode="strict", shape_recipe=recipe,
+            approved_shape_recipe_hash=ShapeRecipe.parse(recipe, source_columns=cols).recipe_hash,
+            stream_contracts=[{**_CONTRACT, "name": src, "primary_key": ["id"]}],
+        )
+
+    try:
+        assert _go(store, request()).records_transferred == 9
+        quiet = _go(store, request())
+        message = _message(quiet)
+        assert quiet.records_transferred == 0
+        assert (
+            "Out-of-window drift was not measured: this route's recipe cannot be re-applied "
+            "row for row to the re-read source rows." in message
+        ), message
+        assert "cannot be re-read for comparison" not in message
+    finally:
+        pg_sql(f"DROP TABLE IF EXISTS {src}")
+        pg_sql(f"DROP TABLE IF EXISTS {dst}")
