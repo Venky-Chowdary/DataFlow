@@ -2683,15 +2683,15 @@ def _stream_database_transfer_impl(
         # The first page committed above. A single shared connection (proxy,
         # Snowflake, SQLite, Iceberg) finishes the rest on this thread.
         # Parallel destinations still overlap the next read with the write.
-        drive_ordered_batches(
-            max_workers=run.cfg.max_workers,
-            initial=batch,
-            fetch_next=partial(_fetch_next_batch, run),
-            prepare=partial(_prepare_batch, run),
-            process=partial(_process_db_chunk, run),
-            apply_result=_apply_result,
-            start_idx=first_idx + 1,
-        )
+        # ``None``: the source ended while every page so far was held or
+        # removed on the read; fetch_next(None) would read page one again.
+        if batch is not None:
+            drive_ordered_batches(
+                max_workers=run.cfg.max_workers, initial=batch,
+                fetch_next=partial(_fetch_next_batch, run), prepare=partial(_prepare_batch, run),
+                process=partial(_process_db_chunk, run), apply_result=_apply_result,
+                start_idx=first_idx + 1,
+            )
         # A buffering recipe step (dedupe keep-last, aggregate, sort, rank)
         # holds rows until the population is fully read — this is that moment.
         # Drained rows run the same write path and DDL gate as every other page.

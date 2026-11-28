@@ -124,19 +124,14 @@ def test_sqlite_keyless_append_with_dedupe_rows_keep_last(store, tmp_path):
     assert ids == [1, 2, 2, 3, 4], ids
 
 
-def test_sqlite_keyless_append_with_sort_rows_is_never_refused(store, tmp_path):
-    """Reviewer repro (a), sort_rows: refused at run 2 by the first D359 round.
-
-    Only the refusal is asserted. Counts are not: on a4e7d104d too, an
-    incremental read whose first page a buffering step holds reads that page
-    a second time (the keyset continuation starts with no bookmark), so
-    sort_rows writes every row of a run twice. That pre-existing defect is
-    reported separately; dedupe_rows hides it by collapsing the copies.
-    """
+def test_sqlite_keyless_append_with_sort_rows(store, tmp_path):
+    """Reviewer repro (a), sort_rows: refused at run 2 by the first D359 round,
+    and - on a4e7d104d too - every row written twice, because the read
+    restarted after the held first page (tests/test_buffered_recipe_first_page_read_once)."""
     results, ids = _sqlite_chain(store, tmp_path, SORT_ROWS)
     for n, result in enumerate(results, start=1):
         assert result.success, f"run {n}: {result.error}"
-    assert sorted(set(ids)) == [1, 2, 3, 4], ids
+    assert ids == [1, 2, 2, 3, 4], ids
 
 
 def test_run_timestamp_column_does_not_reappend_the_watermark_row(store, tmp_path):
