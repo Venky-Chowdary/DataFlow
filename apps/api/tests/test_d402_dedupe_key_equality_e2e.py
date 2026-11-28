@@ -67,6 +67,21 @@ def _sql(statement: str) -> list[tuple]:
         conn.close()
 
 
+def _pads_trailing_spaces() -> bool:
+    """Whether the database's default collation compares ``'b'`` equal to ``'b '``.
+
+    MariaDB's ``utf8mb4_general_ci`` is PAD SPACE; MySQL 8's
+    ``utf8mb4_0900_ai_ci`` (the CI server's default) is NO PAD, so there the
+    two spellings are two keys to the destination too.
+    """
+    ((charset, collation),) = _sql(
+        "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
+        "FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = DATABASE()"
+    )
+    ((same,),) = _sql(f"SELECT _{charset}'b' COLLATE {collation} = _{charset}'b ' COLLATE {collation}")
+    return bool(same)
+
+
 def _exists(table: str) -> bool:
     return bool(_sql(f"SHOW TABLES LIKE '{table}'"))
 
@@ -122,7 +137,9 @@ def test_unchosen_equality_refuses_before_any_write(jobs, local_object_store, ro
         result, job = _run(jobs, route, table, "", local_object_store)
         text = f"{result.error} {job.get('message')}"
         assert result.success is False and job.get("status") == "failed", text
-        assert "'a' = 'A'" in text and "'b' = 'b '" in text, text
+        assert "'a' = 'A'" in text, text
+        # 'b' / 'b ' are one key only under a PAD SPACE collation, and named only then.
+        assert ("'b' = 'b '" in text) is _pads_trailing_spaces(), text
         assert "dedupe_key_equality=destination" in text and "dedupe_key_equality=exact" in text, text
         assert not _exists(table), "the refused run created or wrote the table"
     finally:
@@ -154,7 +171,10 @@ def test_destination_collapses_by_its_rules_last_row_wins(jobs, local_object_sto
         assert result.success is True and job.get("status") == "completed", message
         assert "dedupe" not in message.lower() and "unverif" not in message.lower(), message
         rows = sorted(_sql(f"SELECT CAST(code AS BINARY), v FROM `{table}`"))
-        assert rows == [(b"A", 2), (b"b ", 4), (b"c", 6)], rows
+        if _pads_trailing_spaces():
+            assert rows == [(b"A", 2), (b"b ", 4), (b"c", 6)], rows
+        else:  # NO PAD: 'b' and 'b ' are two keys to the destination, both kept
+            assert rows == [(b"A", 2), (b"b", 3), (b"b ", 4), (b"c", 6)], rows
     finally:
         _sql(f"DROP TABLE IF EXISTS `{table}`")
 
