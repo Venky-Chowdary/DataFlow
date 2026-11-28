@@ -3225,6 +3225,9 @@ def resolve_target_columns(
     samples = sample_values_by_source or {}
     live = dest_types or {}
     name_of = identifier or writer_identifier(dest_db, preserve_case=preserve_case)
+    from services.target_name_collision import refuse_target_collisions
+
+    refuse_target_collisions(mappings, identifier=name_of)  # never keep the first silently
     for m in mappings:
         try:
             from services.mapping_constraints import is_intentional_omit

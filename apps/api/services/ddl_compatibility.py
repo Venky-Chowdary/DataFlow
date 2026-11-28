@@ -322,6 +322,11 @@ def evaluate_ddl_compatibility(
             "destination columns on Map."
         )
 
+    from services.target_name_collision import target_collision_message, target_name_collisions
+
+    collision = target_collision_message(target_name_collisions(mappings, dest_type=dest_db_type))
+    if collision:
+        issues.append(collision)
     seen_targets: set[str] = set()
     for m in mappings:
         src = str(m.get("source") or "")
