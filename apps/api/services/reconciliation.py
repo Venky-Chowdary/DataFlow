@@ -4857,7 +4857,9 @@ def sample_compare_rows(
                 "exclude",
             }:
                 continue
-            physical_tgt = tgt_keys.get(tgt_col.lower())
+            # Exact name first: a destination that keeps case (PostgreSQL) holds
+            # "Name" and "name" as two columns, and the folded map keeps only one.
+            physical_tgt = tgt_col if tgt_col in tgt else tgt_keys.get(tgt_col.lower())
             if physical_tgt is None:
                 # Column absent from read-back sample — do not invent NULL mismatch.
                 continue

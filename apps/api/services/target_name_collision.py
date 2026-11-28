@@ -27,25 +27,6 @@ def _skipped_by_writer(mapping: dict[str, Any], table_exists: bool | None) -> bo
     )
 
 
-def _case_exact(dest_type: str, identifier: Callable[[Any], str] | None) -> bool:
-    """Whether two names differing only in case are two columns on this destination.
-
-    Document, search, key-value, stream and SaaS stores keep a field name exactly
-    (``destination_naming.EXACT_NAME_STORES``), and so do file exports (a header
-    is text). Every SQL engine treats ``Name`` and ``name`` as one column on the
-    writer's path: SQLite, MySQL and SQL Server compare names case-insensitively,
-    and a writer folding case (``preserve_case=False``) lands both as ``name``.
-    """
-    from connectors import destination_naming as naming
-
-    kind = naming.dest_kind(dest_type)
-    return (
-        naming.keeps_exact_names(dest_type)
-        or kind in naming.FILE_EXPORTS
-        or identifier is naming._exact  # noqa: SLF001 - the exact-name writer rule itself
-    )
-
-
 def target_name_collisions(
     mappings: list[dict[str, Any]] | None,
     *,
@@ -62,17 +43,16 @@ def target_name_collisions(
     written. Validate and the writer call this with the same inputs, so they
     decide alike whichever case rule the writer names with.
     """
-    from connectors.destination_naming import target_identifier
+    from connectors.destination_naming import stored_column_key, target_identifier
 
     name_of = identifier or target_identifier(dest_type) or (lambda name: str(name))
-    exact = _case_exact(dest_type, identifier)
     landed_by_key: dict[str, str] = {}
     sources_by_key: dict[str, list[str]] = {}
     for mapping in mappings or []:
         if not isinstance(mapping, dict) or _skipped_by_writer(mapping, table_exists):
             continue
         landed = str(name_of(str(mapping["target"])))
-        key = landed if exact else landed.casefold()
+        key = stored_column_key(dest_type, landed)
         landed_by_key.setdefault(key, landed)
         source = str(mapping.get("source") or mapping["target"])
         sources = sources_by_key.setdefault(key, [])

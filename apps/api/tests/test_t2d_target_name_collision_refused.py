@@ -167,28 +167,49 @@ def test_case_only_collision_into_an_existing_sqlite_table_is_refused(case_sourc
 _CASE_PAIR = [{"source": "Name", "target": "Name"}, {"source": "name", "target": "name"}]
 
 
-@pytest.mark.parametrize("dest", ["sqlite", "postgresql", "mysql", "sqlserver", "bigquery", ""])
-@pytest.mark.parametrize("preserve_case", [True, False])
-def test_validate_and_the_writer_decide_a_case_pair_alike(dest, preserve_case):
+@pytest.mark.parametrize(
+    "dest", ["sqlite", "mysql", "mariadb", "sqlserver", "duckdb", "bigquery", "snowflake", "redshift",
+             "databricks", "iceberg"],
+)
+def test_validate_and_the_writer_refuse_a_case_pair_where_names_fold(dest):
     from connectors.writer_common import resolve_target_columns
     from services.ddl_compatibility import evaluate_ddl_compatibility
 
     _ok, issues = evaluate_ddl_compatibility(
-        mappings=_CASE_PAIR, dest_db_type=dest or "postgresql", table_exists=False, allow_create=True,
+        mappings=_CASE_PAIR, dest_db_type=dest, table_exists=False, allow_create=True,
     )
     assert any("'Name' and 'name'" in i for i in issues), issues
     with pytest.raises(ValueError, match="'Name' and 'name'"):
-        resolve_target_columns(_CASE_PAIR, {}, preserve_case=preserve_case, dest_db=dest)
+        resolve_target_columns(_CASE_PAIR, {}, preserve_case=True, dest_db=dest)
 
 
-@pytest.mark.parametrize("dest", ["mongodb", "kafka", "elasticsearch", "csv"])
+@pytest.mark.parametrize(
+    "dest", ["postgresql", "pgvector", "oracle", "", "mongodb", "kafka", "elasticsearch", "csv",
+             "parquet", "s3", "gcs", "azure_blob", "adls"],
+)
 def test_case_exact_destinations_keep_two_columns(dest):
+    """Re-review: PostgreSQL quotes and keeps case (``"Name"`` and ``"name"`` are two
+    columns); object-store exports keep header case like a CSV/Parquet export."""
     from connectors.writer_common import resolve_target_columns
+    from services.ddl_compatibility import evaluate_ddl_compatibility
     from services.target_name_collision import target_name_collisions
 
     assert target_name_collisions(_CASE_PAIR, dest_type=dest) == []
+    _ok, issues = evaluate_ddl_compatibility(
+        mappings=_CASE_PAIR, dest_db_type=dest or "postgresql", table_exists=False, allow_create=True,
+    )
+    assert not any("collision" in i for i in issues), issues
     targets, _types = resolve_target_columns(_CASE_PAIR, {}, preserve_case=True, dest_db=dest)
     assert targets == ["Name", "name"]
+
+
+def test_oracle_folds_only_an_all_lowercase_name():
+    """SQLAlchemy's Oracle names: ``name`` is case-insensitive (``NAME``); ``Name`` is quoted."""
+    from services.target_name_collision import target_name_collisions
+
+    assert target_name_collisions(_CASE_PAIR, dest_type="oracle") == []
+    upper_pair = [{"source": "NAME", "target": "NAME"}, {"source": "name", "target": "name"}]
+    assert [s for _t, s in target_name_collisions(upper_pair, dest_type="oracle")] == [["NAME", "name"]]
 
 
 def test_a_pending_mapping_the_writer_skips_is_not_a_collision():
@@ -207,3 +228,110 @@ def test_a_pending_mapping_the_writer_skips_is_not_a_collision():
     # Confirmed create-new: the writer creates it, so the same pair is refused.
     with pytest.raises(ValueError, match="'a b' and 'a_b'"):
         resolve_target_columns(maps, {}, preserve_case=True, dest_db="postgresql", table_exists=False)
+
+
+def _engine_store(tmp_path, monkeypatch):
+    from tests.test_property2_golden_path_never_blocked import _FakeMongo
+
+    import services.sync_cursor as sc
+
+    fake = _FakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
+    monkeypatch.setattr(sc, "STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr(sc, "_mongo_cursors", lambda: None)
+    return fake
+
+
+def _pg_endpoint(table: str) -> EndpointConfig:
+    c = r.PG
+    return EndpointConfig(kind="database", format="postgresql", table=table, host=c["host"],
+                          port=c["port"], database=c["database"], username=c["username"],
+                          password=c["password"], schema="public")
+
+
+@pytest.mark.parametrize("route", ["engine_copy", "buffered_rows"])
+@pytest.mark.parametrize("skip_preflight", [False, True])
+def test_postgres_keeps_name_and_Name_as_two_columns(case_source, tmp_path, monkeypatch, route, skip_preflight):
+    """Re-review: PostgreSQL quotes and keeps case, so this copy is exact and green on
+    both routes. The buffered route's read-back sample used to fold the names and
+    compare "Name" with the "name" column ("source='Upper 1' dest='lower 1'")."""
+    fake = _engine_store(tmp_path, monkeypatch)
+    dest = case_source + "_out"
+    request = TransferRequest(
+        source=_pg_endpoint(case_source), destination=_pg_endpoint(dest),
+        mappings=[{"source": c, "target": c, "confidence": 0.99} for c in ("id", "Name", "name")],
+        sync_mode="full_refresh_overwrite",
+        stream_contracts=[{"name": case_source, "primary_key": ["id"],
+                           "sync_mode": "full_refresh_overwrite", "selected": True}],
+        skip_preflight=skip_preflight, validation_mode="strict",
+        **({"priority_column": "id"} if route == "buffered_rows" else {}),
+    )
+    job_id = "t2dp" + uuid.uuid4().hex[:16]
+    fake.update_job_status(job_id, "pending", transfer_request={})
+    try:
+        result = UniversalTransferEngine().execute_tracked(request, job_id)
+        recon = (fake.get_job(job_id) or {}).get("reconciliation") or {}
+        assert result.success, result.error
+        assert recon.get("checksum_match") is True, recon.get("message")
+        if route == "buffered_rows":
+            sample = recon.get("sample_compare") or {}
+            assert sample.get("passed") is True and int(sample.get("rows_compared") or 0) == 5, sample
+        rows = r.query("postgresql", f'SELECT id, "Name", "name" FROM public."{dest}" ORDER BY id')  # nosec B608
+        assert rows == [(i, f"Upper {i}", f"lower {i}") for i in range(1, 6)]
+    finally:
+        r.drop("postgresql", dest)
+
+
+@pytest.fixture()
+def pair_source(request):
+    pair = request.param
+    pg = r.pg_conn()
+    table = "t2do_" + uuid.uuid4().hex[:8]
+    cur = pg.cursor()
+    cur.execute(f'CREATE TABLE {table} (id BIGINT PRIMARY KEY, "{pair[0]}" TEXT, "{pair[1]}" TEXT)')
+    cur.execute(f"INSERT INTO {table} VALUES (1, 'first', 'second')")  # nosec B608
+    try:
+        yield table, pair
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {table}")  # nosec B608
+        pg.close()
+
+
+@pytest.mark.parametrize("pair_source", [("a b", "a_b"), ("Name", "name")], indirect=True)
+@pytest.mark.parametrize("existing", [False, True])
+def test_sqlite_overwrite_refuses_the_pair_by_name(pair_source, tmp_path, monkeypatch, existing):
+    """Re-review: the overwrite (COPY) route built its own DDL and failed with the raw
+    "duplicate column name"; it is now refused naming both sources, and an existing
+    table keeps its rows."""
+    import sqlite3
+
+    table, pair = pair_source
+    fake = _engine_store(tmp_path, monkeypatch)
+    db = tmp_path / "d.sqlite"
+    if existing:
+        conn = sqlite3.connect(str(db))
+        with conn:
+            conn.execute(f'CREATE TABLE t (id INTEGER, "{pair[1]}" TEXT)')
+            conn.execute("INSERT INTO t VALUES (9, 'kept')")
+        conn.close()
+    request = TransferRequest(
+        source=_pg_endpoint(table),
+        destination=EndpointConfig(kind="database", format="sqlite", database=str(db), table="t"),
+        mappings=[{"source": "id", "target": "id"}, {"source": pair[0], "target": pair[0]},
+                  {"source": pair[1], "target": pair[1]}],
+        sync_mode="full_refresh_overwrite", skip_preflight=True, validation_mode="strict",
+        # A new table under the default policy is the route that hit the raw error.
+        schema_policy="propagate_columns" if existing else "manual_review",
+    )
+    job_id = "t2do" + uuid.uuid4().hex[:16]
+    fake.update_job_status(job_id, "pending", transfer_request={})
+    result = UniversalTransferEngine().execute_tracked(request, job_id)
+    assert not result.success
+    assert f"'{pair[0]}' and '{pair[1]}'" in str(result.error), result.error
+    assert "duplicate column name" not in str(result.error)
+    if existing:
+        conn = sqlite3.connect(str(db))
+        try:
+            assert conn.execute("SELECT * FROM t").fetchall() == [(9, "kept")]
+        finally:
+            conn.close()

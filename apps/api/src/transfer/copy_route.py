@@ -657,6 +657,11 @@ def _try_copy_fast_path(
     cannot prove belongs on the row path, which knows how to reconcile the
     differences this one refuses to guess at.
     """
+    from services.target_name_collision import refuse_target_collisions
+
+    # The COPY routes build their own DDL: two targets landing in one column are
+    # refused here by name, not by the engine's "duplicate column name".
+    refuse_target_collisions(mappings, dest_type=dest_type)
     from services.transfer_journal import active_journal
 
     if active_journal(job_id) is not None:

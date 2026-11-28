@@ -1365,7 +1365,9 @@ def _write_mapped_rows_pyiceberg(
             driver="iceberg",
         )
 
-    target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, target_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True, dest_db="iceberg"
+    )
     if conflict_columns:
         try:
             conflict_columns = resolve_conflict_targets(
@@ -2525,7 +2527,9 @@ def _write_mapped_rows_filesystem(
         )
     meta_dir.mkdir(parents=True, exist_ok=True)
 
-    target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, target_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True, dest_db="iceberg"
+    )
     if conflict_columns:
         try:
             conflict_columns = resolve_conflict_targets(

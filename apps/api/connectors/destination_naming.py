@@ -89,6 +89,46 @@ def dest_kind(dest_type: str | None) -> str:
         return raw
 
 
+#: Object-store / file-transfer destinations write files (CSV, JSON, Parquet,
+#: ...): a header or field name is text and keeps its case, as a local export does.
+OBJECT_STORE_EXPORTS = frozenset({"s3", "gcs", "azure_blob", "adls", "azure_data_lake", "sftp"})
+
+
+def stored_column_key(dest_type: str | None, landed: Any) -> str:
+    """The identity a destination gives the column a writer names ``landed``.
+
+    Two targets with the same key are one column there. One rule for Validate
+    (``ddl_compatibility``) and every writer (``resolve_target_columns``), via
+    :mod:`services.target_name_collision`:
+
+    * kept exactly: document / search / key-value / stream / SaaS stores, file
+      and object-store exports, PostgreSQL (its writers quote every identifier
+      and keep case, so ``"Name"`` and ``"name"`` are two columns), and an
+      unknown destination (no proof the names fold);
+    * Oracle through SQLAlchemy: an all-lowercase name is case-insensitive
+      (stored upper case), any capital makes it a quoted exact name, so
+      ``name``/``NAME`` are one column and ``Name``/``name`` two;
+    * case-folded everywhere else: SQLite, MySQL/MariaDB, SQL Server, DuckDB,
+      BigQuery, Databricks, Redshift (case-insensitive by default), and
+      Snowflake, whose writer matches existing columns by ``.upper()``.
+      Iceberg folds too: the format is case-sensitive, but Glue and Hive
+      catalogs store column names lower-cased.
+    """
+    name = str(landed or "")
+    kind = dest_kind(dest_type)
+    if (
+        not kind
+        or kind in EXACT_NAME_STORES
+        or kind in FILE_EXPORTS
+        or kind in OBJECT_STORE_EXPORTS
+        or kind == "postgresql"
+    ):
+        return name
+    if kind == "oracle":
+        return name.upper() if name == name.lower() else name
+    return name.casefold()
+
+
 def keeps_exact_names(dest_type: str | None) -> bool:
     """True for stores whose field names are kept exactly as mapped."""
     return dest_kind(dest_type) in EXACT_NAME_STORES
