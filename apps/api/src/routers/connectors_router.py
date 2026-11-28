@@ -3294,6 +3294,9 @@ def delete_connector(
         conn = SimpleNamespace(
             id=connector_id, name=str(connector.get("name") or connector_id),
             type=str(connector.get("type") or connector.get("format") or ""), workspace_id=workspace,
+            # A legacy document is addressed by its ObjectId or its UUID; a
+            # schedule may hold either, so both are guarded.
+            aliases=[str(connector.get(k)) for k in ("_id", "id") if connector.get(k)],
         )
         delete_via_route(
             request, conn, workspace_id=workspace, bound_schedules=bound_schedules,

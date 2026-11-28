@@ -28,8 +28,11 @@ The rule, wherever the delete comes from:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
+
+logger = logging.getLogger(__name__)
 
 ACTION_PAUSE = "pause"
 ACTION_REPOINT = "repoint"
@@ -74,18 +77,30 @@ class DeletePlan:
     action: str = ""
     repoint_to: str = ""
     schedules: list[dict[str, Any]] = field(default_factory=list)
+    #: Every id the connector is known by (a platform document: its ObjectId
+    #: ``_id`` and its UUID ``id``); a schedule may reference either.
+    aliases: frozenset[str] = frozenset()
+
+    def references(self, value: Any) -> bool:
+        return str(value or "") in (self.aliases or {self.connector_id})
 
 
-def _role(sched: Any, connector_id: str) -> str:
-    source = str(getattr(sched, "source_connector_id", "") or "") == connector_id
-    dest = str(getattr(sched, "dest_connector_id", "") or "") == connector_id
+def _role(sched: Any, ids: frozenset[str]) -> str:
+    source = str(getattr(sched, "source_connector_id", "") or "") in ids
+    dest = str(getattr(sched, "dest_connector_id", "") or "") in ids
     if source and dest:
         return "source and destination"
     return "source" if source else "destination"
 
 
-def schedules_bound_to(connector_id: str, workspace_id: str = "") -> list[dict[str, Any]]:
-    """Every schedule that reads from or writes to ``connector_id``.
+def connector_aliases(conn: Any) -> frozenset[str]:
+    """Its id plus any ``aliases`` it carries (a platform document's ``_id`` and ``id``)."""
+    ids = {str(getattr(conn, "id", "") or "")} | {str(a) for a in getattr(conn, "aliases", ()) or ()}
+    return frozenset(i for i in ids if i)
+
+
+def schedules_bound_to(connector_id: Any, workspace_id: str = "") -> list[dict[str, Any]]:
+    """Every schedule that reads from or writes to the connector (one id or several).
 
     Scoped to the connector's workspace (and legacy unscoped rows): a schedule
     in another workspace never resolves this connector (D172), and its name
@@ -93,15 +108,16 @@ def schedules_bound_to(connector_id: str, workspace_id: str = "") -> list[dict[s
     """
     from services.schedule_store import list_schedules
 
-    cid = str(connector_id or "").strip()
-    if not cid:
+    raw = [connector_id] if isinstance(connector_id, str) else list(connector_id or ())
+    ids = frozenset(str(c).strip() for c in raw if str(c or "").strip())
+    if not ids:
         return []
     out: list[dict[str, Any]] = []
     for sched in list_schedules():
-        if cid not in (
+        if not ids & {
             str(getattr(sched, "source_connector_id", "") or ""),
             str(getattr(sched, "dest_connector_id", "") or ""),
-        ):
+        }:
             continue
         owner = str(getattr(sched, "workspace_id", "") or "")
         if workspace_id and owner and owner != workspace_id:
@@ -110,7 +126,7 @@ def schedules_bound_to(connector_id: str, workspace_id: str = "") -> list[dict[s
             "id": sched.id,
             "name": str(sched.name or sched.id),
             "enabled": bool(sched.enabled),
-            "role": _role(sched, cid),
+            "role": _role(sched, ids),
             "running": bool(getattr(sched, "running", False)),
             "workspace_id": owner,
         })
@@ -174,8 +190,9 @@ def plan_connector_delete(
     repoint_to: str = "",
 ) -> DeletePlan:
     """Decide the delete of ``conn``. Raises :class:`ConnectorInUse` (409) or ``ValueError`` (422)."""
-    bound = schedules_bound_to(conn.id, workspace_id or str(getattr(conn, "workspace_id", "") or ""))
-    plan = DeletePlan(connector_id=conn.id, connector_name=str(conn.name or conn.id))
+    aliases = connector_aliases(conn)
+    bound = schedules_bound_to(aliases, workspace_id or str(getattr(conn, "workspace_id", "") or ""))
+    plan = DeletePlan(connector_id=conn.id, connector_name=str(conn.name or conn.id), aliases=aliases)
     if not bound:
         return plan
     name = plan.connector_name
@@ -242,114 +259,233 @@ def require_schedule_permission(plan: DeletePlan, request: Any) -> None:
         )
 
 
+#: Fields a schedule change may move that are not the schedule's own state.
+_NOT_STATE = frozenset({"version", "updated_at"})
+
+
 def delete_connector_with_schedules(
     plan: DeletePlan, *, delete: Callable[[], bool], actor: str = "", request: Any = None,
 ) -> dict[str, Any]:
-    """Apply the plan's choice and delete the connector, in an order that never
-    leaves schedules changed for a connector that was not deleted.
+    """Apply the plan's choice and delete the connector, honestly, step by step.
 
     ``pause`` / ``repoint`` change the schedules first (no window where an
-    enabled schedule points at a vanished connector) and are undone when the
-    connector delete fails. ``delete_schedules`` deletes the connector first:
-    schedules are deleted only once it is gone. The audit records what happened.
+    enabled schedule points at a vanished connector). If a step fails or the
+    connector delete fails, every change already made is undone exactly — the
+    fields as they were before, written only where nobody changed them since.
+    ``delete_schedules`` deletes the connector first; a schedule that then
+    cannot be deleted is paused, so no enabled schedule outlives its
+    connector. Every outcome is audited, whatever fails.
+
+    Returns ``{"deleted", "schedules", "status", "message"}``: ``status`` is
+    200, 404 (connector not deleted, schedules restored) or 500 (some
+    schedule could not be put right; ``message`` names each one).
     """
     if not plan.schedules:
-        return {"deleted": bool(delete()), "schedules": []}
-    if plan.action == ACTION_DELETE_SCHEDULES:
-        deleted = bool(delete())
-        results = _delete_schedules(plan, actor=actor, request=request) if deleted else []
-    else:
-        results = _pause_or_repoint(plan)
-        try:
+        return {"deleted": bool(delete()), "schedules": [], "status": 200, "message": ""}
+    results: list[dict[str, Any]] = []
+    deleted = False
+    try:
+        if plan.action == ACTION_DELETE_SCHEDULES:
             deleted = bool(delete())
-        except Exception:
-            _undo(plan, results)
-            _audit(plan, results, deleted=False, actor=actor, request=request)
-            raise
-        if not deleted:
-            _undo(plan, results)
-    _audit(plan, results, deleted=deleted, actor=actor, request=request)
-    return {"deleted": deleted, "schedules": results}
+            if deleted:
+                results = _delete_schedules(plan, actor=actor, request=request)
+        else:
+            results = _pause_or_repoint(plan)
+            if all(r["result"] in ("paused", "repointed") for r in results):
+                deleted = _try_delete(delete, results)
+            if not deleted:
+                _undo(results)
+    finally:
+        _audit(plan, results, deleted=deleted, actor=actor, request=request)
+    return {"deleted": deleted, "schedules": [_public(r) for r in results],
+            **_verdict(plan, results, deleted)}
+
+
+def _try_delete(delete: Callable[[], bool], results: list[dict[str, Any]]) -> bool:
+    try:
+        return bool(delete())
+    except Exception as exc:  # noqa: BLE001 - recorded, the schedules are put back, and audited
+        logger.exception("Connector delete failed after its schedules were changed")
+        results.append({"id": "", "name": "", "result": "connector_delete_failed",
+                        "error": type(exc).__name__})
+        return False
+
+
+def _snapshot(sched: Any) -> dict[str, Any]:
+    return {k: v for k, v in sched.to_dict().items() if k not in _NOT_STATE}
+
+
+def _change_one(plan: DeletePlan, row: dict[str, Any]) -> dict[str, Any]:
+    """Pause or re-point one schedule, keeping what it was and what it became."""
+    from services.schedule_store import get_schedule, update_schedule
+
+    sched = get_schedule(row["id"])
+    done: dict[str, Any] = {"id": row["id"], "name": row["name"], "role": row["role"]}
+    if sched is None:
+        return {**done, "result": "gone"}
+    before = _snapshot(sched)
+    try:
+        if plan.action == ACTION_PAUSE:
+            changed = update_schedule(sched.id, {"enabled": False}) if sched.enabled else sched
+            result = "paused"
+        else:
+            patch = {f: plan.repoint_to for f in ("source_connector_id", "dest_connector_id")
+                     if plan.references(getattr(sched, f, ""))}
+            changed = update_schedule(sched.id, patch)
+            done["repoint_to"] = plan.repoint_to
+            result = "repointed"
+    except Exception as exc:  # noqa: BLE001 - recorded; the caller undoes what was done
+        logger.exception("Schedule %s could not be changed for a connector delete", sched.id)
+        return {**done, "result": "change_failed", "error": type(exc).__name__}
+    after = _snapshot(changed) if changed is not None else before
+    moved = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    # The undo writes only if the schedule is still exactly as this change left
+    # it (every field): an operator's pause or edit in between stands.
+    return {**done, "result": result, "_before": {k: before.get(k) for k in moved},
+            "_after": after if moved else {}}
 
 
 def _pause_or_repoint(plan: DeletePlan) -> list[dict[str, Any]]:
-    from services.schedule_store import get_schedule, update_schedule
-
     results: list[dict[str, Any]] = []
     for row in plan.schedules:
-        sched = get_schedule(row["id"])
-        if sched is None:
-            continue
-        done: dict[str, Any] = {"id": sched.id, "name": sched.name, "role": row["role"]}
-        if plan.action == ACTION_PAUSE:
-            done["was_enabled"] = bool(sched.enabled)
-            if sched.enabled:
-                update_schedule(sched.id, {"enabled": False})
-            done["result"] = "paused"
-        else:
-            patch: dict[str, Any] = {}
-            if sched.source_connector_id == plan.connector_id:
-                patch["source_connector_id"] = plan.repoint_to
-            if sched.dest_connector_id == plan.connector_id:
-                patch["dest_connector_id"] = plan.repoint_to
-            update_schedule(sched.id, patch)
-            done.update(result="repointed", repoint_to=plan.repoint_to, fields=sorted(patch))
+        done = _change_one(plan, row)
         results.append(done)
+        if done["result"] == "change_failed":
+            break  # stop changing; what was done is undone by the caller
     return results
 
 
-def _undo(plan: DeletePlan, results: list[dict[str, Any]]) -> None:
-    """The connector was not deleted: put the schedules back as they were."""
+def _undo_one(done: dict[str, Any]) -> None:
+    from services.schedule_store import restore_if_unchanged
+
+    if not done.get("_before"):
+        done["result"] = "unchanged" if done["result"] in ("paused", "repointed") else done["result"]
+        return
+    try:
+        outcome = restore_if_unchanged(done["id"], done["_after"], done["_before"])
+    except Exception as exc:  # noqa: BLE001 - recorded and named in the answer
+        logger.exception("Schedule %s could not be restored after a failed connector delete", done["id"])
+        done.update(result=f"{done['result']}_not_restored", error=type(exc).__name__)
+        return
+    if outcome == "restored":
+        done["result"] = "restored"
+    elif outcome == "changed":
+        # Someone changed it after the pause (a manual pause, an edit): theirs stands.
+        done["result"] = "changed_since_left_as_is"
+    else:
+        done["result"] = "gone"
+
+
+def _undo(results: list[dict[str, Any]]) -> None:
+    """The connector was not deleted: put every changed schedule back exactly."""
+    for done in results:
+        if done["result"] in ("paused", "repointed"):
+            _undo_one(done)
+
+
+def _delete_one(sched: Any, row: dict[str, Any], *, actor: str, request: Any) -> dict[str, Any]:
+    from services.cdc_capture_release import release_schedule_cdc_capture
+    from services.schedule_audit import record_schedule_deleted
+    from services.schedule_store import delete_schedule
+
+    done: dict[str, Any] = {"id": sched.id, "name": sched.name, "role": row["role"]}
+    try:
+        done["capture_release"] = release_schedule_cdc_capture(sched)
+        removed = delete_schedule(sched.id)
+    except Exception as exc:  # noqa: BLE001 - recorded; the schedule is paused below instead
+        logger.exception("Schedule %s could not be deleted with its connector", sched.id)
+        done["error"] = type(exc).__name__
+        removed = False
+    if removed:
+        record_schedule_deleted(sched, request=request, actor=actor or None)
+        return {**done, "result": "deleted"}
+    return _pause_orphan(sched, done)
+
+
+def _pause_orphan(sched: Any, done: dict[str, Any]) -> dict[str, Any]:
+    """Its connector is gone and it could not be deleted: it must not stay enabled."""
     from services.schedule_store import update_schedule
 
-    for done in results:
-        if done.get("result") == "paused" and done.get("was_enabled"):
-            update_schedule(done["id"], {"enabled": True})
-        elif done.get("result") == "repointed":
-            update_schedule(done["id"], {field: plan.connector_id for field in done.get("fields") or []})
-        done["result"] = "unchanged"
+    if not sched.enabled:
+        return {**done, "result": "not_deleted_paused"}
+    try:
+        update_schedule(sched.id, {"enabled": False})
+    except Exception as exc:  # noqa: BLE001 - recorded and named in the answer
+        logger.exception("Orphaned schedule %s could not be paused", sched.id)
+        return {**done, "result": "not_deleted_left_enabled", "pause_error": type(exc).__name__}
+    return {**done, "result": "not_deleted_paused"}
 
 
 def _delete_schedules(plan: DeletePlan, *, actor: str, request: Any) -> list[dict[str, Any]]:
-    from services.cdc_capture_release import release_schedule_cdc_capture
-    from services.schedule_audit import record_schedule_deleted
-    from services.schedule_store import delete_schedule, get_schedule
+    from services.schedule_store import get_schedule
 
     results: list[dict[str, Any]] = []
     for row in plan.schedules:
         sched = get_schedule(row["id"])
         if sched is None:
             continue
-        done: dict[str, Any] = {"id": sched.id, "name": sched.name, "role": row["role"],
-                                "capture_release": release_schedule_cdc_capture(sched)}
-        if delete_schedule(sched.id):
-            record_schedule_deleted(sched, request=request, actor=actor or None)
-            done["result"] = "deleted"
-        else:
-            done["result"] = "not_deleted"
-        results.append(done)
+        results.append(_delete_one(sched, row, actor=actor, request=request))
     return results
+
+
+_OK_RESULTS = frozenset({"paused", "repointed", "deleted"})
+_ROLLED_BACK = frozenset({"restored", "unchanged", "gone", "changed_since_left_as_is"})
+
+
+def _public(done: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in done.items() if not k.startswith("_")}
+
+
+def _verdict(plan: DeletePlan, results: list[dict[str, Any]], deleted: bool) -> dict[str, Any]:
+    """The HTTP status and the sentence that names every schedule left changed."""
+    rows = [r for r in results if r.get("id")]
+    raised = any(r.get("result") == "connector_delete_failed" for r in results)
+    if deleted and all(r["result"] in _OK_RESULTS for r in rows):
+        return {"status": 200, "message": ""}
+    if not deleted and all(r["result"] in _ROLLED_BACK for r in rows):
+        kept = [r for r in rows if r["result"] == "changed_since_left_as_is"]
+        note = (f" {_names(kept)} changed after it was paused, so it was left as it is now."
+                if kept else "")
+        return {"status": 500 if raised else 404,
+                "message": "The connection was not deleted. Its schedules are as they were." + note}
+    parts: list[str] = []
+    for r in rows:
+        what = _STUCK.get(r["result"])
+        if what:
+            parts.append(f"schedule “{r['name']}” {what}")
+    head = "The connection was deleted, but " if deleted else "The connection was not deleted, and "
+    return {"status": 500, "message": head + ("; ".join(parts) if parts else "a step failed") + "."}
+
+
+_STUCK = {
+    "not_deleted_paused": "could not be deleted; it is paused and shows “connection deleted”",
+    "not_deleted_left_enabled": "could not be deleted or paused; pause or delete it now",
+    "paused_not_restored": "is still paused; resume it",
+    "repointed_not_restored": "still points at the replacement connection; re-select it",
+    "change_failed": "could not be changed, so the delete stopped there",
+}
 
 
 def _audit(plan: DeletePlan, results: list[dict[str, Any]], *, deleted: bool, actor: str,
            request: Any) -> None:
     from services.audit_coverage import record_security_event
 
-    complete = deleted and all(r.get("result") in ("paused", "repointed", "deleted") for r in results)
+    rows = [r for r in results if r.get("id")]
+    complete = deleted and all(r.get("result") in _OK_RESULTS for r in rows)
     record_security_event(
         "connector.delete.bound_schedules",
         outcome="succeeded" if complete else "failed",
         request=request,
         actor=actor or None,
         resource=f"connector:{plan.connector_id}",
-        status=200 if deleted else 404,
+        status=200 if complete else (404 if not deleted else 500),
         details={
             "connector_id": plan.connector_id,
             "connector_name": plan.connector_name,
             "connector_deleted": deleted,
             "action": plan.action,
             "repoint_to": plan.repoint_to,
-            "schedules": [{k: v for k, v in r.items() if k not in ("was_enabled", "fields")} for r in results],
+            "schedules": [_public(r) for r in results],
         },
     )
 
@@ -390,8 +526,14 @@ def delete_via_route(
     user = getattr(getattr(request, "state", None), "user", None) or {}
     actor = str(user.get("email") or user.get("name") or "").strip()
     outcome = delete_connector_with_schedules(plan, delete=delete, actor=actor, request=request)
-    if not outcome["deleted"]:
+    if outcome["status"] == 404 and not outcome["message"]:
         raise HTTPException(status_code=404, detail="Connector not found")
+    if outcome["status"] != 200:
+        # Plain sentences built from the per-schedule outcome, never exception text.
+        raise HTTPException(status_code=outcome["status"], detail={
+            "message": outcome["message"], "connector_deleted": outcome["deleted"],
+            "schedules": outcome["schedules"],
+        })
     out: dict[str, Any] = {"ok": True}
     if outcome["schedules"]:
         out["bound_schedules"] = {"action": plan.action, "schedules": outcome["schedules"]}
@@ -428,17 +570,33 @@ def orphaned_sides(sched: Any) -> list[str]:
 
 
 def _connector_missing(connector_id: str, workspace_id: str) -> bool:
-    """True only when the store answered and has no such connector."""
+    """True when the scheduler would not resolve this connector for the schedule.
+
+    The runner's rule (``_resolve_connector_for_schedule``): the saved store,
+    then the platform store, and a connector owned by another workspace counts
+    as absent. Only a store that answered decides; an unreadable one does not.
+    """
     if not connector_id:
         return False
     from services.connector_store import get_connector
 
     try:
-        if get_connector(connector_id, workspace_id=workspace_id or None) is not None:
-            return False
-        return platform_connector(connector_id) is None
+        conn = get_connector(connector_id)
+        if conn is not None:
+            owner = str(conn.workspace_id or "")
+        else:
+            doc = platform_connector(connector_id)
+            if doc is None:
+                return True
+            owner = str(doc.get("workspace_id") or "")
     except Exception:  # noqa: BLE001 - an unreadable store is not proof of deletion
         return False
+    return connector_unavailable_to(owner, workspace_id)
+
+
+def connector_unavailable_to(owner: str, schedule_workspace: str) -> bool:
+    """The runner refuses a connector another workspace owns (D172)."""
+    return bool(owner and schedule_workspace and owner != schedule_workspace)
 
 
 def platform_connector(connector_id: str) -> dict[str, Any] | None:
@@ -457,7 +615,8 @@ def connection_deleted_reason(sides: list[str]) -> str:
     plural = len(sides) > 1
     return (
         f"Connection deleted: the {which} connection{'s' if plural else ''} of this schedule "
-        f"{'no longer exist' if plural else 'no longer exists'}. Re-select the connection on "
+        f"{'no longer exist' if plural else 'no longer exists'}, or "
+        f"{'are' if plural else 'is'} not in this schedule's workspace. Re-select the connection on "
         "this schedule (edit it, or open it in Transfer Studio), or restore the deleted "
         "connection, then resume."
     )

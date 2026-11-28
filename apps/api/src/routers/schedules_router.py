@@ -435,7 +435,7 @@ class ScheduleResponse(BaseModel):
         s: PipelineSchedule,
         *,
         warnings: Optional[list[str]] = None,
-        connector_ids: Optional[set[str]] = None,
+        connector_ids: Optional[dict[str, str]] = None,
     ) -> ScheduleResponse:
         from services.schedule_run_lifecycle import derive_status
 
@@ -454,11 +454,16 @@ class ScheduleResponse(BaseModel):
         data["state"], data["stalled_reason"] = schedule_run_state(s)
         from services.connector_delete_guard import connection_deleted_reason, orphaned_sides
 
+        from services.connector_delete_guard import connector_unavailable_to
+
+        workspace = str(getattr(s, "workspace_id", "") or "")
         sides = (
             orphaned_sides(s)
             if connector_ids is None
             else [side for side, cid in (("source", s.source_connector_id), ("destination", s.dest_connector_id))
-                  if str(cid or "").strip() and str(cid) not in connector_ids]
+                  if str(cid or "").strip() and (
+                      str(cid) not in connector_ids
+                      or connector_unavailable_to(connector_ids[str(cid)], workspace))]
         )
         if sides:
             data["connection_deleted"] = sides
@@ -563,7 +568,7 @@ class ScheduleSummaryResponse(BaseModel):
 
     @classmethod
     def from_schedule(
-        cls, s: PipelineSchedule, *, connector_ids: Optional[set[str]] = None
+        cls, s: PipelineSchedule, *, connector_ids: Optional[dict[str, str]] = None
     ) -> ScheduleSummaryResponse:
         from services.schedule_store import (
             claim_holder,
@@ -894,16 +899,21 @@ async def list_pipeline_schedules(
     return [ScheduleSummaryResponse.from_schedule(s, connector_ids=known) for s in schedules]
 
 
-def _visible_connector_ids() -> set[str] | None:
-    """Ids of every connector a schedule can resolve (the saved store and the
-    platform store the scheduler falls back to); None when either is unreadable."""
+def _visible_connector_ids() -> dict[str, str] | None:
+    """Every connector a schedule can resolve (the saved store and the platform
+    store the scheduler falls back to), id -> owning workspace; None when either
+    is unreadable. The owner decides, as in the runner, whether it resolves."""
     try:
         from services.connector_store import list_connectors
         from services.mongodb_service import get_mongodb_service
 
-        ids = {c.id for c in list_connectors()}
+        ids: dict[str, str] = {}
         for doc in get_mongodb_service().list_connectors():
-            ids.update(str(doc.get(k)) for k in ("_id", "id") if doc.get(k))
+            for key in ("_id", "id"):
+                if doc.get(key):
+                    ids[str(doc.get(key))] = str(doc.get("workspace_id") or "")
+        # The saved store wins, as in the runner's lookup order.
+        ids.update({c.id: str(c.workspace_id or "") for c in list_connectors()})
         return ids
     except Exception:  # noqa: BLE001 - unknown is not "deleted": fall back per row
         return None

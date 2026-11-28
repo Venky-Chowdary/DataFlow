@@ -2614,6 +2614,32 @@ def _release_empty_mapping_if_mapped(sched: PipelineSchedule) -> PipelineSchedul
     return released if isinstance(released, PipelineSchedule) else None
 
 
+def restore_if_unchanged(
+    schedule_id: str, expected: Mapping[str, Any], values: Mapping[str, Any]
+) -> str:
+    """Put ``values`` back on a schedule only if ``expected`` still holds.
+
+    Used to undo a change this process made (a connector delete that failed
+    after pausing or re-pointing its schedules). The write is raw: re-enabling
+    through :func:`update_schedule` would re-arm the slot and drop a pending
+    retry or an approved re-run. Returns ``restored``, ``changed`` (someone
+    changed one of the fields since; nothing written) or ``gone``.
+    """
+    with _CLAIM_LOCK:
+        schedules = _load_all()
+        for i, s in enumerate(schedules):
+            if s.id != schedule_id:
+                continue
+            current = s.to_dict()
+            if any(_canon(current.get(k)) != _canon(v) for k, v in expected.items()
+                   if k not in ("version", "updated_at")):
+                return "changed"
+            schedules[i] = PipelineSchedule.from_dict({**current, **dict(values)})
+            _save_all([schedules[i]] if _mongo_backend() is not None else schedules)
+            return "restored"
+    return "gone"
+
+
 def delete_schedule(schedule_id: str) -> bool:
     with _CLAIM_LOCK:
         schedules = _load_all()

@@ -286,7 +286,7 @@ def test_a_connector_delete_that_fails_leaves_the_schedules_as_they_were(env, mo
     audited = [e for e in env["events"] if e["event"] == "connector.delete.bound_schedules"]
     assert audited and audited[-1]["outcome"] == "failed", audited
     assert audited[-1]["details"]["connector_deleted"] is False
-    assert audited[-1]["details"]["schedules"][0]["result"] == "unchanged"
+    assert audited[-1]["details"]["schedules"][0]["result"] == "restored"
 
 
 def test_delete_schedules_reports_what_was_actually_deleted(env, monkeypatch):
@@ -300,9 +300,14 @@ def test_delete_schedules_reports_what_was_actually_deleted(env, monkeypatch):
 
     resp = client.delete(f"/api/v1/connectors/saved/{src.id}",
                          params={"bound_schedules": "delete_schedules", "acknowledge_schedules": sched.id})
-    assert resp.status_code == 200, resp.text
+    # Not a success: the schedule outlived its connector. It is paused, never
+    # left enabled, and the answer names it.
+    assert resp.status_code == 500, resp.text
     assert get_connector(src.id) is None
-    assert resp.json()["bound_schedules"]["schedules"][0]["result"] == "not_deleted"
+    detail = resp.json()["detail"]
+    assert detail["schedules"][0]["result"] == "not_deleted_paused"
+    assert "D432 nightly A" in detail["message"]
+    assert store.get_schedule(sched.id).enabled is False
     audited = [e for e in env["events"] if e["event"] == "connector.delete.bound_schedules"]
     assert audited[-1]["outcome"] == "failed", audited
 
@@ -371,3 +376,197 @@ def test_a_connector_only_the_platform_store_holds_is_not_shown_deleted(env):
     row = next(r for r in client.get("/api/v1/schedules/").json() if r["id"] == sched.id)
     assert row["connection_deleted"] == [], row
     assert client.get(f"/api/v1/schedules/{sched.id}").json()["connection_deleted"] == []
+
+
+# --- review round 2: an honest rollback ---------------------------------------
+
+
+def _ago(minutes: float) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+
+
+def _fail_connector_delete(monkeypatch) -> None:
+    import src.routers.saved_connectors_router as router
+
+    monkeypatch.setattr(router, "delete_connector", lambda *a, **k: False)
+
+
+def _pause_delete(client, src, *scheds):
+    return client.delete(f"/api/v1/connectors/saved/{src.id}", params={
+        "bound_schedules": "pause", "acknowledge_schedules": ",".join(s.id for s in scheds)})
+
+
+def _audits(env) -> list[dict]:
+    return [e for e in env["events"] if e["event"] == "connector.delete.bound_schedules"]
+
+
+def test_a_failed_delete_restores_a_pending_retry(env, monkeypatch):
+    from services.schedule_store import get_schedule, update_schedule
+
+    src, dst = _connector("d432-src"), _connector("d432-dst")
+    sched = _schedule("D432 retrying", src, dst, max_retries=2)
+    update_schedule(sched.id, {"retry_at": _ago(1), "retry_attempt": 1})
+    before = get_schedule(sched.id)
+    _fail_connector_delete(monkeypatch)
+
+    assert _pause_delete(env["client"], src, sched).status_code == 404
+    after = get_schedule(sched.id)
+    assert after.enabled is True
+    assert (after.retry_at, after.retry_attempt) == (before.retry_at, before.retry_attempt), after
+    assert after.next_run_at == before.next_run_at
+
+
+def test_a_failed_delete_keeps_an_approved_rerun_due_now(env, monkeypatch):
+    """Re-enabling re-armed the slot: an approved re-run moved to the next window
+    (a year away on a yearly cron)."""
+    from services.schedule_store import get_schedule, update_schedule
+
+    src, dst = _connector("d432-src"), _connector("d432-dst")
+    sched = _schedule("D432 approved", src, dst, cron="0 3 1 1 *", interval="cron")
+    update_schedule(sched.id, {"next_run_at": _ago(1), "next_run_reason": "approval"})
+    before = get_schedule(sched.id)
+    _fail_connector_delete(monkeypatch)
+
+    assert _pause_delete(env["client"], src, sched).status_code == 404
+    after = get_schedule(sched.id)
+    assert (after.next_run_at, after.next_run_reason) == (before.next_run_at, "approval"), after
+
+
+def test_the_undo_leaves_a_schedule_someone_changed_meanwhile(env, monkeypatch):
+    import src.routers.saved_connectors_router as router
+    from services.schedule_store import get_schedule, update_schedule
+
+    src, dst = _connector("d432-src"), _connector("d432-dst")
+    sched = _schedule("D432 contested", src, dst)
+
+    def _operator_edits_then_delete_fails(*a, **k):
+        # Between the pause and the undo, an operator edits the paused schedule.
+        update_schedule(sched.id, {"notify_on_success": True})
+        return False
+
+    monkeypatch.setattr(router, "delete_connector", _operator_edits_then_delete_fails)
+    resp = _pause_delete(env["client"], src, sched)
+    assert resp.status_code == 404, resp.text
+    assert "left as it is now" in resp.json()["detail"]["message"]
+    after = get_schedule(sched.id)
+    assert after.enabled is False and after.notify_on_success is True
+    assert _audits(env)[-1]["details"]["schedules"][0]["result"] == "changed_since_left_as_is"
+
+
+def test_an_undo_that_cannot_write_is_audited_and_named(env, monkeypatch):
+    import services.schedule_store as store
+
+    src, dst = _connector("d432-src"), _connector("d432-dst")
+    sched = _schedule("D432 stuck paused", src, dst)
+    _fail_connector_delete(monkeypatch)
+
+    def _down(*a, **k):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(store, "restore_if_unchanged", _down)
+    resp = _pause_delete(env["client"], src, sched)
+    assert resp.status_code == 500, resp.text
+    assert "D432 stuck paused" in resp.json()["detail"]["message"]
+    assert "store down" not in resp.text
+    audited = _audits(env)
+    assert audited and audited[-1]["outcome"] == "failed"
+    assert audited[-1]["details"]["schedules"][0]["result"] == "paused_not_restored"
+
+
+def test_a_pause_that_fails_midway_undoes_the_first_and_deletes_nothing(env, monkeypatch):
+    import services.schedule_store as store
+    from services.connector_store import get_connector
+
+    src, dst = _connector("d432-src"), _connector("d432-dst")
+    first = _schedule("D432 nightly A", src, dst)
+    second = _schedule("D432 nightly B", src, dst)
+    real = store.update_schedule
+
+    def _second_fails(schedule_id, patch, *a, **k):
+        if schedule_id == second.id and patch.get("enabled") is False:
+            raise RuntimeError("store down")
+        return real(schedule_id, patch, *a, **k)
+
+    monkeypatch.setattr(store, "update_schedule", _second_fails)
+    resp = _pause_delete(env["client"], src, first, second)
+    assert resp.status_code == 500, resp.text
+    assert get_connector(src.id) is not None
+    assert store.get_schedule(first.id).enabled is True and store.get_schedule(second.id).enabled is True
+    assert "D432 nightly B" in resp.json()["detail"]["message"]
+    results = {r["name"]: r["result"] for r in _audits(env)[-1]["details"]["schedules"]}
+    assert results == {"D432 nightly A": "restored", "D432 nightly B": "change_failed"}, results
+
+
+def test_a_schedule_delete_that_raises_never_leaves_an_enabled_orphan(env, monkeypatch):
+    import services.schedule_store as store
+    from services.connector_store import get_connector
+
+    src, dst = _connector("d432-src"), _connector("d432-dst")
+    first = _schedule("D432 nightly A", src, dst)
+    second = _schedule("D432 nightly B", src, dst)
+    real = store.delete_schedule
+
+    def _second_raises(schedule_id, *a, **k):
+        if schedule_id == second.id:
+            raise RuntimeError("store down")
+        return real(schedule_id, *a, **k)
+
+    monkeypatch.setattr(store, "delete_schedule", _second_raises)
+    resp = env["client"].delete(f"/api/v1/connectors/saved/{src.id}", params={
+        "bound_schedules": "delete_schedules", "acknowledge_schedules": f"{first.id},{second.id}"})
+    assert resp.status_code == 500, resp.text
+    assert get_connector(src.id) is None and store.get_schedule(first.id) is None
+    survivor = store.get_schedule(second.id)
+    assert survivor is not None and survivor.enabled is False, "an enabled schedule outlived its connector"
+    assert "D432 nightly B" in resp.json()["detail"]["message"]
+    audited = _audits(env)[-1]
+    assert audited["outcome"] == "failed" and audited["details"]["connector_deleted"] is True
+    results = {r["name"]: r["result"] for r in audited["details"]["schedules"]}
+    assert results == {"D432 nightly A": "deleted", "D432 nightly B": "not_deleted_paused"}, results
+
+
+def test_the_platform_route_guards_a_schedule_bound_by_either_id(env):
+    """A legacy document has an ObjectId ``_id`` and a UUID ``id``; deleted by
+    one, a schedule holding the other was not guarded."""
+    from services.mongodb_service import get_mongodb_service
+    from services.schedule_store import create_schedule
+
+    client = env["client"]
+    mongo = get_mongodb_service()
+    object_id = mongo.save_connector({"name": "legacy-pg", "type": "postgresql"})
+    mongo._connectors[object_id]["id"] = "uuid-legacy-pg"
+    dst = _connector("d432-dst")
+    create_schedule({
+        "name": "D432 bound by uuid", "source_connector_id": "uuid-legacy-pg", "source_table": "orders",
+        "dest_connector_id": dst.id, "dest_table": "orders_u", "interval": "daily",
+        "timezone": "UTC", "sync_mode": "full_refresh_overwrite", "enabled": True,
+        "mappings": [{"source": "id", "target": "id"}],
+    })
+    refused = client.delete(f"/api/v1/connectors/{object_id}")
+    assert refused.status_code == 409, refused.text
+    assert "D432 bound by uuid" in _detail(refused)["message"]
+
+
+def test_a_connector_of_another_workspace_shows_as_the_runner_sees_it(env):
+    from services.connector_store import create_connector
+    from services.schedule_store import create_schedule
+
+    client = env["client"]
+    foreign = create_connector({"name": "other-ws", "type": "postgresql", "role": "both",
+                                "host": "127.0.0.1", "port": 5432, "database": "x",
+                                "username": "x", "password": "not-a-real-secret", "workspace_id": "ws-other"})
+    dst = _connector("d432-dst")
+    sched = create_schedule({
+        "name": "D432 cross workspace", "source_connector_id": foreign.id, "source_table": "orders",
+        "dest_connector_id": dst.id, "dest_table": "orders_x", "interval": "daily", "workspace_id": "ws-mine",
+        "timezone": "UTC", "sync_mode": "full_refresh_overwrite", "enabled": True,
+        "mappings": [{"source": "id", "target": "id"}],
+    })
+    from services.schedule_runner import _resolve_connector_for_schedule
+
+    assert _resolve_connector_for_schedule(foreign.id, sched) is None  # the runner refuses it
+    row = next(r for r in client.get("/api/v1/schedules/").json() if r["id"] == sched.id)
+    assert row["connection_deleted"] == ["source"], row
+    assert client.get(f"/api/v1/schedules/{sched.id}").json()["connection_deleted"] == ["source"]
