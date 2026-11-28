@@ -223,11 +223,14 @@ def drift_sentence(drift: dict[str, Any]) -> str:
         return ""
     parts = []
     if drift.get("changed"):
-        parts.append(f"{int(drift['changed']):,} differ")
+        parts.append(f"{int(drift['changed']):,} changed without moving the cursor")
     if drift.get("missing_in_destination"):
         parts.append(f"{int(drift['missing_in_destination']):,} missing from the destination")
     if drift.get("destination_only"):
-        parts.append(f"{int(drift['destination_only']):,} only in the destination")
+        parts.append(
+            f"{int(drift['destination_only']):,} only in the destination "
+            "(deleted at the source, or added there by hand)"
+        )
     keys = ", ".join(str(k) for k in drift.get("sample_keys") or [])
     return (
         f"Out-of-window drift: {n:,} row(s) outside this run's cursor window "

@@ -167,6 +167,9 @@ def _boundary_rows_already_landed(
             # The write path's remap basis — the same one Gate-8's re-read uses.
             remap_dest_types=cfg.fingerprint_dest_types,
             destination_pk_columns=list(cfg.pk_target_cols or []),
+            # Compared as the recipe wrote them (D359); a recipe without a
+            # one-to-one image fails open below, as any upsert dedupe does.
+            shape_runner=cfg.shape_runner,
         )
         if drop:
             _stream.logger.info(

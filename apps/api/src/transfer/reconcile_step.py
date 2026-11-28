@@ -3421,6 +3421,12 @@ def _maybe_engine_profile_ladder(
 
 
 
+#: Engines :func:`_read_verify_rows` can re-read; any other returns ``[]``.
+_VERIFY_READ_ENGINES = frozenset(
+    {"sqlite", "mysql", "snowflake", "sqlserver", "mssql", "azure_sql", "postgresql", "redshift"}
+)
+
+
 def _read_verify_rows(
     db_type: str,
     cfg: dict[str, Any],
@@ -3543,6 +3549,11 @@ def _covered_keyed_noop_verify(
     from .connector_capabilities import resolve_driver_type
 
     src_type = resolve_driver_type(source_endpoint.format)
+    if str(src_type or "").strip().lower() not in _VERIFY_READ_ENGINES:
+        # D421: a file or object source has no population re-read here. Its
+        # empty "re-read" reported every destination key as "only in the
+        # destination" on a no-op poll. No re-read, no drift claim.
+        return None
     src_cfg = resolve_connector_config(source_endpoint)
     dest_cfg = resolve_connector_config(endpoint)
     map_list = mappings or []
@@ -3622,9 +3633,13 @@ def _covered_keyed_noop_verify(
     from services.incremental_drift import attach_drift, measure_drift
 
     pairs = list(verify_pairs)
-    as_target = [
-        {t: r.get(s) for s, t in pairs} for r in src_rows if isinstance(r, dict)
-    ]
+    as_target = _noop_source_as_written(
+        [r for r in src_rows if isinstance(r, dict)],
+        pairs=pairs, mappings=map_list, dest_summary=dest_summary, db_type=db_type,
+        src_type=src_type,
+    )
+    if as_target is None:
+        return None
     drift = measure_drift(
         source_rows=as_target,
         target_rows=[r for r in dest_rows if isinstance(r, dict)],
@@ -3648,6 +3663,62 @@ def _covered_keyed_noop_verify(
             resource=str(endpoint.table or ""),
         )
     return None
+
+
+def _noop_source_as_written(
+    src_rows: list[dict],
+    *,
+    pairs: list[tuple[str, str]],
+    mappings: list[dict],
+    dest_summary: dict[str, Any],
+    db_type: str,
+    src_type: str,
+) -> list[dict] | None:
+    """The re-read source rows as this route writes them, keyed by destination name.
+
+    D421: compared raw, every transformed cell (``lower``, ``hash_pii``, a
+    recipe step) read as out-of-window drift on a quiet re-run ("30 differ")
+    although nothing had changed. The rows run through the route's recipe (the
+    steps the run's ``shape_proof`` pinned) and then the writer's own mapping.
+    ``None`` when that image cannot be built (a recipe that is not one row in,
+    one row out, or that refuses a row): no drift claim is made then.
+    """
+    rows = src_rows
+    steps = ((dest_summary or {}).get("shape_proof") or {}).get("steps")
+    if dest_summary.get("shape_recipe_hash") and not steps:
+        return None
+    if steps:
+        from services.shape_apply import TYPED_VALUE_SOURCES, build_shape_runner
+
+        try:
+            runner = build_shape_runner(
+                {"steps": list(steps)},
+                typed_values=str(src_type or "").lower() in TYPED_VALUE_SOURCES,
+            )
+            shaped = runner.records(rows) if runner is not None else rows
+            held = runner.drain() if runner is not None else []
+        except Exception:  # noqa: BLE001 - an image that cannot be built is no claim
+            _logger.debug("no-op drift: the recipe image could not be built", exc_info=True)
+            return None
+        if held or len(shaped) != len(rows):
+            return None
+        rows = shaped
+    from services.verification_ladder import mappings_rewrite_written_cells
+
+    if mappings_rewrite_written_cells(mappings):
+        targets = [t for _s, t in pairs]
+        written = _source_rows_as_written(
+            rows,
+            mappings=mappings,
+            target_cols=targets,
+            dest_types={},
+            dest_type=db_type,
+            validation_mode=str(dest_summary.get("validation_mode") or "strict"),
+        )
+        if len(written) != len(rows):
+            return None
+        return written
+    return [{t: r.get(s) for s, t in pairs} for r in rows]
 
 
 def _ladder_key(row: Any, key_cols: list[str]) -> tuple[str, ...] | None:
